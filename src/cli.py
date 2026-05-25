@@ -68,6 +68,19 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         logger.error("自选股列表为空，终止")
         return {"error": "empty_watchlist", "crawled": 0, "alerts": 0}
 
+    # Whitelist filter
+    whitelist = cfg.crawler.get("whitelist", [])
+    if whitelist:
+        before = len(stocks)
+        stocks = [s for s in stocks if s["stock_code"] in whitelist]
+        skipped = set(whitelist) - {s["stock_code"] for s in stocks}
+        logger.info(f"白名单模式: {len(stocks)}/{before} 只 (配置 {len(whitelist)} 只)")
+        if skipped:
+            logger.warning(f"白名单中以下股票不在 watchlist: {skipped}")
+        if not stocks:
+            logger.error("白名单过滤后为空，终止")
+            return {"error": "empty_whitelist", "crawled": 0, "alerts": 0}
+
     # Crawl all stocks (sequential)
     logger.info(f"开始爬取 {len(stocks)} 只自选股 ...")
     start_time = time.time()

@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
         "timeout_seconds": 30,
         "max_retries": 0,         # no immediate retry, retry on next schedule
         "concurrency": 1,          # sequential (Playwright single-process)
+        "whitelist": [],            # 非空时仅爬取列表中的股票，空=全量
     },
     "detector": {
         "z_score_window_days": 14,
