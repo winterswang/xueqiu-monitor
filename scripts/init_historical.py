@@ -34,13 +34,31 @@ def crawl_baseline(code: str, timeout: int = 30) -> dict:
     """
     try:
         from xueqiu_analyzer.crawler import XueqiuCrawler
+        # Convert code format: 600519.SH → SH600519 for xueqiu URL
+        xq_code = _to_xueqiu_code(code)
         crawler = XueqiuCrawler({"headless": True, "delay_min": 1, "delay_max": 2})
-        result = crawler.crawl(code, max_pages=1, max_articles=0)
+        result = crawler.crawl(xq_code, max_pages=1, max_articles=0)
         posts_count = len(result.discussions) + len(result.news)
         return {"posts_count": posts_count, "sentiment_avg": 0.0}
     except Exception as e:
         logger.error(f"Crawl failed for {code}: {e}")
         return None
+
+
+def _to_xueqiu_code(code: str) -> str:
+    """Convert monitor code format to xueqiu URL format.
+    
+    .SH → SH prefix, .SZ → SZ prefix, .HK → 5-digit, .US → strip suffix
+    """
+    if code.endswith('.SH'):
+        return 'SH' + code[:-3]
+    if code.endswith('.SZ'):
+        return 'SZ' + code[:-3]
+    if code.endswith('.HK'):
+        return code[:-3].zfill(5)
+    if code.endswith('.US'):
+        return code[:-3]
+    return code
 
 
 def generate_historical_stats(

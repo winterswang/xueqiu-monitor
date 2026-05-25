@@ -133,6 +133,14 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) >= 2]
 
 
+# Chinese stopwords — xueqiu UI noise and common low-signal words
+_CN_STOPWORDS = {
+    '讨论', '来源', '回复', '小时前', '来自', '转发', '关注', '发布', '查看',
+    '评论', '单位', '扫描', '分享', '收藏', '展开', '全部', '公告',
+    '亿元', '万美元', '亿港元', '亿美元',  # unit words, not signal
+}
+
+
 def compute_tfidf(
     documents: list[str],
     min_df: int = 2,
@@ -152,7 +160,7 @@ def compute_tfidf(
             min_df=min_df,
             max_df=max_df,
             ngram_range=ngram_range,
-            stop_words=None,
+            stop_words=list(_CN_STOPWORDS),
         )
         tfidf_matrix = vectorizer.fit_transform(documents)
         feature_names = vectorizer.get_feature_names_out()

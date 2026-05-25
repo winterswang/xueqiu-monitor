@@ -143,6 +143,9 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
                 "author": d.author or "",
                 "time": d.time or "",
                 "sentiment_score": 0.0,  # placeholder — LLM later
+                "comment_count": getattr(d, "comment_count", 0) or 0,
+                "forward_count": getattr(d, "forward_count", 0) or 0,
+                "like_count": getattr(d, "like_count", 0) or 0,
             })
         for n in crawl_result.news:
             posts.append({

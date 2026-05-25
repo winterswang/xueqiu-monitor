@@ -105,6 +105,9 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             comments_list.append(Comment(
                 snapshot_id=snapshot_id,
                 post_id=post.get("post_id", ""),
+                comment_count=post.get("comment_count", 0),
+                forward_count=post.get("forward_count", 0),
+                like_count=post.get("like_count", 0),
             ))
         if comments_list:
             n_comments = db.insert_comments(db_path, comments_list)
