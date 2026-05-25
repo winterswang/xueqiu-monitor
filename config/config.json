@@ -1,0 +1,14 @@
+{
+  "db_path": "data/monitor.db",
+  "crawler": {
+    "timeout_seconds": 30,
+    "max_retries": 0,
+    "concurrency": 1
+  },
+  "detector": {
+    "z_score_window_days": 14
+  },
+  "notification": {
+    "webhook_url": ""
+  }
+}

@@ -1,0 +1,94 @@
+"""xueqiu-monitor: configuration management"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_CONFIG = {
+    "db_path": "data/monitor.db",
+    "watchlist_path": "../morning-brief/data/watchlist.json",
+    "crawler": {
+        "timeout_seconds": 30,
+        "max_retries": 0,         # no immediate retry, retry on next schedule
+        "concurrency": 1,          # sequential (Playwright single-process)
+    },
+    "detector": {
+        "z_score_window_days": 14,
+        "z_score_threshold": 2.0,
+        "tfidf_min_df": 2,
+        "tfidf_max_df": 0.8,
+        "tfidf_ngram_range": [1, 2],
+    },
+    "filter": {
+        "ad_keywords": ["开户", "佣金", "万一", "万0.5", "低手续费", "加群", "荐股", "内幕"],
+        "duplicate_similarity_threshold": 0.85,
+        "short_post_threshold": 20,
+        "p0_z_threshold": 3.0,
+        "p1_z_threshold": 2.0,
+    },
+    "notification": {
+        "webhook_url": "",         # set via env FEISHU_WEBHOOK_URL
+        "push_timeout": 5,         # seconds
+        "max_retries": 2,
+    },
+    "cold_start": {
+        "enabled": True,
+        "days": 28,
+        "min_data_points": 7,      # minimum data points before Z-score is meaningful
+    },
+    "feedback": {
+        "useful_delta": 0.1,
+        "useless_delta": -0.1,
+        "decay_days": 7,
+        "decay_rate": 0.05,
+        "weight_floor": 0.3,
+    },
+    "schedule": {
+        "interval_hours": 4,
+    },
+}
+
+
+@dataclass
+class Config:
+    """Runtime configuration loaded from JSON + env overrides."""
+    db_path: str = "data/monitor.db"
+    watchlist_path: str = ""
+    crawler: dict = field(default_factory=lambda: DEFAULT_CONFIG["crawler"].copy())
+    detector: dict = field(default_factory=lambda: DEFAULT_CONFIG["detector"].copy())
+    filter: dict = field(default_factory=lambda: DEFAULT_CONFIG["filter"].copy())
+    notification: dict = field(default_factory=lambda: DEFAULT_CONFIG["notification"].copy())
+    cold_start: dict = field(default_factory=lambda: DEFAULT_CONFIG["cold_start"].copy())
+    feedback: dict = field(default_factory=lambda: DEFAULT_CONFIG["feedback"].copy())
+    schedule: dict = field(default_factory=lambda: DEFAULT_CONFIG["schedule"].copy())
+
+    @classmethod
+    def from_file(cls, path: str) -> Config:
+        """Load config from JSON file, merge env overrides."""
+        cfg = DEFAULT_CONFIG.copy()
+        p = Path(path)
+        if p.exists():
+            user_cfg = json.loads(p.read_text())
+            _deep_merge(cfg, user_cfg)
+        cfg["notification"]["webhook_url"] = os.environ.get(
+            "FEISHU_WEBHOOK_URL", cfg.get("notification", {}).get("webhook_url", "")
+        )
+        return cls(**cfg)
+
+    @classmethod
+    def default(cls) -> Config:
+        """Default config (mostly for tests)."""
+        return cls(**DEFAULT_CONFIG)
+
+
+def _deep_merge(base: dict, override: dict) -> None:
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
