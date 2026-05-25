@@ -129,9 +129,9 @@ def filter_alerts(
     for alert in alerts:
         if alert.filtered:
             continue
-        if ad_set:
+        if len(ad_set) / max(len(posts_data), 1) > 0.2:
             alert.filtered = 1
-            alert.filter_reason = f"广告关键词匹配 ({len(ad_set)}帖)"
+            alert.filter_reason = f"广告帖占比过高 ({len(ad_set)}/{len(posts_data)}帖)"
         elif len(dup_set) / max(len(posts_data), 1) > 0.5:
             alert.filtered = 1
             alert.filter_reason = f"重复率过高 ({len(dup_set)}/{len(posts_data)}帖)"

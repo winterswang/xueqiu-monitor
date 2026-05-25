@@ -27,7 +27,7 @@ import notifier
 import feedback as fbloop
 from models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
-    HotWordEvent, PushHistory,
+    HotWordEvent, PushHistory, Comment, Announcement,
 )
 
 
@@ -98,6 +98,32 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         )
         snapshot_id = db.insert_snapshot(db_path, snap)
         logger.debug(f"  {stock_code}: snapshot_id={snapshot_id}")
+
+        # ── Store comments ──
+        comments_list: list[Comment] = []
+        for post in cr["posts_data"]:
+            comments_list.append(Comment(
+                snapshot_id=snapshot_id,
+                post_id=post.get("post_id", ""),
+            ))
+        if comments_list:
+            n_comments = db.insert_comments(db_path, comments_list)
+            logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
+
+        # ── Store announcements ──
+        anns_list: list[Announcement] = []
+        for ann in cr.get("announcements", []):
+            anns_list.append(Announcement(
+                snapshot_id=snapshot_id,
+                stock_code=stock_code,
+                ann_title=ann.get("title", ""),
+                ann_date=int(time.time()),
+                ann_type=ann.get("notice_type", ""),
+                is_new=0,
+            ))
+        if anns_list:
+            n_anns = db.insert_announcements(db_path, anns_list)
+            logger.debug(f"  {stock_code}: 写入 {n_anns} 条公告")
 
         # ── Detection ──
         # Get historical stats

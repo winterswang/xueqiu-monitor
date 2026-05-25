@@ -91,15 +91,30 @@ def get_previous_snapshot(db_path: str, stock_code: str, before_time: int) -> Cr
 # ════════════════════════════════════════════════════════
 
 def insert_sentiment_stat(db_path: str, stat: SentimentStat) -> int:
+    """Upsert sentiment stat: INSERT new row or UPDATE on (stock_code, stat_date) conflict."""
     d = stat.to_dict()
     del d["id"]
     with _connect(db_path) as conn:
+        # Ensure unique constraint exists (idempotent — safe for both new and existing databases)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_senti_unique "
+            "ON sentiment_stats(stock_code, stat_date)"
+        )
         cur = conn.execute(
             """INSERT INTO sentiment_stats (stock_code, stat_date, posts_count, sentiment_mean, sentiment_std, z_score, z_alert)
-               VALUES (:stock_code, :stat_date, :posts_count, :sentiment_mean, :sentiment_std, :z_score, :z_alert)""",
+               VALUES (:stock_code, :stat_date, :posts_count, :sentiment_mean, :sentiment_std, :z_score, :z_alert)
+               ON CONFLICT(stock_code, stat_date) DO UPDATE SET
+               posts_count    = excluded.posts_count,
+               sentiment_mean = excluded.sentiment_mean,
+               sentiment_std  = excluded.sentiment_std,
+               z_score        = excluded.z_score,
+               z_alert        = excluded.z_alert
+               RETURNING id""",
             d
         )
-        return cur.lastrowid
+        row = cur.fetchone()
+        conn.commit()
+        return row["id"] if row else cur.lastrowid
 
 
 def get_historical_stats(db_path: str, stock_code: str, days: int = 14) -> list[SentimentStat]:
