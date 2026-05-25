@@ -74,17 +74,44 @@ def detect_sentiment_shift(
     curr_sentiment_avg: float,
     historical_stats: list[SentimentStat],
     window_days: int = 14,
+    prev_snapshot_sentiment: float | None = None,
 ) -> ChangeAlert | None:
-    """Detect significant sentiment shift."""
+    """Detect significant sentiment shift.
+
+    Two triggers (two-period direct threshold takes priority):
+    1. Direct threshold: |curr - prev_snapshot| > 0.2 → immediate alert
+    2. Z-score: |Z| > 2.0 against 14-day historical window
+    """
     if not historical_stats:
         return None
+
+    stock_code = historical_stats[0].stock_code
+
+    # ── Trigger 1: two-period direct threshold ──
+    if prev_snapshot_sentiment is not None:
+        raw_shift = curr_sentiment_avg - prev_snapshot_sentiment
+        if abs(raw_shift) > 0.2:
+            return ChangeAlert(
+                stock_code=stock_code,
+                alert_type="sentiment_shift",
+                z_score=0.0,
+                magnitude=round(abs(raw_shift), 3),
+                detail={
+                    "curr_sentiment": round(curr_sentiment_avg, 3),
+                    "prev_snapshot_sentiment": round(prev_snapshot_sentiment, 3),
+                    "shift": round(raw_shift, 3),
+                    "trigger": "two_period",
+                },
+            )
+
+    # ── Trigger 2: Z-score against historical window ──
     hist_means = [s.sentiment_mean for s in historical_stats[-window_days:]]
     z = compute_z_score(curr_sentiment_avg, hist_means)
     if abs(z) <= 2.0:
         return None
     shift = curr_sentiment_avg - float(np.mean(hist_means)) if hist_means else 0.0
     return ChangeAlert(
-        stock_code=historical_stats[0].stock_code,
+        stock_code=stock_code,
         alert_type="sentiment_shift",
         z_score=round(z, 2),
         magnitude=round(abs(shift), 3),
@@ -92,6 +119,7 @@ def detect_sentiment_shift(
             "curr_sentiment": round(curr_sentiment_avg, 3),
             "prev_sentiment": round(float(np.mean(hist_means)), 3),
             "shift": round(shift, 3),
+            "trigger": "z_score",
         },
     )
 

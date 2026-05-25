@@ -3,6 +3,7 @@
 Filters noise:
 - Ad keyword detection
 - Duplicate short-text dedup (>85% similarity)
+- Content-level similarity dedup (>85%)
 - Short post filtering (<20 chars)
 - P0/P1/P2 priority assignment
 - Cold-start gate (no push during accumulation phase)
@@ -10,6 +11,7 @@ Filters noise:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import logging
 import re
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 AD_KEYWORDS = ["开户", "佣金", "万一", "万0.5", "低手续费", "加群", "荐股", "内幕"]
 DUPLICATE_SIMILARITY_THRESHOLD = 0.85
+CONTENT_SIMILARITY_THRESHOLD = 0.85
 SHORT_POST_THRESHOLD = 20
 P0_Z_THRESHOLD = 3.0
 P1_Z_THRESHOLD = 2.0
@@ -32,6 +35,18 @@ P1_Z_THRESHOLD = 2.0
 # ════════════════════════════════════════════════════════
 # Filter logic
 # ════════════════════════════════════════════════════════
+
+def check_content_similarity(text1: str, text2: str) -> float:
+    """Compute content similarity (0.0-1.0) using difflib.SequenceMatcher.
+
+    Both texts are truncated to 500 chars for performance.
+    """
+    t1 = (text1 or "")[:500]
+    t2 = (text2 or "")[:500]
+    if not t1 and not t2:
+        return 1.0
+    return difflib.SequenceMatcher(None, t1, t2).ratio()
+
 
 def filter_ads(posts_data: list[dict], keywords: list[str] | None = None) -> list[int]:
     """Return indices of posts matching ad keywords."""
@@ -46,26 +61,52 @@ def filter_ads(posts_data: list[dict], keywords: list[str] | None = None) -> lis
     return ad_indices
 
 
-def filter_duplicates(posts_data: list[dict], threshold: float | None = None) -> list[int]:
-    """Detect near-duplicate posts via content hash similarity (simplified).
+def filter_duplicates(
+    posts_data: list[dict],
+    threshold: float | None = None,
+    content_threshold: float | None = None,
+) -> tuple[list[int], list[int]]:
+    """Detect duplicate posts via title-hash and content similarity.
 
-    Uses normalized content length + first 200 chars hash for fast dedup.
-    Returns indices of duplicates (keep first occurrence).
+    Stage 1 (title hash): hash first 200 chars of title+content for fast dedup.
+    Stage 2 (content similarity): difflib.SequenceMatcher comparison,
+    content truncated to 500 chars.
+
+    Returns (title_dup_indices, content_dup_indices).
     """
-    thresh = threshold or DUPLICATE_SIMILARITY_THRESHOLD
-    seen_hashes: dict[str, int] = {}  # hash → first index
-    dup_indices = []
+    hash_thresh = threshold or DUPLICATE_SIMILARITY_THRESHOLD
+    sim_thresh = content_threshold or CONTENT_SIMILARITY_THRESHOLD
+    seen_hashes: dict[str, int] = {}   # hash → first index
+    seen_contents: list[str] = []      # first-kept contents for similarity check
+    title_dup_indices: list[int] = []
+    content_dup_indices: list[int] = []
+
     for i, p in enumerate(posts_data):
-        text = (p.get("title", "") + p.get("content", ""))[:200].strip()
+        text = ((p.get("title") or "") + (p.get("content") or ""))[:200]
         if len(text) < 10:
             h = str(i)  # unique
         else:
             h = hashlib.md5(text.encode()).hexdigest()
+
+        # Stage 1: title-hash dup check
         if h in seen_hashes:
-            dup_indices.append(i)
-        else:
+            title_dup_indices.append(i)
+            continue
+
+        # Stage 2: content similarity check against all kept posts
+        content = p.get("content", "") or ""
+        if len(content) >= 10:
+            for kept_content in seen_contents:
+                if check_content_similarity(content, kept_content) > sim_thresh:
+                    content_dup_indices.append(i)
+                    break
+
+        # Not a duplicate → record for future comparison
+        if i not in content_dup_indices:
             seen_hashes[h] = i
-    return dup_indices
+            seen_contents.append(content)
+
+    return title_dup_indices, content_dup_indices
 
 
 def filter_short_posts(posts_data: list[dict], min_chars: int | None = None) -> list[int]:
@@ -110,6 +151,7 @@ def filter_alerts(
     # Merge config
     ad_kw = config.get("ad_keywords", AD_KEYWORDS) if config else AD_KEYWORDS
     dup_thresh = config.get("duplicate_similarity_threshold", DUPLICATE_SIMILARITY_THRESHOLD) if config else DUPLICATE_SIMILARITY_THRESHOLD
+    content_sim_thresh = config.get("content_similarity_threshold", CONTENT_SIMILARITY_THRESHOLD) if config else CONTENT_SIMILARITY_THRESHOLD
     short_thresh = config.get("short_post_threshold", SHORT_POST_THRESHOLD) if config else SHORT_POST_THRESHOLD
 
     # Step 1: assign priority
@@ -120,7 +162,8 @@ def filter_alerts(
 
     # Step 2: detect noise posts
     ad_set = set(filter_ads(posts_data, ad_kw))
-    dup_set = set(filter_duplicates(posts_data, dup_thresh))
+    title_dup, content_dup = filter_duplicates(posts_data, dup_thresh, content_sim_thresh)
+    dup_set = set(title_dup + content_dup)
     short_set = set(filter_short_posts(posts_data, short_thresh))
     noise_set = ad_set | dup_set | short_set
 
@@ -133,8 +176,17 @@ def filter_alerts(
             alert.filtered = 1
             alert.filter_reason = f"广告帖占比过高 ({len(ad_set)}/{len(posts_data)}帖)"
         elif len(dup_set) / max(len(posts_data), 1) > 0.5:
+            parts = []
+            if title_dup:
+                parts.append(f"标题重复{len(title_dup)}帖")
+            if content_dup:
+                parts.append(f"内容相似度>85%{len(content_dup)}帖")
+            reason_detail = ", ".join(parts)
             alert.filtered = 1
-            alert.filter_reason = f"重复率过高 ({len(dup_set)}/{len(posts_data)}帖)"
+            alert.filter_reason = (
+                f"重复帖({len(dup_set)}/{len(posts_data)})"
+                + (f": {reason_detail}" if reason_detail else "")
+            )
         elif len(short_set) / max(len(posts_data), 1) > 0.7:
             alert.filtered = 1
             alert.filter_reason = f"短帖占比过高 ({len(short_set)}/{len(posts_data)}帖)"
