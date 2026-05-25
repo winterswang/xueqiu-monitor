@@ -40,7 +40,7 @@ def load_watchlist(config: dict) -> list[dict]:
             conn = sqlite3.connect(mb_db)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT stock_code, stock_name FROM watchlist WHERE is_active=1"
+                "SELECT stock_code, stock_name FROM watchlist WHERE is_active=1 AND is_index=0"
             ).fetchall()
             conn.close()
             if rows:
