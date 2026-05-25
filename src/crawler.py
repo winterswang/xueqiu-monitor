@@ -222,6 +222,31 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30) -> list[dict]:
 # Helpers
 # ════════════════════════════════════════════════════════
 
+def _to_xueqiu_code(stock_code: str) -> str:
+    """Convert watchlist code format to Xueqiu URL format.
+
+    Watchlist uses dot-separated suffixes (e.g. 600519.SH, CRWV.US, 1913.HK).
+    Xueqiu URLs use different conventions per market:
+      - SH: 600519.SH → SH600519
+      - SZ: 000858.SZ → SZ000858
+      - HK: 1913.HK → 01913 (zero-pad to 5 digits)
+      - US: CRWV.US → CRWV (strip .US suffix)
+      - BRK.B.US → BRK.B (preserve dot within ticker)
+
+    Returns unchanged code if format is unrecognized (e.g. already SH600519).
+    """
+    if stock_code.endswith('.SH'):
+        return 'SH' + stock_code[:-3]
+    if stock_code.endswith('.SZ'):
+        return 'SZ' + stock_code[:-3]
+    if stock_code.endswith('.HK'):
+        num_part = stock_code[:-3]
+        return num_part.zfill(5)
+    if stock_code.endswith('.US'):
+        return stock_code[:-3]  # strip .US suffix
+    return stock_code
+
+
 def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
     """Execute xueqiu-analyzer crawl with a hard timeout.
 
@@ -256,9 +281,10 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
 
     def _do_crawl():
         try:
+            xq_code = _to_xueqiu_code(stock_code)
             crawler = XueqiuCrawler({"headless": True})
             result_holder["result"] = crawler.crawl(
-                stock_code, max_pages=3, max_articles=10
+                xq_code, max_pages=3, max_articles=10
             )
         except Exception as e:
             result_holder["error"] = str(e)
