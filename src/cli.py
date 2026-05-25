@@ -222,12 +222,14 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             all_alerts.append(alert)
 
     # ── Notification ──
-    webhook = cfg.notification.get("webhook_url", "")
-    if not dry_run and webhook:
-        p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
-        p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
+    pending_path = "/tmp/xueqiu_monitor_pending.json"
+    p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
+    p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
 
-        # P0: immediate push (one per alert)
+    pending_messages: list[str] = []
+
+    if not dry_run:
+        # P0: format immediate alert messages (one per alert)
         for alert in p0_alerts:
             extra = stock_extra.get(alert.stock_code, {})
             key_data = {
@@ -245,26 +247,33 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "priority": alert.priority,
                 "trigger_time": extra.get("trigger_time", ""),
             }
-            ok = notifier.push_immediate(alert, key_data, webhook, cfg.notification.get("push_timeout", 5))
+            msg = notifier.format_immediate_alert_message(alert, key_data)
+            pending_messages.append(msg)
             db.insert_push(db_path, PushHistory(
                 stock_code=alert.stock_code,
                 alert_id=alert.id or 0,
                 priority="P0",
                 content=f"Z={alert.z_score} {alert.alert_type}",
-                status="success" if ok else "failed",
+                status="pending",
             ))
 
-        # P1: digest push
+        # P1: format digest message
         if p1_alerts:
-            ok = notifier.push_digest(p1_alerts, webhook, cfg.notification.get("push_timeout", 5))
+            msg = notifier.format_digest_message(p1_alerts)
+            if msg:
+                pending_messages.append(msg)
             for alert in p1_alerts:
                 db.insert_push(db_path, PushHistory(
                     stock_code=alert.stock_code,
                     alert_id=alert.id or 0,
                     priority="P1",
                     content="digest",
-                    status="success" if ok else "failed",
+                    status="pending",
                 ))
+
+        # Write pending messages for external scheduler
+        if pending_messages:
+            notifier.write_pending_messages(pending_messages, pending_path)
 
     # ── Daily report ──
     report = notifier.generate_daily_report(all_alerts)
