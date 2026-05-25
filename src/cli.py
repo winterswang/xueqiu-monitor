@@ -78,6 +78,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     # Process each crawl result
     total_alerts = 0
     all_alerts: list[ChangeAlert] = []
+    stock_extra: dict[str, dict] = {}  # supplemental data for push_immediate key_data
 
     for cr in crawl_results:
         if cr["status"] != "success":
@@ -124,6 +125,16 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
         alerts = [a for a in [spike_alert, sent_alert] if a is not None]
 
+        # Compute sample std from historical sentiment means
+        sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
+        if len(sentiment_values) >= 2:
+            n = len(sentiment_values)
+            mean_s = sum(sentiment_values) / n
+            variance_s = sum((x - mean_s) ** 2 for x in sentiment_values) / (n - 1)
+            computed_std = variance_s ** 0.5
+        else:
+            computed_std = 0.0
+
         # ── Store sentiment stat for next run ──
         today_start = now // 86400 * 86400
         stat = SentimentStat(
@@ -131,7 +142,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             stat_date=today_start,
             posts_count=cr["posts_count"],
             sentiment_mean=cr["sentiment_avg"],
-            sentiment_std=0.0,  # computed over historical window
+            sentiment_std=computed_std,
             z_score=max(a.z_score for a in alerts) if alerts else 0.0,
             z_alert=1 if alerts else 0,
         )
@@ -158,6 +169,23 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     z_score=0.0,  # computed above
                 ))
 
+        # ── Collect supplemental data for push key_data (§2.5)
+        prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
+        prev_posts = hist_stats[0].posts_count if hist_stats else 0
+        hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
+        post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
+
+        stock_extra[stock_code] = {
+            "stock_name": _get_stock_name(stocks, stock_code),
+            "sentiment_avg": cr["sentiment_avg"],
+            "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
+            "posts_count": cr["posts_count"],
+            "posts_count_delta": cr["posts_count"] - prev_posts,
+            "hot_words": [w for w, _ in hot_words_top],
+            "post_titles": post_titles_top,
+            "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+        }
+
         # ── Filter ──
         alerts = rule_filter.filter_alerts(alerts, cr["posts_data"], cold, cfg.filter)
 
@@ -175,8 +203,23 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
         # P0: immediate push (one per alert)
         for alert in p0_alerts:
-            stock_name = _get_stock_name(stocks, alert.stock_code)
-            ok = notifier.push_immediate(alert, webhook, stock_name, cfg.notification.get("push_timeout", 5))
+            extra = stock_extra.get(alert.stock_code, {})
+            key_data = {
+                "stock_code": alert.stock_code,
+                "stock_name": extra.get("stock_name", ""),
+                "alert_type": alert.alert_type,
+                "z_score": alert.z_score,
+                "sentiment_avg": extra.get("sentiment_avg", 0.0),
+                "sentiment_shift": extra.get("sentiment_shift", 0.0),
+                "posts_count": extra.get("posts_count", 0),
+                "posts_count_delta": extra.get("posts_count_delta", 0),
+                "hot_words": extra.get("hot_words", []),
+                "post_titles": extra.get("post_titles", []),
+                "magnitude": alert.magnitude,
+                "priority": alert.priority,
+                "trigger_time": extra.get("trigger_time", ""),
+            }
+            ok = notifier.push_immediate(alert, key_data, webhook, cfg.notification.get("push_timeout", 5))
             db.insert_push(db_path, PushHistory(
                 stock_code=alert.stock_code,
                 alert_id=alert.id or 0,

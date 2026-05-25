@@ -20,11 +20,23 @@ from models import (
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    """Open SQLite connection with WAL mode, busy timeout, and retry.
+
+    Per §3.4: waits 3s (busy_timeout=3000ms) and retries up to 3 times.
+    """
+    for attempt in range(3):
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=3000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except sqlite3.OperationalError as e:
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            raise
 
 
 def init_db(db_path: str, schema_path: str | None = None) -> None:

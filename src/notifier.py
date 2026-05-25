@@ -43,8 +43,8 @@ def _send_webhook(webhook_url: str, payload: dict, timeout: int = 5) -> bool:
         return False
 
 
-def _format_alert_card(alert: ChangeAlert, stock_name: str = "") -> dict:
-    """Build Feishu interactive card for a single alert."""
+def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
+    """Build Feishu interactive card for a single alert with key data fields."""
     priority_emoji = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
     type_labels = {
         "sentiment_shift": "情感偏移",
@@ -54,13 +54,23 @@ def _format_alert_card(alert: ChangeAlert, stock_name: str = "") -> dict:
     }
     emoji = priority_emoji.get(alert.priority, "⚪")
     type_label = type_labels.get(alert.alert_type, alert.alert_type)
+    stock_name = key_data.get("stock_name", "")
     name_line = f" {stock_name}" if stock_name else ""
 
     title = f"{emoji} [{alert.priority}] {alert.stock_code}{name_line} — {type_label}"
     content = [
         f"Z-score: {alert.z_score:.2f}",
+        f"情感均值: {key_data.get('sentiment_avg', 0):.2f}",
+        f"情感偏移: {key_data.get('sentiment_shift', 0):.2f}",
         f"幅度: {alert.magnitude:.2f}",
+        f"新帖数: {key_data.get('posts_count', 0)} (变化: {key_data.get('posts_count_delta', 0):+d})",
     ]
+    hot_words = key_data.get("hot_words", [])
+    if hot_words:
+        content.append(f"热词: {', '.join(hot_words[:3])}")
+    post_titles = key_data.get("post_titles", [])
+    if post_titles:
+        content.append(f"高互动帖: {post_titles[0][:50]}")
     if alert.filter_reason:
         content.append(f"过滤: {alert.filter_reason}")
 
@@ -93,12 +103,12 @@ def _format_alert_card(alert: ChangeAlert, stock_name: str = "") -> dict:
 
 def push_immediate(
     alert: ChangeAlert,
-    webhook_url: str,
-    stock_name: str = "",
+    key_data: dict,
+    webhook_url: str = "",
     timeout: int = 5,
 ) -> bool:
-    """P0 immediate push — send single alert card."""
-    payload = _format_alert_card(alert, stock_name)
+    """P0 immediate push — send single alert card with key data fields."""
+    payload = _format_alert_card(alert, key_data)
     return _send_webhook(webhook_url, payload, timeout)
 
 

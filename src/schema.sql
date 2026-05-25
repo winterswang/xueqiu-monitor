@@ -99,11 +99,12 @@ CREATE TABLE IF NOT EXISTS announcements (
 
 -- 9. content_weight — 内容权重（反馈闭环）
 CREATE TABLE IF NOT EXISTS content_weight (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source      TEXT    NOT NULL,                      -- stock_code/author_id
-    keyword     TEXT    NOT NULL,
-    weight      REAL    NOT NULL DEFAULT 1.0,
-    updated_at  INTEGER NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source           TEXT    NOT NULL,                      -- stock_code/author_id
+    keyword          TEXT    NOT NULL,
+    weight           REAL    NOT NULL DEFAULT 1.0,
+    preference_level REAL    NOT NULL DEFAULT 1.0,          -- 0.0 ~ 2.0
+    updated_at       INTEGER NOT NULL
 );
 
 -- 10. user_preference — 用户偏好
