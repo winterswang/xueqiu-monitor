@@ -144,10 +144,11 @@ CREATE INDEX IF NOT EXISTS idx_push_alert_id   ON push_history(alert_id);
 CREATE INDEX IF NOT EXISTS idx_push_time       ON push_history(push_time);
 
 CREATE INDEX IF NOT EXISTS idx_comments_snap  ON comments(snapshot_id);
-CREATE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id);
 
 CREATE INDEX IF NOT EXISTS idx_ann_snapshot ON announcements(snapshot_id);
-CREATE INDEX IF NOT EXISTS idx_ann_stock    ON announcements(stock_code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_stock    ON announcements(stock_code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title   ON announcements(stock_code, ann_title);
 
 CREATE INDEX IF NOT EXISTS idx_cw_source  ON content_weight(source);
 CREATE INDEX IF NOT EXISTS idx_cw_keyword ON content_weight(keyword);

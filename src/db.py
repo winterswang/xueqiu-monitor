@@ -268,7 +268,7 @@ def insert_comments(db_path: str, comments: list[Comment]) -> int:
             d = c.to_dict()
             del d["id"]
             conn.execute(
-                """INSERT INTO comments (snapshot_id, post_id, comment_count, forward_count, like_count, sentiment_avg)
+                """INSERT OR IGNORE INTO comments (snapshot_id, post_id, comment_count, forward_count, like_count, sentiment_avg)
                    VALUES (:snapshot_id, :post_id, :comment_count, :forward_count, :like_count, :sentiment_avg)""",
                 d
             )
@@ -287,7 +287,7 @@ def insert_announcements(db_path: str, anns: list[Announcement]) -> int:
             d = a.to_dict()
             del d["id"]
             conn.execute(
-                """INSERT INTO announcements (snapshot_id, stock_code, ann_title, ann_date, ann_type, is_new)
+                """INSERT OR IGNORE INTO announcements (snapshot_id, stock_code, ann_title, ann_date, ann_type, is_new)
                    VALUES (:snapshot_id, :stock_code, :ann_title, :ann_date, :ann_type, :is_new)""",
                 d
             )
