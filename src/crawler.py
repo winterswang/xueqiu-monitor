@@ -6,6 +6,7 @@ per-stock crawling with timeout, and snapshot persistence.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -93,13 +94,14 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
         "error": None,
     }
     try:
-        # Lazy import to avoid startup overhead
-        from xueqiu_analyzer.crawler import XueqiuCrawler
+        crawl_result = _crawl_with_timeout(stock_code, timeout)
 
-        crawler = XueqiuCrawler({"headless": True})
-        crawl_result = crawler.crawl(stock_code, max_pages=3, max_articles=10)
+        if crawl_result is None:
+            result["status"] = "timeout"
+            result["error"] = f"爬取超时（{timeout}s）"
+            logger.warning(f"{stock_code} 爬取超时 ({timeout}s)")
+            return result
 
-        # Convert CrawlResult → dicts
         posts = []
         for d in crawl_result.discussions:
             posts.append({
@@ -173,6 +175,39 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30) -> list[dict]:
 # ════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════
+
+def _crawl_with_timeout(stock_code: str, timeout: int):
+    """Execute xueqiu-analyzer crawl with a hard timeout.
+
+    Runs crawl in a daemon thread. If timeout expires, returns None
+    immediately — the crawl thread continues in background but the caller is
+    detached. Subsequent calls to crawl_single_stock will start fresh.
+
+    Returns CrawlResult on success, None on timeout.
+    """
+    from xueqiu_analyzer.crawler import XueqiuCrawler
+    import threading
+
+    result_holder = {"result": None, "done": False}
+
+    def _do_crawl():
+        try:
+            crawler = XueqiuCrawler({"headless": True})
+            result_holder["result"] = crawler.crawl(stock_code, max_pages=3, max_articles=10)
+        except Exception:
+            pass
+        finally:
+            result_holder["done"] = True
+
+    t = threading.Thread(target=_do_crawl, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if result_holder["done"]:
+        return result_holder["result"]
+    # Timeout — daemon thread continues in bg, caller detached
+    return None
+
 
 def _compute_sentiment_avg(posts: list[dict]) -> float:
     """Placeholder: average sentiment from posts_data. All 0.0 for Phase 1."""

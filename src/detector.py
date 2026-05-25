@@ -195,3 +195,107 @@ def is_cold_start(historical_stats: list[SentimentStat], min_days: int = 28) -> 
         return True
     unique_dates = len(set(s.stat_date for s in historical_stats))
     return unique_dates < min_days
+
+
+# ════════════════════════════════════════════════════════
+# New announcement detection
+# ════════════════════════════════════════════════════════
+
+ANN_TITLE_NOISE = re.compile(
+    r'(贵州茅台|五粮液|腾讯控股|[A-Z]{2}\d{6})?'  # stock name/code prefix
+    r'[：:：]?'
+    r'\s*'
+)
+
+
+def _normalize_title(title: str) -> str:
+    """Normalize announcement title for comparison: strip noise, lower, trim."""
+    t = ANN_TITLE_NOISE.sub('', title, count=1)
+    t = re.sub(r'\s+', '', t)
+    return t.strip()
+
+
+def detect_new_announcement(
+    stock_code: str,
+    curr_announcements: list[dict],
+    prev_announcements: list[dict],
+    z_threshold: float = 2.0,
+) -> list[ChangeAlert]:
+    """Detect new announcements by comparing titles with previous crawl.
+
+    A new announcement is one whose normalized title does not appear in
+    the previous day's announcement set.
+
+    Args:
+        stock_code: Stock code (e.g. SH600519)
+        curr_announcements: Today's announcements [{title, time, notice_type}]
+        prev_announcements: Previous crawl's announcements (same format)
+
+    Returns ChangeAlert per new announcement.
+    """
+    if not curr_announcements:
+        return []
+
+    prev_titles = {_normalize_title(p.get("title", "")) for p in prev_announcements}
+
+    now_ts = int(time.time())
+    alerts = []
+    for ann in curr_announcements:
+        norm = _normalize_title(ann.get("title", ""))
+        if not norm or len(norm) < 4:
+            continue
+        if norm in prev_titles:
+            continue
+        alerts.append(ChangeAlert(
+            stock_code=stock_code,
+            alert_time=now_ts,
+            alert_type="new_announcement",
+            z_score=3.0,  # announcements are binary new/old, fixed significant Z
+            magnitude=1.0,
+            detail={
+                "title": ann.get("title", ""),
+                "time": ann.get("time", ""),
+                "notice_type": ann.get("notice_type", ""),
+                "prev_count": len(prev_announcements),
+                "new_count": len(curr_announcements),
+            },
+        ))
+    return alerts
+
+
+def detect_changes(
+    stock_code: str,
+    curr_posts_count: int,
+    curr_sentiment_avg: float,
+    curr_posts_texts: list[str],
+    curr_announcements: list[dict],
+    prev_announcements: list[dict],
+    historical_stats: list[SentimentStat],
+    historical_events: list[HotWordEvent],
+    cold_start: bool,
+) -> list[ChangeAlert]:
+    """Unified detection entry point — orchestrates all 4 detection types.
+
+    Returns combined list of ChangeAlert (unfiltered, no priority assigned).
+    Cold start suppresses all alerts (returns empty).
+    """
+    if cold_start:
+        return []
+
+    alerts: list[ChangeAlert] = []
+
+    spike = detect_post_spike(curr_posts_count, historical_stats)
+    if spike:
+        alerts.append(spike)
+
+    shift = detect_sentiment_shift(curr_sentiment_avg, historical_stats)
+    if shift:
+        alerts.append(shift)
+
+    alerts.extend(detect_hot_word_emergence(
+        stock_code, curr_posts_texts, historical_events))
+
+    alerts.extend(detect_new_announcement(
+        stock_code, curr_announcements, prev_announcements))
+
+    return alerts
