@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from models import (
+from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordDict, HotWordEvent, PushHistory,
     Comment, Announcement, ContentWeight, UserPreference,

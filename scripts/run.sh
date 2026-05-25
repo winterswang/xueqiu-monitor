@@ -14,7 +14,7 @@ LOG_FILE="$LOG_DIR/run_${TIMESTAMP}.log"
 echo "=== xueqiu-monitor $(date '+%Y-%m-%d %H:%M:%S') ===" | tee -a "$LOG_FILE"
 
 cd "$PROJECT_DIR"
-/usr/bin/python3 -m src.cli -c config/config.json >> "$LOG_FILE" 2>&1
+/usr/bin/python3 -m src.cli -c etc/config.json >> "$LOG_FILE" 2>&1
 
 EXIT_CODE=$?
 echo "Exit code: $EXIT_CODE" | tee -a "$LOG_FILE"

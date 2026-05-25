@@ -4,7 +4,7 @@ services:
     container_name: xueqiu-monitor
     restart: unless-stopped
     volumes:
-      - ./config:/app/config:ro
+      - ./etc:/app/etc:ro
       - ./data:/app/data
     environment:
       - FEISHU_WEBHOOK_URL=

@@ -35,4 +35,4 @@ RUN apt-get update \
 # Copy project source
 COPY . .
 
-CMD ["python3", "-m", "src.cli", "-c", "config/config.json"]
+CMD ["python3", "-m", "src.cli", "-c", "etc/config.json"]

@@ -18,14 +18,14 @@ import sys
 import time
 from pathlib import Path
 
-from config import Config
-import db
-import crawler
-import detector
-import filter as rule_filter
-import notifier
-import feedback as fbloop
-from models import (
+from .config import Config
+from . import db
+from . import crawler
+from . import detector
+from . import filter as rule_filter
+from . import notifier
+from . import feedback as fbloop
+from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordEvent, PushHistory, Comment, Announcement,
 )
@@ -312,8 +312,8 @@ def _get_stock_name(stocks: list[dict], code: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="xueqiu-monitor — 雪球舆情监控系统")
-    parser.add_argument("-c", "--config", default="config/config.json",
-                        help="配置文件路径 (default: config/config.json)")
+    parser.add_argument("-c", "--config", default="etc/config.json",
+                        help="配置文件路径 (default: etc/config.json)")
     parser.add_argument("--dry-run", action="store_true",
                         help="只爬取不推送")
     parser.add_argument("--init-db", action="store_true",

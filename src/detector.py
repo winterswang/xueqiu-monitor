@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from models import SentimentStat, HotWordEvent, ChangeAlert
+from .models import SentimentStat, HotWordEvent, ChangeAlert
 
 logger = logging.getLogger(__name__)
 

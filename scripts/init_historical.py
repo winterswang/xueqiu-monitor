@@ -126,7 +126,7 @@ def main():
     parser.add_argument("stocks", nargs="*", help="Stock codes to initialize (default: from config watchlist)")
     parser.add_argument("--days", type=int, default=29, help="Days of history (default: 29, min to bypass 28d cold start)")
     parser.add_argument("--dry-run", action="store_true", help="Preview only, no writes")
-    parser.add_argument("-c", "--config", default=os.path.join(PROJECT_ROOT, "config/config.json"))
+    parser.add_argument("-c", "--config", default=os.path.join(PROJECT_ROOT, "etc/config.json"))
     args = parser.parse_args()
 
     cfg = Config.from_file(args.config)

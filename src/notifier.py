@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any
 
-from models import ChangeAlert, PushHistory
+from .models import ChangeAlert, PushHistory
 
 logger = logging.getLogger(__name__)
 

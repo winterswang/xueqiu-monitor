@@ -16,7 +16,7 @@ import hashlib
 import logging
 from typing import Any
 
-from models import ChangeAlert
+from .models import ChangeAlert
 
 logger = logging.getLogger(__name__)
 

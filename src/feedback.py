@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import db
+from . import db
 
 logger = logging.getLogger(__name__)
 
