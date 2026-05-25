@@ -119,6 +119,13 @@ CREATE TABLE IF NOT EXISTS user_preference (
     updated_at       INTEGER NOT NULL
 );
 
+-- 11. xueqiu_monitor_meta — 增量爬取元数据
+CREATE TABLE IF NOT EXISTS xueqiu_monitor_meta (
+    stock_code      TEXT UNIQUE NOT NULL,
+    last_crawl_time REAL    NOT NULL DEFAULT 0.0,
+    last_post_time  REAL    NOT NULL DEFAULT 0.0
+);
+
 -- =============================================================================
 -- 索引
 -- =============================================================================

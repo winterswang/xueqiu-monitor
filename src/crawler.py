@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from .db import get_last_crawl_time, update_last_crawl_time
 
 # Add xueqiu-analyzer to path
 _XA_PATH = "/root/code/xueqiu-analyzer-skill/src"
@@ -68,7 +69,7 @@ def load_watchlist(config: dict) -> list[dict]:
 # Crawler wrapper
 # ════════════════════════════════════════════════════════
 
-def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
+def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None = None) -> dict:
     """Crawl a single stock using xueqiu-analyzer.
 
     Returns:
@@ -172,6 +173,38 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
 
         result["posts_count"] = len(posts)
         result["posts_data"] = posts
+
+        # ── Time-based filtering (incremental crawl) ──
+        if db_path:
+            _now = time.time()
+            last_crawl_ts = get_last_crawl_time(db_path, stock_code)
+            if last_crawl_ts > 0:
+                filtered_posts = []
+                skipped = 0
+                for post in posts:
+                    post_time_str = post.get("time", "")
+                    post_ts = _parse_post_time(post_time_str, _now)
+                    # 保留时间戳为 0 的帖子（无法解析，可能是新帖）
+                    if post_ts == 0 or post_ts >= last_crawl_ts:
+                        filtered_posts.append(post)
+                    else:
+                        skipped += 1
+                if skipped > 0:
+                    logger.info(f"  {stock_code}: 过滤 {skipped} 条旧帖")
+                posts = filtered_posts
+                result["posts_count"] = len(posts)
+                result["posts_data"] = posts
+
+            # Update last post time with max of current batch
+            if posts:
+                all_ts = []
+                for p in posts:
+                    ts = _parse_post_time(p.get("time", ""), _now)
+                    if ts > 0:
+                        all_ts.append(ts)
+                if all_ts:
+                    update_last_crawl_time(db_path, stock_code, max(all_ts))
+
         result["status"] = "success"
         result["sentiment_avg"] = _compute_sentiment_avg(posts)
     except Exception as e:
@@ -197,7 +230,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
     return result
 
 
-def crawl_watchlist(stocks: list[dict], timeout: int = 30) -> list[dict]:
+def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None) -> list[dict]:
     """Crawl all stocks sequentially. Single stock failure does not block others.
 
     Returns list of crawl result dicts.
@@ -208,7 +241,7 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30) -> list[dict]:
         code = s["stock_code"]
         logger.info(f"[{i+1}/{total}] 爬取 {code} ...")
         start = time.time()
-        r = crawl_single_stock(code, timeout)
+        r = crawl_single_stock(code, timeout, db_path)
         elapsed = time.time() - start
         r["_elapsed"] = round(elapsed, 1)
         results.append(r)
@@ -355,3 +388,80 @@ def _compute_sentiment_avg(posts: list[dict]) -> float:
         return 0.0
     scores = [p.get("sentiment_score", 0.0) for p in posts]
     return sum(scores) / len(scores) if scores else 0.0
+
+
+def _parse_post_time(time_str: str, now: float) -> float:
+    """Parse xueqiu post time string to Unix timestamp. Returns 0 if unparseable.
+
+    Supported formats:
+      - "X分钟前", "X小时前", "X秒前" → relative time
+      - "昨天 HH:MM" → yesterday
+      - "MM-DD HH:MM" → this year
+      - "MM-DD" → this year 00:00
+      - "HH:MM" → today
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    if not time_str or not isinstance(time_str, str):
+        return 0.0
+    time_str = time_str.strip()
+    if not time_str:
+        return 0.0
+
+    # "X分钟前"
+    m = re.match(r'(\d+)\s*分钟前', time_str)
+    if m:
+        return now - int(m.group(1)) * 60
+
+    # "X小时前"
+    m = re.match(r'(\d+)\s*小时前', time_str)
+    if m:
+        return now - int(m.group(1)) * 3600
+
+    # "X秒前"
+    m = re.match(r'(\d+)\s*秒前', time_str)
+    if m:
+        return now - int(m.group(1))
+
+    now_dt = datetime.fromtimestamp(now)
+
+    # "昨天 HH:MM"
+    m = re.match(r'昨天\s+(\d{1,2}):(\d{2})', time_str)
+    if m:
+        yesterday = now_dt - timedelta(days=1)
+        target = yesterday.replace(
+            hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0
+        )
+        return target.timestamp()
+
+    # "MM-DD HH:MM"
+    m = re.match(r'(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
+    if m:
+        month, day, hour, minute = (
+            int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        )
+        target = now_dt.replace(
+            month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0
+        )
+        return target.timestamp()
+
+    # "MM-DD"
+    m = re.match(r'(\d{2})-(\d{2})$', time_str)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        target = now_dt.replace(
+            month=month, day=day, hour=0, minute=0, second=0, microsecond=0
+        )
+        return target.timestamp()
+
+    # "HH:MM"
+    m = re.match(r'(\d{1,2}):(\d{2})$', time_str)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        target = now_dt.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        return target.timestamp()
+
+    return 0.0

@@ -367,3 +367,31 @@ def upsert_user_preference(db_path: str, pref: UserPreference) -> None:
                notify_immediate=:notify_immediate, notify_digest=:notify_digest, updated_at=:updated_at""",
             d
         )
+
+
+# ════════════════════════════════════════════════════════
+# xueqiu_monitor_meta — incremental crawl metadata
+# ════════════════════════════════════════════════════════
+
+def get_last_crawl_time(db_path: str, stock_code: str) -> float:
+    """返回该股票上次的 last_post_time，首次返回 0"""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT last_post_time FROM xueqiu_monitor_meta WHERE stock_code=?",
+            (stock_code,)
+        ).fetchone()
+        return float(row["last_post_time"]) if row else 0.0
+
+
+def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float) -> None:
+    """记录本次爬取时间和帖子最新时间"""
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO xueqiu_monitor_meta (stock_code, last_crawl_time, last_post_time)
+               VALUES (?, ?, ?)
+               ON CONFLICT(stock_code) DO UPDATE SET
+               last_crawl_time=excluded.last_crawl_time,
+               last_post_time=excluded.last_post_time""",
+            (stock_code, now, last_post_time)
+        )

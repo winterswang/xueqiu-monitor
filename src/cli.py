@@ -71,7 +71,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     # Crawl all stocks (sequential)
     logger.info(f"开始爬取 {len(stocks)} 只自选股 ...")
     start_time = time.time()
-    crawl_results = crawler.crawl_watchlist(stocks, cfg.crawler["timeout_seconds"])
+    crawl_results = crawler.crawl_watchlist(stocks, cfg.crawler["timeout_seconds"], cfg.db_path)
     crawl_elapsed = int(time.time() - start_time)
     logger.info(f"爬取完成: {crawl_elapsed}s")
 
