@@ -154,7 +154,6 @@ CREATE INDEX IF NOT EXISTS idx_comments_snap  ON comments(snapshot_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id);
 
 CREATE INDEX IF NOT EXISTS idx_ann_snapshot ON announcements(snapshot_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_stock    ON announcements(stock_code);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title   ON announcements(stock_code, ann_title);
 
 CREATE INDEX IF NOT EXISTS idx_cw_source  ON content_weight(source);
