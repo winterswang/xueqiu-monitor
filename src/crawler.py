@@ -81,6 +81,16 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
             "announcements": list[dict],
             "sentiment_avg": float,
             "error": str | None,
+            "diagnostic": {
+                "timed_out": bool,
+                "error_type": str | None,
+                "error_message": str | None,
+                "crawl_duration_ms": int,
+                "discussions_count": int,
+                "news_count": int,
+                "articles_count": int,
+                "notices_count": int,
+            },
         }
     """
     result = {
@@ -92,14 +102,34 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
         "announcements": [],
         "sentiment_avg": 0.0,
         "error": None,
+        "diagnostic": {},
     }
+    t_start = time.time()
     try:
-        crawl_result = _crawl_with_timeout(stock_code, timeout)
+        crawl_info = _crawl_with_timeout(stock_code, timeout)
+        crawl_result = crawl_info["result"]
+        diagnostic = crawl_info["diagnostic"]
+        result["diagnostic"] = diagnostic
 
         if crawl_result is None:
-            result["status"] = "timeout"
-            result["error"] = f"爬取超时（{timeout}s）"
-            logger.warning(f"{stock_code} 爬取超时 ({timeout}s)")
+            if diagnostic.get("timed_out"):
+                result["status"] = "timeout"
+                result["error"] = diagnostic.get("error_message", f"爬取超时（{timeout}s）")
+                logger.warning(
+                    f"{stock_code} 爬取超时 ({timeout}s, elapsed={diagnostic.get('crawl_duration_ms', 0)}ms)"
+                )
+            else:
+                result["status"] = "failed"
+                result["error"] = diagnostic.get("error_message", "未知爬取错误")
+                logger.error(
+                    f"{stock_code} 爬取异常: type={diagnostic.get('error_type')}, "
+                    f"msg={result['error']}"
+                )
+            elapsed = time.time() - t_start
+            logger.debug(
+                f"{stock_code} 总耗时: {elapsed:.1f}s, status={result['status']}, "
+                f"posts={result['posts_count']}"
+            )
             return result
 
         posts = []
@@ -147,7 +177,23 @@ def crawl_single_stock(stock_code: str, timeout: int = 30) -> dict:
     except Exception as e:
         result["status"] = "failed"
         result["error"] = str(e)
+        result["diagnostic"] = {
+            "timed_out": False,
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "crawl_duration_ms": int((time.time() - t_start) * 1000),
+            "discussions_count": 0,
+            "news_count": 0,
+            "articles_count": 0,
+            "notices_count": 0,
+        }
         logger.error(f"爬取 {stock_code} 失败: {e}", exc_info=True)
+
+    elapsed = time.time() - t_start
+    logger.debug(
+        f"{stock_code} 总耗时: {elapsed:.1f}s, status={result['status']}, "
+        f"posts={result['posts_count']}"
+    )
     return result
 
 
@@ -176,37 +222,105 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30) -> list[dict]:
 # Helpers
 # ════════════════════════════════════════════════════════
 
-def _crawl_with_timeout(stock_code: str, timeout: int):
+def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
     """Execute xueqiu-analyzer crawl with a hard timeout.
 
-    Runs crawl in a daemon thread. If timeout expires, returns None
-    immediately — the crawl thread continues in background but the caller is
-    detached. Subsequent calls to crawl_single_stock will start fresh.
+    Runs crawl in a daemon thread. If timeout expires, returns the diagnostic
+    with timed_out=True — the crawl thread continues in background but the
+    caller is detached. Subsequent calls to crawl_single_stock will start fresh.
 
-    Returns CrawlResult on success, None on timeout.
+    Returns:
+        {
+            "result": CrawlResult | None,
+            "diagnostic": {
+                "timed_out": bool,
+                "error_type": str | None,
+                "error_message": str | None,
+                "crawl_duration_ms": int,
+                "discussions_count": int,
+                "news_count": int,
+                "articles_count": int,
+                "notices_count": int,
+            },
+        }
     """
     from xueqiu_analyzer.crawler import XueqiuCrawler
     import threading
 
-    result_holder = {"result": None, "done": False}
+    result_holder = {
+        "result": None,
+        "done": False,
+        "error": None,
+        "error_type": None,
+    }
 
     def _do_crawl():
         try:
             crawler = XueqiuCrawler({"headless": True})
-            result_holder["result"] = crawler.crawl(stock_code, max_pages=3, max_articles=10)
-        except Exception:
-            pass
+            result_holder["result"] = crawler.crawl(
+                stock_code, max_pages=3, max_articles=10
+            )
+        except Exception as e:
+            result_holder["error"] = str(e)
+            result_holder["error_type"] = type(e).__name__
         finally:
             result_holder["done"] = True
 
     t = threading.Thread(target=_do_crawl, daemon=True)
+    thread_start = time.time()
     t.start()
     t.join(timeout=timeout)
+    elapsed_ms = int((time.time() - thread_start) * 1000)
 
-    if result_holder["done"]:
-        return result_holder["result"]
-    # Timeout — daemon thread continues in bg, caller detached
-    return None
+    diagnostic = {
+        "timed_out": False,
+        "error_type": None,
+        "error_message": None,
+        "crawl_duration_ms": elapsed_ms,
+        "discussions_count": 0,
+        "news_count": 0,
+        "articles_count": 0,
+        "notices_count": 0,
+    }
+
+    if not result_holder["done"]:
+        # Timeout — daemon thread continues in bg, caller detached
+        diagnostic["timed_out"] = True
+        diagnostic["error_type"] = "timeout"
+        diagnostic["error_message"] = (
+            f"爬取超时（{timeout}s, elapsed={elapsed_ms}ms）"
+        )
+        return {"result": None, "diagnostic": diagnostic}
+
+    if result_holder["error"] is not None:
+        # Exception in crawl thread
+        diagnostic["error_type"] = result_holder["error_type"]
+        diagnostic["error_message"] = result_holder["error"]
+        return {"result": None, "diagnostic": diagnostic}
+
+    # Success — extract content-type counts from CrawlResult
+    cr = result_holder["result"]
+    if cr is not None:
+        try:
+            diagnostic["discussions_count"] = (
+                len(cr.discussions) if cr.discussions else 0
+            )
+        except Exception:
+            pass
+        try:
+            diagnostic["news_count"] = len(cr.news) if cr.news else 0
+        except Exception:
+            pass
+        try:
+            diagnostic["articles_count"] = len(cr.articles) if cr.articles else 0
+        except Exception:
+            pass
+        try:
+            diagnostic["notices_count"] = len(cr.notices) if cr.notices else 0
+        except Exception:
+            pass
+
+    return {"result": result_holder["result"], "diagnostic": diagnostic}
 
 
 def _compute_sentiment_avg(posts: list[dict]) -> float:

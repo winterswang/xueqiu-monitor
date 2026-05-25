@@ -176,6 +176,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
         # ── TF-IDF hot words ──
         posts_texts = [p.get("content", "") or p.get("title", "") for p in cr["posts_data"]]
+        curr_tfidf = {}
         if posts_texts:
             hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])
             hw_alerts = detector.detect_hot_word_emergence(
@@ -296,6 +297,10 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         "report": str(report_path),
     }
     logger.info(f"Pipeline完成: {json.dumps(summary, ensure_ascii=False)}")
+
+    # ── Crawl Health Report ──
+    _log_crawl_health(crawl_results, summary, logger)
+
     return summary
 
 
@@ -304,6 +309,90 @@ def _get_stock_name(stocks: list[dict], code: str) -> str:
         if s["stock_code"] == code:
             return s.get("stock_name", "")
     return ""
+
+
+def _log_crawl_health(
+    crawl_results: list[dict], summary: dict, logger: logging.Logger
+) -> None:
+    """Log a crawl health report: posts coverage, zero-post stocks, timeout ratio.
+
+    Helps distinguish "stock genuinely has no content" from "crawler is broken".
+    """
+    total = len(crawl_results)
+    if total == 0:
+        return
+
+    # ── 1. Posts coverage ──
+    stocks_with_posts = [
+        r for r in crawl_results
+        if r.get("posts_count", 0) > 0
+    ]
+    stocks_success_zero = [
+        r for r in crawl_results
+        if r["status"] == "success" and r.get("posts_count", 0) == 0
+    ]
+    stocks_timeout = [r for r in crawl_results if r["status"] == "timeout"]
+    stocks_failed = [r for r in crawl_results if r["status"] == "failed"]
+
+    posts_ratio = len(stocks_with_posts) / total * 100
+
+    logger.info(
+        "═" * 50
+    )
+    logger.info("爬取健康报告")
+    logger.info(
+        "═" * 50
+    )
+    logger.info(
+        f"有帖股票数: {len(stocks_with_posts)}/{total} ({posts_ratio:.0f}%)"
+    )
+    logger.info(
+        f"成功但零帖: {len(stocks_success_zero)} | "
+        f"超时: {len(stocks_timeout)} | "
+        f"失败: {len(stocks_failed)}"
+    )
+
+    # ── 2. WARNING: ALL stocks have zero posts ──
+    if len(stocks_with_posts) == 0:
+        logger.warning(
+            "⚠ 所有股票 posts_count=0 —— 爬虫可能已失效或雪球无数据返回"
+        )
+
+    # ── 3. WARNING: >50% timeout ──
+    timeout_ratio = len(stocks_timeout) / total * 100
+    if timeout_ratio > 50:
+        logger.warning(
+            f"⚠ 超时率 {timeout_ratio:.0f}%（>{50}%）—— "
+            f"建议增大 crawler.timeout_seconds（当前 {summary.get('elapsed_seconds', 0)//max(total,1)}s/股）"
+        )
+
+    # ── 4. List suspicious zero-post stocks (success but no content) ──
+    if stocks_success_zero:
+        zero_codes = [r["stock_code"] for r in stocks_success_zero]
+        logger.warning(
+            f"⚠ 以下股票爬取成功但帖数为0（可能爬虫对该股票失效）: "
+            f"{', '.join(zero_codes[:20])}"
+            + (f" ...及其他 {len(zero_codes) - 20} 只" if len(zero_codes) > 20 else "")
+        )
+
+    # ── 5. Per-stock diagnostic drill-down (DEBUG level) ──
+    for r in crawl_results:
+        diag = r.get("diagnostic", {})
+        if diag:
+            logger.debug(
+                f"  {r['stock_code']}: diag="
+                f"timed_out={diag.get('timed_out')}, "
+                f"err={diag.get('error_type')}, "
+                f"dur={diag.get('crawl_duration_ms')}ms, "
+                f"d={diag.get('discussions_count')}/"
+                f"n={diag.get('news_count')}/"
+                f"a={diag.get('articles_count')}/"
+                f"nt={diag.get('notices_count')}"
+            )
+
+    logger.info(
+        "═" * 50
+    )
 
 
 # ════════════════════════════════════════════════════════
