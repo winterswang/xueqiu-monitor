@@ -10,7 +10,6 @@ Phase 1: rule-based detection, no LLM.
 from __future__ import annotations
 
 import logging
-import math
 import re
 import time
 from collections import Counter

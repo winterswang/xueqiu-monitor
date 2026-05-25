@@ -218,6 +218,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         # ── Store alerts ──
         for alert in alerts:
             alert_id = db.insert_alert(db_path, alert)
+            alert.id = alert_id
             total_alerts += 1
             all_alerts.append(alert)
 

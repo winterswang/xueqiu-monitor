@@ -14,8 +14,6 @@ from __future__ import annotations
 import difflib
 import hashlib
 import logging
-import re
-import time
 from typing import Any
 
 from models import ChangeAlert

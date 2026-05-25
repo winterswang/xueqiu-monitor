@@ -7,7 +7,6 @@ Implements weight decay for stale sources.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 import db
