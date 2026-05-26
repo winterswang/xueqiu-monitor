@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 from .db import get_last_crawl_time, update_last_crawl_time
+from . import sentiment
 
 # Add xueqiu-analyzer to path
 _XA_PATH = "/root/code/xueqiu-analyzer-skill/src"
@@ -23,6 +24,45 @@ if _XA_PATH not in sys.path:
     sys.path.insert(0, _XA_PATH)
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_author(raw: str) -> str:
+    """Clean author name: trim trailing metadata and filter noise."""
+    if not raw:
+        return ""
+    # "新闻" is not a real author — xueqiu news placeholder
+    if raw.strip() in ("新闻", ""):
+        return ""
+    # "作者名\n发布于2026-..." → keep only the first line
+    if "\n" in raw:
+        raw = raw.split("\n")[0].strip()
+    # "作者名 发布于2026-..." → also common
+    if " 发布于" in raw:
+        raw = raw.split(" 发布于")[0].strip()
+    if " 修改于" in raw:
+        raw = raw.split(" 修改于")[0].strip()
+    return raw
+
+
+def _extract_news_source(title: str) -> str:
+    """Extract media source from news title when author/source is empty."""
+    import re
+    known_sources = [
+        '证券时报', '财联社', '华尔街见闻', '澎湃新闻', '第一财经',
+        '中国证券报', '上海证券报', '经济观察报', '21世纪经济报道',
+        '时代财经', '中国基金报', '界面新闻', '新浪财经', '智通财经',
+        '格隆汇', '每日经济新闻', '中证网', '证券日报', '中国经营报',
+        '中国商报', '新京报', '北京商报', '财经网', '巨潮资讯', '金融界',
+        '市场资讯', '财说', '智东西', '南方财经', '羊城晚报',
+    ]
+    for s in known_sources:
+        if s in title:
+            return s
+    # Generic pattern
+    m = re.search(r'[(（]?来源[：:]\s*(\S{2,12})[)）]?', title)
+    if m:
+        return m.group(1)
+    return ""
 
 
 # ════════════════════════════════════════════════════════
@@ -69,7 +109,7 @@ def load_watchlist(config: dict) -> list[dict]:
 # Crawler wrapper
 # ════════════════════════════════════════════════════════
 
-def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None = None) -> dict:
+def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None = None) -> dict:
     """Crawl a single stock using xueqiu-analyzer.
 
     Returns:
@@ -140,7 +180,8 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
                 "post_id": d.link or d.content[:20],
                 "title": d.content[:100] or "",
                 "content": d.content or "",
-                "author": d.author or "",
+                "link": d.link or "",
+                "author": _clean_author(d.author or ""),
                 "time": d.time or "",
                 "sentiment_score": 0.0,  # placeholder — LLM later
                 "comment_count": getattr(d, "comment_count", 0) or 0,
@@ -153,7 +194,8 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
                 "post_id": n.link or n.title,
                 "title": n.title or "",
                 "content": n.content or "",
-                "author": n.source or "",
+                "link": n.link or "",
+                "author": _clean_author(n.source or "") or _extract_news_source(n.title or ""),
                 "time": n.time or "",
                 "sentiment_score": 0.0,
             })
@@ -163,13 +205,24 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
                 "post_id": a.link or a.article_id or a.title,
                 "title": a.title or "",
                 "content": a.content or "",
-                "author": a.author or "",
+                "link": a.link or "",
+                "author": _clean_author(a.author or ""),
                 "time": a.time or "",
                 "sentiment_score": 0.0,
             })
         for nt in crawl_result.notices:
+            title_raw = nt.title or ""
+            # xueqiu format: "股票名 日期· 来自公告\n实际标题\n更多内容"
+            # First line is always prefix → skip it, join the rest
+            lines = title_raw.split('\n')
+            if len(lines) > 1:
+                title = '\n'.join(lines[1:]).strip()[:100]
+            else:
+                title = title_raw.strip()[:100]
+            if not title:
+                title = title_raw.strip()[:100]
             result["announcements"].append({
-                "title": nt.title or "",
+                "title": title,
                 "time": nt.time or "",
                 "notice_type": nt.notice_type or "",
             })
@@ -210,6 +263,17 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
 
         result["status"] = "success"
         result["sentiment_avg"] = _compute_sentiment_avg(posts)
+
+        # ── LLM Sentiment Analysis (batch, per stock) ──
+        if posts:
+            try:
+                scores = sentiment.analyze_sentiment_batch(posts)
+                for j, s in enumerate(scores):
+                    posts[j]["sentiment_score"] = s
+                result["posts_data"] = posts
+                result["sentiment_avg"] = _compute_sentiment_avg(posts)
+            except Exception as e:
+                logger.warning(f"{stock_code} sentiment 分析失败: {e}")
     except Exception as e:
         result["status"] = "failed"
         result["error"] = str(e)
@@ -233,11 +297,22 @@ def crawl_single_stock(stock_code: str, timeout: int = 30, db_path: str | None =
     return result
 
 
-def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None) -> list[dict]:
-    """Crawl all stocks sequentially. Single stock failure does not block others.
+def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None,
+                    concurrency: int = 1) -> list[dict]:
+    """Crawl all stocks with configurable concurrency.
 
-    Returns list of crawl result dicts.
+    Sequential mode (concurrency=1): simple for-loop.
+    Parallel mode (concurrency>1): ThreadPoolExecutor for I/O-bound Playwright.
+    Single stock failure does not block others.
+
+    Returns list of crawl result dicts (order may differ from input when parallel).
     """
+    if concurrency <= 1:
+        return _crawl_sequential(stocks, timeout, db_path)
+    return _crawl_parallel(stocks, timeout, db_path, concurrency)
+
+
+def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None) -> list[dict]:
     results = []
     total = len(stocks)
     for i, s in enumerate(stocks):
@@ -249,6 +324,41 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None =
         r["_elapsed"] = round(elapsed, 1)
         results.append(r)
         logger.info(f"  → {r['status']} ({r['posts_count']}贴, {elapsed:.1f}s)")
+    success = sum(1 for r in results if r["status"] == "success")
+    logger.info(f"爬取完成: {success}/{total} 成功")
+    return results
+
+
+def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
+                   concurrency: int) -> list[dict]:
+    import concurrent.futures
+    results = []
+    total = len(stocks)
+    logger.info(f"并行爬取: {total} 只股票, concurrency={concurrency}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_map: dict[concurrent.futures.Future, str] = {}
+        for s in stocks:
+            f = executor.submit(crawl_single_stock, s["stock_code"], timeout, db_path)
+            future_map[f] = s["stock_code"]
+        for f in concurrent.futures.as_completed(future_map):
+            code = future_map[f]
+            try:
+                r = f.result()
+            except Exception as e:
+                r = {
+                    "status": "failed",
+                    "stock_code": code,
+                    "error": str(e),
+                    "posts_count": 0,
+                    "posts_data": [],
+                    "announcements": [],
+                    "sentiment_avg": 0.0,
+                    "crawl_time": int(time.time()),
+                    "diagnostic": {"error_type": type(e).__name__},
+                    "_elapsed": 0,
+                }
+            results.append(r)
+            logger.info(f"  → {r['status']} ({r['posts_count']}贴, {r.get('_elapsed', '?')}s)")
     success = sum(1 for r in results if r["status"] == "success")
     logger.info(f"爬取完成: {success}/{total} 成功")
     return results
@@ -319,8 +429,10 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         try:
             xq_code = _to_xueqiu_code(stock_code)
             crawler = XueqiuCrawler({"headless": True})
+            # V3.1: time-based stop, max_pages=50 as safety cap,
+            # max_articles=20 for detail enrichment (articles prioritized)
             result_holder["result"] = crawler.crawl(
-                xq_code, max_pages=3, max_articles=10
+                xq_code, max_pages=50, max_articles=20
             )
         except Exception as e:
             result_holder["error"] = str(e)
