@@ -23,7 +23,7 @@
 ## P1 — 重要但非阻塞 (1 剩余)
 
 ### 1-A: 爬虫超时保护 ✅
-- **修复**: `crawler.py` `_crawl_with_timeout` daemon thread + `threading.Thread.join(timeout=30)`
+- **修复**: `crawler.py` `_crawl_with_timeout` daemon thread + `threading.Thread.join(timeout=600)`
 - **验证**: `crawl_single_stock('SH600519', timeout=2)` → status=timeout
 
 ### 1-B: 爬取失败不阻塞 ✅

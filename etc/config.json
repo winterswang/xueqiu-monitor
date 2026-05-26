@@ -1,12 +1,12 @@
 {
   "db_path": "data/monitor.db",
   "crawler": {
-    "timeout_seconds": 600,
+    "timeout_seconds": 1200,
     "max_retries": 0,
     "concurrency": 1,
     "whitelist": [
       "600519.SH",
-      "00700.HK",
+      "700.HK",
       "AAPL.US"
     ]
   },

@@ -81,10 +81,13 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             logger.error("白名单过滤后为空，终止")
             return {"error": "empty_whitelist", "crawled": 0, "alerts": 0}
 
-    # Crawl all stocks (sequential)
-    logger.info(f"开始爬取 {len(stocks)} 只自选股 ...")
+    # Crawl all stocks (parallel if concurrency > 1)
+    concurrency = cfg.crawler.get("concurrency", 1)
+    logger.info(f"开始爬取 {len(stocks)} 只自选股 (concurrency={concurrency}) ...")
     start_time = time.time()
-    crawl_results = crawler.crawl_watchlist(stocks, cfg.crawler["timeout_seconds"], cfg.db_path)
+    crawl_results = crawler.crawl_watchlist(
+        stocks, cfg.crawler["timeout_seconds"], cfg.db_path, concurrency=concurrency
+    )
     crawl_elapsed = int(time.time() - start_time)
     logger.info(f"爬取完成: {crawl_elapsed}s")
 
@@ -294,7 +297,13 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             notifier.write_pending_messages(pending_messages, pending_path)
 
     # ── Daily report ──
-    report = notifier.generate_daily_report(all_alerts)
+    # Build posts_data_map for report
+    posts_data_map = {}
+    for cr in crawl_results:
+        if cr["status"] == "success" and cr.get("posts_data"):
+            posts_data_map[cr["stock_code"]] = cr["posts_data"]
+
+    report = notifier.generate_daily_report(all_alerts, posts_data_map)
     report_path = Path(db_path).parent / "daily_reports" / f"{time.strftime('%Y-%m-%d')}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report)

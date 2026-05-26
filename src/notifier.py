@@ -193,7 +193,31 @@ def generate_daily_report(
     Format: stock_code | alert_type | Z-score | magnitude | top_post_title
     """
     if not alerts:
-        return "📊 今日无舆情异常变化。"
+        # 无告警时也输出爬取摘要
+        from collections import Counter
+        lines = ["# 雪球舆情日报\n"]
+        lines.append(f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M')}\n")
+        lines.append("📊 今日无舆情异常变化。\n")
+        if posts_data_map:
+            lines.append("## 爬取摘要\n")
+            lines.append("| 股票 | 帖子数 | 情绪均值 | 情绪倾向 |")
+            lines.append("|------|--------|----------|----------|")
+            for code, posts in sorted(posts_data_map.items()):
+                count = len(posts)
+                scores = [p.get("sentiment_score", 0.0) for p in posts if p.get("sentiment_score")]
+                if scores:
+                    avg = sum(scores) / len(scores)
+                    if avg > 0.1:
+                        mood = "😊 偏正面"
+                    elif avg < -0.1:
+                        mood = "😟 偏负面"
+                    else:
+                        mood = "😐 中性"
+                else:
+                    avg = 0.0
+                    mood = "—"
+                lines.append(f"| {code} | {count} | {avg:+.2f} | {mood} |")
+        return "\n".join(lines)
 
     lines = ["# 雪球舆情日报\n"]
     lines.append(f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M')}\n")

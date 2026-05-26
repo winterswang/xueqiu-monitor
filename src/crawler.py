@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from .db import get_last_crawl_time, update_last_crawl_time
+from .db import get_existing_post_ids, get_last_crawl_time, update_last_crawl_time
 from . import sentiment
 
 # Add xueqiu-analyzer to path
@@ -235,18 +235,25 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             _now = time.time()
             last_crawl_ts = get_last_crawl_time(db_path, stock_code)
             if last_crawl_ts > 0:
+                # 预加载所有已存储的 post_id，用于回查兜底
+                # （避免时间戳判断把"上次没爬到的新帖"误过滤）
+                existing_ids = get_existing_post_ids(db_path, stock_code)
                 filtered_posts = []
                 skipped = 0
+                rescued = 0  # 时间戳判断要过滤，但 DB 里没有 → 救回
                 for post in posts:
                     post_time_str = post.get("time", "")
                     post_ts = _parse_post_time(post_time_str, _now)
-                    # 保留时间戳为 0 的帖子（无法解析，可能是新帖）
                     if post_ts == 0 or post_ts >= last_crawl_ts:
+                        filtered_posts.append(post)
+                    elif post.get("post_id") not in existing_ids:
+                        # 时间戳 < last_crawl 但 post_id 不在 DB → 上次没爬到，保留
+                        rescued += 1
                         filtered_posts.append(post)
                     else:
                         skipped += 1
-                if skipped > 0:
-                    logger.info(f"  {stock_code}: 过滤 {skipped} 条旧帖")
+                if skipped > 0 or rescued > 0:
+                    logger.info(f"  {stock_code}: 过滤 {skipped} 条旧帖, 救回 {rescued} 条(DB无记录)")
                 posts = filtered_posts
                 result["posts_count"] = len(posts)
                 result["posts_data"] = posts

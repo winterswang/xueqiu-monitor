@@ -383,6 +383,16 @@ def get_last_crawl_time(db_path: str, stock_code: str) -> float:
         return float(row["last_post_time"]) if row else 0.0
 
 
+def get_existing_post_ids(db_path: str, stock_code: str) -> set:
+    """返回该股票已存储的所有 post_id 集合，用于过滤去重"""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT post_id FROM comments WHERE stock_code=?",
+            (stock_code,)
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
 def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float) -> None:
     """记录本次爬取时间和帖子最新时间"""
     now = time.time()
