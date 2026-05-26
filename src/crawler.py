@@ -18,9 +18,9 @@ from typing import Any
 from .db import get_existing_post_ids, get_last_crawl_time, update_last_crawl_time
 from . import sentiment
 
-# Add xueqiu-analyzer to path
-_XA_PATH = "/root/code/xueqiu-analyzer-skill/src"
-if _XA_PATH not in sys.path:
+# Add xueqiu-analyzer to path (configurable via XUEQIU_ANALYZER_PATH env var)
+_XA_PATH = os.environ.get("XUEQIU_ANALYZER_PATH", "/root/code/xueqiu-analyzer-skill/src")
+if _XA_PATH and _XA_PATH not in sys.path:
     sys.path.insert(0, _XA_PATH)
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,9 @@ def load_watchlist(config: dict) -> list[dict]:
 
     Returns list of {'stock_code': str, 'stock_name': str}.
     """
-    # Try morning-brief DB first
-    mb_db = "/root/code/morning-brief/data/morning-brief.db"
-    if os.path.exists(mb_db):
+    # Try morning-brief DB first (configurable via config.crawler.morning_brief_db)
+    mb_db = config.get("morning_brief_db", os.environ.get("MORNING_BRIEF_DB", "/root/code/morning-brief/data/morning-brief.db"))
+    if mb_db and os.path.exists(mb_db):
         try:
             conn = sqlite3.connect(mb_db)
             conn.row_factory = sqlite3.Row
@@ -433,18 +433,24 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
     }
 
     def _do_crawl():
+        _crawler = None
         try:
             xq_code = _to_xueqiu_code(stock_code)
-            crawler = XueqiuCrawler({"headless": True})
+            _crawler = XueqiuCrawler({"headless": True})
             # V3.1: time-based stop, max_pages=50 as safety cap,
             # max_articles=20 for detail enrichment (articles prioritized)
-            result_holder["result"] = crawler.crawl(
+            result_holder["result"] = _crawler.crawl(
                 xq_code, max_pages=50, max_articles=20
             )
         except Exception as e:
             result_holder["error"] = str(e)
             result_holder["error_type"] = type(e).__name__
         finally:
+            if _crawler is not None:
+                try:
+                    _crawler.close()
+                except Exception:
+                    pass
             result_holder["done"] = True
 
     t = threading.Thread(target=_do_crawl, daemon=True)

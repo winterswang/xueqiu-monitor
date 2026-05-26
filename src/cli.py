@@ -62,8 +62,9 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     fbloop.decay_stale_weights(db_path, cfg.feedback)
     logger.info("权重衰减检查完成")
 
-    # Load watchlist
-    stocks = crawler.load_watchlist({"watchlist_path": cfg.watchlist_path})
+    # Load watchlist (pass crawler config for morning_brief_db override)
+    watchlist_cfg = {"watchlist_path": cfg.watchlist_path, **cfg.crawler}
+    stocks = crawler.load_watchlist(watchlist_cfg)
     if not stocks:
         logger.error("自选股列表为空，终止")
         return {"error": "empty_watchlist", "crawled": 0, "alerts": 0}
@@ -144,6 +145,19 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             n_anns = db.insert_announcements(db_path, anns_list)
             logger.debug(f"  {stock_code}: 写入 {n_anns} 条公告")
 
+        # ── Announcement detection ──
+        prev_snap_anns = []
+        if snapshot_id > 1:
+            prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+            if prev_snap and prev_snap.id is not None:
+                prev_snap_anns = db.get_announcements_by_snapshot(db_path, prev_snap.id)
+        curr_anns = cr.get("announcements", [])
+        ann_alerts = detector.detect_new_announcement(
+            stock_code, curr_anns, prev_snap_anns
+        )
+        for a in ann_alerts:
+            a.alert_time = now
+
         # ── Detection ──
         # Get historical stats
         hist_stats = db.get_historical_stats(db_path, stock_code, cfg.detector["z_score_window_days"])
@@ -160,15 +174,18 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             spike_alert.stock_code = stock_code
             spike_alert.alert_time = now
 
-        # Detect sentiment shift
+        # Detect sentiment shift (with two-period direct threshold)
+        prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+        prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
         sent_alert = detector.detect_sentiment_shift(
-            cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"]
+            cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
+            prev_snapshot_sentiment=prev_snap_sentiment,
         )
         if sent_alert:
             sent_alert.stock_code = stock_code
             sent_alert.alert_time = now
 
-        alerts = [a for a in [spike_alert, sent_alert] if a is not None]
+        alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
 
         # Compute sample std from historical sentiment means
         sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]

@@ -319,6 +319,7 @@ class ContentWeight:
     source: str
     keyword: str
     weight: float = 1.0
+    preference_level: float = 1.0
     updated_at: int = field(default_factory=_now)
     id: int | None = None
 
@@ -332,6 +333,7 @@ class ContentWeight:
             source=d["source"],
             keyword=d["keyword"],
             weight=d.get("weight", 1.0),
+            preference_level=d.get("preference_level", 1.0),
             updated_at=d.get("updated_at", _now()),
         )
 
@@ -339,7 +341,7 @@ class ContentWeight:
     def from_row(cls, row: tuple | dict) -> ContentWeight:
         if isinstance(row, dict):
             return cls.from_dict(row)
-        cols = ["id","source","keyword","weight","updated_at"]
+        cols = ["id","source","keyword","weight","preference_level","updated_at"]
         return cls.from_dict(dict(zip(cols, row)))
 
 

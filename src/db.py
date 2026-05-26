@@ -295,6 +295,19 @@ def insert_announcements(db_path: str, anns: list[Announcement]) -> int:
         return count
 
 
+def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
+    """Get announcements for a given snapshot_id (for change detection)."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT ann_title, ann_date, ann_type FROM announcements WHERE snapshot_id=?",
+            (snapshot_id,)
+        ).fetchall()
+        return [
+            {"title": r["ann_title"], "time": str(r["ann_date"]), "notice_type": r["ann_type"]}
+            for r in rows
+        ]
+
+
 # ════════════════════════════════════════════════════════
 # content_weight
 # ════════════════════════════════════════════════════════
@@ -308,27 +321,27 @@ def get_weight(db_path: str, source: str, keyword: str) -> ContentWeight | None:
         return ContentWeight.from_row(row) if row else None
 
 
-def upsert_weight(db_path: str, source: str, keyword: str, delta: float) -> float:
-    """Adjust weight by delta. Returns new weight."""
+def upsert_weight(db_path: str, source: str, keyword: str, delta: float,
+                  preference_delta: float = 0.0) -> float:
+    """Adjust weight by delta (and optional preference_level).
+    Uses ON CONFLICT to avoid TOCTOU race.
+    Returns new weight.
+    """
     now = int(time.time())
     with _connect(db_path) as conn:
-        existing = conn.execute(
-            "SELECT * FROM content_weight WHERE source=? AND keyword=?",
-            (source, keyword)
-        ).fetchone()
-        if existing:
-            new_weight = max(0.0, existing["weight"] + delta)
-            conn.execute(
-                "UPDATE content_weight SET weight=?, updated_at=? WHERE source=? AND keyword=?",
-                (new_weight, now, source, keyword)
-            )
-        else:
-            new_weight = max(0.0, 1.0 + delta)
-            conn.execute(
-                "INSERT INTO content_weight (source, keyword, weight, updated_at) VALUES (?, ?, ?, ?)",
-                (source, keyword, new_weight, now)
-            )
-        return new_weight
+        cur = conn.execute(
+            """INSERT INTO content_weight (source, keyword, weight, preference_level, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(source, keyword) DO UPDATE SET
+               weight = MAX(0.0, content_weight.weight + ?),
+               preference_level = MAX(0.0, MIN(2.0, content_weight.preference_level + ?)),
+               updated_at = ?
+               RETURNING weight""",
+            (source, keyword, max(0.0, 1.0 + delta), max(0.0, 1.0 + preference_delta), now,
+             delta, preference_delta, now)
+        )
+        row = cur.fetchone()
+        return float(row["weight"]) if row else max(0.0, 1.0 + delta)
 
 
 def decay_stale_weights(db_path: str, days: int = 7, decay: float = 0.05, floor: float = 0.3) -> int:

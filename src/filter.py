@@ -143,7 +143,8 @@ def filter_alerts(
     """Full filter pipeline:
     1. Assign priority
     2. Cold-start gate → all P2
-    3. Filter ads/duplicates/short → mark filtered
+    3. Annotate each alert with post-level noise stats (ad/dup/short ratios)
+    4. Suppress only when a specific alert type is unreliable due to noise
     Returns alerts with priority and filtered status set.
     """
     # Merge config
@@ -163,30 +164,39 @@ def filter_alerts(
     title_dup, content_dup = filter_duplicates(posts_data, dup_thresh, content_sim_thresh)
     dup_set = set(title_dup + content_dup)
     short_set = set(filter_short_posts(posts_data, short_thresh))
-    noise_set = ad_set | dup_set | short_set
+    total = max(len(posts_data), 1)
 
-    # Step 3: mark alerts as filtered if ALL associated posts are noise
-    # For now, if any noise detected, mark the alert with reason
+    ad_ratio = len(ad_set) / total
+    dup_ratio = len(dup_set) / total
+    short_ratio = len(short_set) / total
+
+    # Step 3: per-alert filtering — annotate with noise context,
+    # but only suppress if the alert type is specifically unreliable
     for alert in alerts:
         if alert.filtered:
             continue
-        if len(ad_set) / max(len(posts_data), 1) > 0.2:
+
+        # Attach noise stats to detail for downstream visibility
+        alert.detail.setdefault("noise", {
+            "ad_ratio": round(ad_ratio, 3),
+            "dup_ratio": round(dup_ratio, 3),
+            "short_ratio": round(short_ratio, 3),
+            "total_posts": len(posts_data),
+        })
+
+        # sentiment_shift: if >50% posts are noise, the sentiment calculation
+        # is unreliable → suppress
+        if alert.alert_type == "sentiment_shift" and ad_ratio > 0.5:
             alert.filtered = 1
-            alert.filter_reason = f"广告帖占比过高 ({len(ad_set)}/{len(posts_data)}帖)"
-        elif len(dup_set) / max(len(posts_data), 1) > 0.5:
-            parts = []
-            if title_dup:
-                parts.append(f"标题重复{len(title_dup)}帖")
-            if content_dup:
-                parts.append(f"内容相似度>85%{len(content_dup)}帖")
-            reason_detail = ", ".join(parts)
+            alert.filter_reason = f"情感计算不可靠：广告帖占比 {ad_ratio:.0%}"
+            continue
+
+        # post_spike: if >70% posts are noise, the spike is from noise, not real content
+        if alert.alert_type == "post_spike" and (ad_ratio + dup_ratio) > 0.7:
             alert.filtered = 1
-            alert.filter_reason = (
-                f"重复帖({len(dup_set)}/{len(posts_data)})"
-                + (f": {reason_detail}" if reason_detail else "")
-            )
-        elif len(short_set) / max(len(posts_data), 1) > 0.7:
-            alert.filtered = 1
-            alert.filter_reason = f"短帖占比过高 ({len(short_set)}/{len(posts_data)}帖)"
+            alert.filter_reason = f"帖子激增由噪音驱动（广告{ad_ratio:.0%} 重复{dup_ratio:.0%}）"
+            continue
+
+        # hot_word_surge / new_announcement: not suppressed by post noise
 
     return alerts

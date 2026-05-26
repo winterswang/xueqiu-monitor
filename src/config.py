@@ -17,6 +17,8 @@ DEFAULT_CONFIG = {
         "max_retries": 0,         # no immediate retry, retry on next schedule
         "concurrency": 1,          # sequential (Playwright single-process)
         "whitelist": [],            # 非空时仅爬取列表中的股票，空=全量
+        "xueqiu_analyzer_path": "/root/code/xueqiu-analyzer-skill/src",
+        "morning_brief_db": "/root/code/morning-brief/data/morning-brief.db",
     },
     "detector": {
         "z_score_window_days": 14,
@@ -76,9 +78,14 @@ class Config:
         if p.exists():
             user_cfg = json.loads(p.read_text())
             _deep_merge(cfg, user_cfg)
+        # Environment variable overrides
         cfg["notification"]["webhook_url"] = os.environ.get(
             "FEISHU_WEBHOOK_URL", cfg.get("notification", {}).get("webhook_url", "")
         )
+        if "XUEQIU_ANALYZER_PATH" in os.environ:
+            cfg.setdefault("crawler", {})["xueqiu_analyzer_path"] = os.environ["XUEQIU_ANALYZER_PATH"]
+        if "MORNING_BRIEF_DB" in os.environ:
+            cfg.setdefault("crawler", {})["morning_brief_db"] = os.environ["MORNING_BRIEF_DB"]
         return cls(**cfg)
 
     @classmethod
