@@ -1,18 +1,21 @@
 """xueqiu-monitor: LLM sentiment analysis (MiniMax M2.7, per-type batching)
 
 Groups posts by type (discussions / articles / news), then makes
-one full-context call per group. Discussions and articles use LLM;
+batched LLM calls. Discussions and articles use LLM;
 news uses keyword matching (no API cost).
 
-Token strategy:
-  - Discussions (up to 500 items): max_tokens=16384, retry 32768
-  - Articles (up to 30 items):   max_tokens=4096,  retry 8192
+Batch strategy:
+  - Discussions: sub-batch of 80 items max (avoids MiniMax timeout on
+    400+ item groups). Each sub-batch = one compact LLM call.
+  - Articles (up to 30 items):   single call, max_tokens=4096
   - News:                        keyword-based (0 calls)
 
 Key design decisions:
   - MiniMax M2.7 thinking blocks expand with input complexity;
     the tight prompt ("NO analysis") minimises thinking waste.
   - When thinking overflows the output budget → retry at 2× tokens.
+  - Client timeout raised to 300s to allow server-side processing of
+    large batches; individual API calls still have a 300s cap.
 """
 
 from __future__ import annotations
@@ -26,14 +29,25 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Per-group token budgets ──────────────────────────────────
-# For discussions (bulk): large budgets to handle 400+ items
-MAX_TOKENS_DISCUSSION   = 16384
-MAX_TOKENS_DISCUSSION_R = 32768
+# ── Batch sizing ─────────────────────────────────────────────
+# Discussions are split into sub-batches when the group exceeds
+# this threshold. Each sub-batch gets its own LLM call.
+DISCUSSION_BATCH_SIZE = 80
+
+# ── Per-call token budgets ───────────────────────────────────
+# For discussions (sub-batch ≤80 items): moderate budget
+MAX_TOKENS_DISCUSSION   = 4096
+MAX_TOKENS_DISCUSSION_R = 8192
 
 # For articles (small group, detailed content): moderate budgets
 MAX_TOKENS_ARTICLE      = 4096
 MAX_TOKENS_ARTICLE_R    = 8192
+
+# ── Timeout overrides ────────────────────────────────────────
+# MiniMax can take 2-5 min for large batches; 300s gives enough
+# headroom while catching true hangs.
+LLM_CLIENT_TIMEOUT = 300.0
+LLM_CALL_TIMEOUT   = 300.0
 
 _client: Any | None = None
 
@@ -113,9 +127,9 @@ def _get_client() -> Any | None:
             api_key=api_key,
             base_url=base_url,
             max_retries=1,
-            timeout=120.0,
+            timeout=LLM_CLIENT_TIMEOUT,
         )
-        logger.info(f"Sentiment LLM ready: base_url={base_url}")
+        logger.info(f"Sentiment LLM ready: base_url={base_url}, timeout={LLM_CLIENT_TIMEOUT}s")
         return _client
     except ImportError:
         logger.warning("anthropic 未安装")
@@ -166,15 +180,26 @@ def analyze_sentiment_batch(posts: list[dict]) -> list[float]:
         _analyze_news(posts, news_idxs, scores)
         logger.info(f"Sentiment news (keyword): {len(news_idxs)} 条")
 
-    # ── Discussions: single call ───────────────────────
+    # ── Discussions: sub-batched to avoid timeout ────────
     disc_idxs = groups.get("discussion", [])
     if disc_idxs:
-        _analyze_group(
-            posts, disc_idxs, scores, client,
-            group_label="discussion",
-            max_tokens=MAX_TOKENS_DISCUSSION,
-            max_tokens_retry=MAX_TOKENS_DISCUSSION_R,
-        )
+        n_disc = len(disc_idxs)
+        n_batches = (n_disc + DISCUSSION_BATCH_SIZE - 1) // DISCUSSION_BATCH_SIZE
+        if n_batches > 1:
+            logger.info(
+                f"Sentiment discussion: {n_disc} 条 → {n_batches} 批次 "
+                f"(每批≤{DISCUSSION_BATCH_SIZE})"
+            )
+        for b in range(n_batches):
+            start = b * DISCUSSION_BATCH_SIZE
+            end = min(start + DISCUSSION_BATCH_SIZE, n_disc)
+            batch_idxs = disc_idxs[start:end]
+            _analyze_group(
+                posts, batch_idxs, scores, client,
+                group_label="discussion" if n_batches == 1 else f"discussion-b{b+1}",
+                max_tokens=MAX_TOKENS_DISCUSSION,
+                max_tokens_retry=MAX_TOKENS_DISCUSSION_R,
+            )
 
     # ── Articles: single call ──────────────────────────
     art_idxs = groups.get("article", [])
@@ -237,6 +262,7 @@ def _analyze_group(
                 max_tokens=mt,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
+                timeout=LLM_CALL_TIMEOUT,
             )
             elapsed_ms = (time.time() - t0) * 1000
 
