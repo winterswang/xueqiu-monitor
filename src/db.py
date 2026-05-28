@@ -384,10 +384,16 @@ def get_last_crawl_time(db_path: str, stock_code: str) -> float:
 
 
 def get_existing_post_ids(db_path: str, stock_code: str) -> set:
-    """返回该股票已存储的所有 post_id 集合，用于过滤去重"""
+    """返回该股票已存储的所有 post_id 集合，用于过滤去重
+    
+    comments 表通过 snapshot_id → crawl_snapshots 间接关联 stock_code，
+    因此用 JOIN 查询而非直接 comments.stock_code（该列不存在）。
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT post_id FROM comments WHERE stock_code=?",
+            """SELECT c.post_id FROM comments c
+               JOIN crawl_snapshots cs ON c.snapshot_id = cs.id
+               WHERE cs.stock_code = ?""",
             (stock_code,)
         ).fetchall()
         return {r[0] for r in rows}
