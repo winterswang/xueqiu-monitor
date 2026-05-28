@@ -282,14 +282,20 @@ def _analyze_group(
             parsed = _parse_json(text)
             mapped = 0
             for item in parsed:
+                if not isinstance(item, dict):
+                    continue
                 local_idx = item.get("i", item.get("id", -1))
-                if isinstance(local_idx, int) and 0 <= local_idx < len(idxs):
+                if not isinstance(local_idx, int):
+                    local_idx = -1
+                if 0 <= local_idx < len(idxs):
                     global_idx = idxs[local_idx]
                     try:
                         scores[global_idx] = float(item.get("s", item.get("sentiment", 0.0)))
                         mapped += 1
                     except (TypeError, ValueError):
                         pass
+            if mapped == 0 and parsed:
+                logger.debug(f"Sentiment {group_label}: parse mismatch, preview={text[:300]}")
 
             pos = sum(1 for idx in idxs if scores[idx] > 0.1)
             neg = sum(1 for idx in idxs if scores[idx] < -0.1)
