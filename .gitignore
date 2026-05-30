@@ -1,7 +1,12 @@
 data/*.db
+data/*.db-*
 logs/
 __pycache__/
 *.pyc
 .venv/
 output/
 .DS_Store
+.coverage
+htmlcov/
+etc/config.local.json
+data/watchlist.json

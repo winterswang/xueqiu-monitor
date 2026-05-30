@@ -221,7 +221,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             )
             alerts.extend(hw_alerts)
 
-            # Store hot word events
+            # Store hot word events + update hot_word_dict
             curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
             for word, score in curr_tfidf.items():
                 db.insert_hot_word_event(db_path, HotWordEvent(
@@ -231,6 +231,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     event_time=now,
                     z_score=0.0,  # computed above
                 ))
+                db.upsert_hot_word(db_path, word, now)
 
         # ── Collect supplemental data for push key_data (§2.5)
         prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
@@ -260,7 +261,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             all_alerts.append(alert)
 
     # ── Notification ──
-    pending_path = "/tmp/xueqiu_monitor_pending.json"
+    pending_path = cfg.notification.get("pending_path", "/tmp/xueqiu_monitor_pending.json")
     p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
     p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
 
@@ -342,6 +343,23 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
     # ── Crawl Health Report ──
     _log_crawl_health(crawl_results, summary, logger)
+
+    # ── Health alert: success rate < 98% (§2.1) ──
+    total_stocks = len(crawl_results)
+    if not dry_run and total_stocks > 0:
+        success_count = summary["crawled"]
+        success_rate = success_count / total_stocks
+        if success_rate < 0.98:
+            failed_count = total_stocks - success_count
+            health_msg = (
+                f"⚠️ **爬取健康告警**\n\n"
+                f"成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）\n\n"
+                f"请检查网络状态和 xueqiu-analyzer 日志。"
+            )
+            notifier.write_pending_messages([health_msg], pending_path)
+            logger.warning(
+                f"爬取成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）→ 已写入待发送消息"
+            )
 
     return summary
 

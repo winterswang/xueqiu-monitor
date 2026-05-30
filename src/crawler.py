@@ -269,7 +269,6 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                     update_last_crawl_time(db_path, stock_code, max(all_ts))
 
         result["status"] = "success"
-        result["sentiment_avg"] = _compute_sentiment_avg(posts)
 
         # ── LLM Sentiment Analysis (batch, per stock) ──
         if posts:
@@ -278,9 +277,9 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                 for j, s in enumerate(scores):
                     posts[j]["sentiment_score"] = s
                 result["posts_data"] = posts
-                result["sentiment_avg"] = _compute_sentiment_avg(posts)
             except Exception as e:
                 logger.warning(f"{stock_code} sentiment 分析失败: {e}")
+        result["sentiment_avg"] = _compute_sentiment_avg(posts)
     except Exception as e:
         result["status"] = "failed"
         result["error"] = str(e)
@@ -572,6 +571,8 @@ def _parse_post_time(time_str: str, now: float) -> float:
         target = now_dt.replace(
             month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0
         )
+        if target.timestamp() > now:
+            target = target.replace(year=target.year - 1)
         return target.timestamp()
 
     # "MM-DD"
@@ -581,6 +582,8 @@ def _parse_post_time(time_str: str, now: float) -> float:
         target = now_dt.replace(
             month=month, day=day, hour=0, minute=0, second=0, microsecond=0
         )
+        if target.timestamp() > now:
+            target = target.replace(year=target.year - 1)
         return target.timestamp()
 
     # "HH:MM"

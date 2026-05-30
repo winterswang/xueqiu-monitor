@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
         "webhook_url": "",         # set via env FEISHU_WEBHOOK_URL
         "push_timeout": 5,         # seconds
         "max_retries": 2,
+        "pending_path": "/tmp/xueqiu_monitor_pending.json",
     },
     "cold_start": {
         "enabled": True,

@@ -18,6 +18,20 @@ from .models import ChangeAlert, PushHistory
 
 logger = logging.getLogger(__name__)
 
+# ── Shared constants ──────────────────────────────────────────
+_PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
+_TYPE_LABELS = {
+    "sentiment_shift": "情感偏移",
+    "post_spike": "帖子激增",
+    "hot_word_surge": "热词涌现",
+    "new_announcement": "新公告",
+}
+
+# ── Entry points exposed to cli.py ────────────────────────────
+__all__ = [
+    "format_immediate_alert_message", "format_digest_message",
+    "write_pending_messages", "generate_daily_report",
+]
 
 # ════════════════════════════════════════════════════════
 # Alert card (keep for future card-format needs)
@@ -25,13 +39,8 @@ logger = logging.getLogger(__name__)
 
 def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
     """Build Feishu interactive card for a single alert with key data fields."""
-    priority_emoji = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
-    type_labels = {
-        "sentiment_shift": "情感偏移",
-        "post_spike": "帖子激增",
-        "hot_word_surge": "热词涌现",
-        "new_announcement": "新公告",
-    }
+    priority_emoji = _PRIORITY_EMOJI
+    type_labels = _TYPE_LABELS
     emoji = priority_emoji.get(alert.priority, "⚪")
     type_label = type_labels.get(alert.alert_type, alert.alert_type)
     stock_name = key_data.get("stock_name", "")
@@ -93,13 +102,8 @@ def format_immediate_alert_message(alert: ChangeAlert, key_data: dict) -> str:
     Returns:
         Formatted markdown string for Feishu IM bot.
     """
-    priority_emoji = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
-    type_labels = {
-        "sentiment_shift": "情感偏移",
-        "post_spike": "帖子激增",
-        "hot_word_surge": "热词涌现",
-        "new_announcement": "新公告",
-    }
+    priority_emoji = _PRIORITY_EMOJI
+    type_labels = _TYPE_LABELS
     emoji = priority_emoji.get(alert.priority, "⚪")
     type_label = type_labels.get(alert.alert_type, alert.alert_type)
     stock_name = key_data.get("stock_name", "")
@@ -194,7 +198,6 @@ def generate_daily_report(
     """
     if not alerts:
         # 无告警时也输出爬取摘要
-        from collections import Counter
         lines = ["# 雪球舆情日报\n"]
         lines.append(f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M')}\n")
         lines.append("📊 今日无舆情异常变化。\n")
@@ -204,7 +207,7 @@ def generate_daily_report(
             lines.append("|------|--------|----------|----------|")
             for code, posts in sorted(posts_data_map.items()):
                 count = len(posts)
-                scores = [p.get("sentiment_score", 0.0) for p in posts if p.get("sentiment_score")]
+                scores = [p.get("sentiment_score", 0.0) for p in posts if p.get("sentiment_score") is not None]
                 if scores:
                     avg = sum(scores) / len(scores)
                     if avg > 0.1:

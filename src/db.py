@@ -396,18 +396,19 @@ def get_last_crawl_time(db_path: str, stock_code: str) -> float:
         return float(row["last_post_time"]) if row else 0.0
 
 
-def get_existing_post_ids(db_path: str, stock_code: str) -> set:
-    """返回该股票已存储的所有 post_id 集合，用于过滤去重
-    
+def get_existing_post_ids(db_path: str, stock_code: str, window_days: int = 30) -> set:
+    """返回该股票最近 window_days 天内已存储的 post_id 集合，用于过滤去重。
+
     comments 表通过 snapshot_id → crawl_snapshots 间接关联 stock_code，
     因此用 JOIN 查询而非直接 comments.stock_code（该列不存在）。
     """
+    cutoff = int(time.time()) - window_days * 86400
     with _connect(db_path) as conn:
         rows = conn.execute(
             """SELECT c.post_id FROM comments c
                JOIN crawl_snapshots cs ON c.snapshot_id = cs.id
-               WHERE cs.stock_code = ?""",
-            (stock_code,)
+               WHERE cs.stock_code = ? AND cs.crawl_time > ?""",
+            (stock_code, cutoff)
         ).fetchall()
         return {r[0] for r in rows}
 
