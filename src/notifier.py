@@ -1,16 +1,27 @@
-"""xueqiu-monitor: notification module (Feishu IM bot via pending JSON)
+"""xueqiu-monitor: notification module
 
-Phase 1: structured text messages (no LLM).
-- P0 immediate alert formatting
-- P1 digest formatting
-- Pending message file writer (consumed by external scheduler)
-- Daily report generation
+Two delivery modes (auto-detected):
+  1. lark CLI — if `lark-cli` is installed and configured, sends directly
+  2. File — writes JSON to a pending file (consumed by external scheduler)
+
+Mode is selected by config and availability:
+  - notification.mode = "lark_cli": force lark CLI (falls back to file if unavailable)
+  - notification.mode = "file":     force file mode
+  - notification.mode = "auto" (default): auto-detect, lark CLI preferred
+
+Formatting:
+  - P0: immediate alert (one message per alert)
+  - P1: digest (batch summary)
+  - Daily report: generated independently
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import subprocess
 import time
 from typing import Any
 
@@ -30,7 +41,7 @@ _TYPE_LABELS = {
 # ── Entry points exposed to cli.py ────────────────────────────
 __all__ = [
     "format_immediate_alert_message", "format_digest_message",
-    "write_pending_messages", "generate_daily_report",
+    "dispatch_messages", "generate_daily_report",
 ]
 
 # ════════════════════════════════════════════════════════
@@ -183,6 +194,111 @@ def write_pending_messages(messages: list[str], output_path: str) -> str:
     logger.info(f"待发送消息已写入: {output_path} ({len(messages)} 条)")
     return output_path
 
+
+# ════════════════════════════════════════════════════════
+# Dispatch (dual-mode)
+# ════════════════════════════════════════════════════════
+
+def _lark_cli_available() -> tuple[bool, str]:
+    """Check if lark-cli is installed and authenticated.
+
+    Returns (available, reason).
+    """
+    if not shutil.which("lark-cli"):
+        return False, "lark-cli not found in PATH"
+    try:
+        result = subprocess.run(
+            ["lark-cli", "auth", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        output = result.stdout or result.stderr or ""
+        status = json.loads(output)
+        # Check if any identity (bot or user) is available
+        identities = status.get("identities", {})
+        for ident_name, ident_info in identities.items():
+            if ident_info.get("available"):
+                return True, f"{ident_name} identity: ready"
+        # No identity available
+        if status.get("error"):
+            err = status["error"].get("message", "not configured")
+            return False, f"lark-cli not configured: {err}"
+        return False, "no available identity"
+    except json.JSONDecodeError:
+        return False, "lark-cli auth status returned non-JSON"
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+
+
+def _send_via_lark_cli(text: str, chat_id: str) -> bool:
+    """Send a single markdown message via lark-cli.
+
+    Returns True on success.
+    """
+    try:
+        result = subprocess.run(
+            ["lark-cli", "im", "+messages-send",
+             "--chat-id", chat_id,
+             "--markdown", text,
+             "--as", "bot"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info(f"lark-cli 消息发送成功: chat_id={chat_id[:12]}...")
+            return True
+        else:
+            logger.warning(f"lark-cli 发送失败: {result.stderr[:200]}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.warning("lark-cli 发送超时")
+        return False
+    except OSError as e:
+        logger.warning(f"lark-cli 调用失败: {e}")
+        return False
+
+
+def dispatch_messages(
+    messages: list[str],
+    pending_path: str,
+    mode: str = "auto",
+    lark_chat_id: str | None = None,
+) -> int:
+    """Dispatch messages via the best available channel.
+
+    Args:
+        messages: List of formatted markdown strings.
+        pending_path: Fallback file path when lark-cli is unavailable.
+        mode: "auto" | "lark_cli" | "file"
+        lark_chat_id: Required for lark_cli mode.
+
+    Returns:
+        Number of messages dispatched.
+    """
+    if not messages:
+        return 0
+
+    # Decide channel
+    use_lark = False
+    if mode == "lark_cli":
+        use_lark = True
+    elif mode == "auto":
+        avail, reason = _lark_cli_available()
+        use_lark = avail
+        if not avail:
+            logger.info(f"lark-cli 不可用 ({reason}) → 回退文件模式")
+
+    if use_lark:
+        if not lark_chat_id:
+            logger.warning("lark_cli 模式需要 lark_chat_id，回退文件模式")
+        else:
+            sent = 0
+            for msg in messages:
+                if _send_via_lark_cli(msg, lark_chat_id):
+                    sent += 1
+            return sent
+
+    # Fallback: write to file
+    write_pending_messages(messages, pending_path)
+    return len(messages)
 
 # ════════════════════════════════════════════════════════
 # Daily report

@@ -39,6 +39,8 @@ DEFAULT_CONFIG = {
         "push_timeout": 5,         # seconds
         "max_retries": 2,
         "pending_path": "/tmp/xueqiu_monitor_pending.json",
+        "mode": "auto",            # auto | lark_cli | file
+        "lark_chat_id": "",        # feishu group chat id (required for lark_cli mode)
     },
     "cold_start": {
         "enabled": True,
@@ -87,6 +89,8 @@ class Config:
             cfg.setdefault("crawler", {})["xueqiu_analyzer_path"] = os.environ["XUEQIU_ANALYZER_PATH"]
         if "MORNING_BRIEF_DB" in os.environ:
             cfg.setdefault("crawler", {})["morning_brief_db"] = os.environ["MORNING_BRIEF_DB"]
+        if "LARK_CHAT_ID" in os.environ:
+            cfg.setdefault("notification", {})["lark_chat_id"] = os.environ["LARK_CHAT_ID"]
         return cls(**cfg)
 
     @classmethod

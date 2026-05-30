@@ -310,9 +310,13 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     status="pending",
                 ))
 
-        # Write pending messages for external scheduler
+        # Dispatch messages via lark-cli or file fallback
         if pending_messages:
-            notifier.write_pending_messages(pending_messages, pending_path)
+            notifier.dispatch_messages(
+                pending_messages, pending_path,
+                mode=cfg.notification.get("mode", "auto"),
+                lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+            )
 
     # ── Daily report ──
     # Build posts_data_map for report
@@ -356,7 +360,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 f"成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）\n\n"
                 f"请检查网络状态和 xueqiu-analyzer 日志。"
             )
-            notifier.write_pending_messages([health_msg], pending_path)
+            notifier.dispatch_messages(
+                [health_msg], pending_path,
+                mode=cfg.notification.get("mode", "auto"),
+                lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+            )
             logger.warning(
                 f"爬取成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）→ 已写入待发送消息"
             )
