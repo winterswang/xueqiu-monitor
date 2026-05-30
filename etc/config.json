@@ -4,16 +4,15 @@
     "timeout_seconds": 1200,
     "max_retries": 0,
     "concurrency": 1,
-    "whitelist": [
-      "600519.SH",
-      "700.HK",
-      "AAPL.US"
-    ]
+    "whitelist": [],
+    "xueqiu_analyzer_path": "/Users/wangguangchao/code/claude_code/xueqiu-analyzer-skill/src"
   },
   "detector": {
     "z_score_window_days": 14
   },
   "notification": {
-    "webhook_url": ""
+    "webhook_url": "",
+    "mode": "auto",
+    "pending_path": "/tmp/xueqiu_monitor_pending.json"
   }
 }
