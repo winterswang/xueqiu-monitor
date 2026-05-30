@@ -87,13 +87,14 @@ def _fetch_watchlist(access_token: str) -> list[dict] | None:
             print(f"⚠️  API error: {resp.status_code} {resp.text[:200]}")
             return None
 
-        data = resp.json()
+        raw = resp.json()
+        groups = raw.get("data", {}).get("groups", [])
         stocks = []
-        for group in data.get("groups", []):
+        for group in groups:
             for sec in group.get("securities", []):
                 symbol = sec.get("symbol", "")
-                name_cn = sec.get("name_cn", "") or sec.get("name_en", "")
-                stocks.append({"stock_code": symbol, "stock_name": name_cn})
+                name = sec.get("name", "") or sec.get("name_cn", "") or sec.get("name_en", "")
+                stocks.append({"stock_code": symbol, "stock_name": name})
         return stocks
 
     except requests.RequestException as e:
