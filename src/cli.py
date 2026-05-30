@@ -36,14 +36,50 @@ from .models import (
 # ════════════════════════════════════════════════════════
 
 def setup_logging(verbose: bool = False) -> None:
+    """Setup logging with structured format for machine parsing.
+
+    Set LOG_JSON=1 env var for JSON-structured log output (log aggregation).
+    """
     level = logging.DEBUG if verbose else logging.INFO
-    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    logging.basicConfig(level=level, format=fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    if os.environ.get("LOG_JSON"):
+        class JsonFormatter(logging.Formatter):
+            def format(self, record):
+                return json.dumps({
+                    "time": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
+                    "level": record.levelname,
+                    "module": record.name,
+                    "msg": record.getMessage(),
+                }, ensure_ascii=False)
+        handler = logging.StreamHandler()
+        handler.setFormatter(JsonFormatter())
+        logging.basicConfig(level=level, handlers=[handler])
+    else:
+        fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        logging.basicConfig(level=level, format=fmt, datefmt="%Y-%m-%d %H:%M:%S")
 
 
 # ════════════════════════════════════════════════════════
 # Pipeline
 # ════════════════════════════════════════════════════════
+
+_PHASE_TIMERS: dict[str, float] = {}
+
+
+def _phase(name: str, start: bool = True) -> float | None:
+    """Phase timer: call with start=True to begin, start=False to end and log.
+
+    Returns elapsed seconds on end, None on start.
+    """
+    log = logging.getLogger(__name__)
+    if start:
+        _PHASE_TIMERS[name] = time.time()
+        log.info(f"[PHASE] {name} start")
+        return None
+    else:
+        elapsed = time.time() - _PHASE_TIMERS.pop(name, time.time())
+        log.info(f"[PHASE] {name} end elapsed={elapsed:.1f}s")
+        return elapsed
+
 
 def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     """Execute the full monitoring pipeline.
@@ -59,8 +95,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     logger = logging.getLogger(__name__)
 
     # Decay stale weights before each run
+    _phase("pipeline.weight_decay")
     fbloop.decay_stale_weights(db_path, cfg.feedback)
-    logger.info("权重衰减检查完成")
+    _phase("pipeline.weight_decay", start=False)
+
+    pipeline_start = time.time()
+    errors: list[str] = []
 
     # Load watchlist (pass crawler config for morning_brief_db override)
     watchlist_cfg = {"watchlist_path": cfg.watchlist_path, **cfg.crawler}
@@ -96,12 +136,17 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     total_alerts = 0
     all_alerts: list[ChangeAlert] = []
     stock_extra: dict[str, dict] = {}  # supplemental data for push_immediate key_data
+    detect_errors = 0
 
+    _phase("pipeline.detect")
     for cr in crawl_results:
+        stock_code = cr.get("stock_code", "?")
         if cr["status"] != "success":
+            logger.debug(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
             continue
 
         stock_code = cr["stock_code"]
+        stock_start = time.time()
         now = int(time.time())
 
         # ── Store snapshot ──
@@ -369,7 +414,48 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 f"爬取成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）→ 已写入待发送消息"
             )
 
+    # ── Log structured summary ──
+    elapsed = int(time.time() - pipeline_start)
+    summary["elapsed_seconds"] = elapsed
+    summary["errors"] = errors
+    logger.info(
+        "[SUMMARY] "
+        f"stocks={summary['crawled'] + summary['failed']}/{summary['total_stocks']} "
+        f"success={summary['crawled']} "
+        f"failed={summary['failed']} "
+        f"alerts={summary['alerts']} "
+        f"p0={summary['p0']} "
+        f"p1={summary['p1']} "
+        f"p2={summary['p2']} "
+        f"filtered={summary['filtered']} "
+        f"elapsed={elapsed}s"
+    )
+
     return summary
+
+
+def _build_summary(
+    errors: list[str],
+    crawl_results: list[dict],
+    stocks: list[dict],
+    alerts: list[ChangeAlert],
+    elapsed: int,
+) -> dict:
+    """Build a consistent summary dict for early-abort paths."""
+    crawled = sum(1 for r in crawl_results if r["status"] == "success") if crawl_results else 0
+    return {
+        "error": errors[-1] if errors else None,
+        "errors": errors,
+        "crawled": crawled,
+        "failed": len(crawl_results) - crawled if crawl_results else 0,
+        "total_stocks": len(stocks),
+        "alerts": len(alerts),
+        "p0": sum(1 for a in alerts if a.priority == "P0"),
+        "p1": sum(1 for a in alerts if a.priority == "P1"),
+        "p2": sum(1 for a in alerts if a.priority == "P2"),
+        "filtered": sum(1 for a in alerts if a.filtered),
+        "elapsed_seconds": elapsed,
+    }
 
 
 def _get_stock_name(stocks: list[dict], code: str) -> str:
