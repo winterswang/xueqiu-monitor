@@ -1,6 +1,7 @@
 # xueqiu-monitor Phase 1 dependencies
 #
 # Runtime
+python-dotenv>=1.0.0        # .env file support
 numpy>=1.24.0
 scikit-learn>=1.3.0
 anthropic>=0.49.0          # LLM sentiment analysis (optional — degraded to keyword if missing)

@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 output/
 .DS_Store
+.env
 .coverage
 htmlcov/
 etc/config.local.json
