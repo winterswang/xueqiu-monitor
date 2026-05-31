@@ -1,0 +1,322 @@
+{
+  "68.HK": {
+    "name": "群核科技",
+    "sector": "科技",
+    "market": "港股"
+  },
+  "CBRS.US": {
+    "name": "Cerebras",
+    "sector": "半导体",
+    "market": "美股"
+  },
+  "1698.HK": {
+    "name": "腾讯音乐-SW",
+    "sector": "互联网",
+    "market": "港股"
+  },
+  "688333.SH": {
+    "name": "铂力特",
+    "sector": "制造业",
+    "market": "A股"
+  },
+  "CRWV.US": {
+    "name": "Coreweave",
+    "sector": "半导体",
+    "market": "美股"
+  },
+  "RACE.US": {
+    "name": "法拉利",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "1913.HK": {
+    "name": "普拉达",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "HESAY.US": {
+    "name": "爱马仕(ADR)",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "NTDOY.US": {
+    "name": "任天堂(ADR)",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "688521.SH": {
+    "name": "芯原股份",
+    "sector": "半导体",
+    "market": "A股"
+  },
+  "FISV.US": {
+    "name": "Fiserv, Inc.",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "ASML.US": {
+    "name": "阿斯麦",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "TEM.US": {
+    "name": "Tempus AI",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "CRCL.US": {
+    "name": "Circle",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "TCOM.US": {
+    "name": "携程网",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "300.HK": {
+    "name": "美的集团",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "300866.SZ": {
+    "name": "安克创新",
+    "sector": "其他",
+    "market": "A股"
+  },
+  "1364.HK": {
+    "name": "古茗",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "SE.US": {
+    "name": "Sea",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "1179.HK": {
+    "name": "华住集团-S",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "HTHT.US": {
+    "name": "华住酒店",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "002241.SZ": {
+    "name": "歌尔股份",
+    "sector": "其他",
+    "market": "A股"
+  },
+  "NVO.US": {
+    "name": "诺和诺德公司",
+    "sector": "医药",
+    "market": "美股"
+  },
+  "TAL.US": {
+    "name": "好未来",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "9992.HK": {
+    "name": "泡泡玛特",
+    "sector": "潮玩",
+    "market": "港股"
+  },
+  "DUOL.US": {
+    "name": "多邻国",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "XNET.US": {
+    "name": "迅雷",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "688775.SH": {
+    "name": "影石创新",
+    "sector": "科技",
+    "market": "A股"
+  },
+  "2899.HK": {
+    "name": "紫金矿业",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "300760.SZ": {
+    "name": "迈瑞医疗",
+    "sector": "其他",
+    "market": "A股"
+  },
+  "1030.HK": {
+    "name": "新城发展",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "883.HK": {
+    "name": "中国海洋石油",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "1138.HK": {
+    "name": "中远海能",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "RDDT.US": {
+    "name": "Reddit",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "APP.US": {
+    "name": "AppLovin",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "NVDA.US": {
+    "name": "英伟达",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "1880.HK": {
+    "name": "中国中免",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "BABA.US": {
+    "name": "阿里巴巴",
+    "sector": "电商",
+    "market": "美股"
+  },
+  "2400.HK": {
+    "name": "心动公司",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "UBER.US": {
+    "name": "优步",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "ABNB.US": {
+    "name": "爱彼迎",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "TCEHY.US": {
+    "name": "腾讯控股(ADR)",
+    "sector": "互联网",
+    "market": "美股"
+  },
+  "AMZN.US": {
+    "name": "亚马逊",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "BEKE.US": {
+    "name": "贝壳",
+    "sector": "互联网",
+    "market": "美股"
+  },
+  "2423.HK": {
+    "name": "贝壳-W",
+    "sector": "互联网",
+    "market": "港股"
+  },
+  "LKNCY.US": {
+    "name": "瑞幸咖啡(ADR)",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "981.HK": {
+    "name": "中芯国际",
+    "sector": "其他",
+    "market": "港股"
+  },
+  "TSM.US": {
+    "name": "台积电",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "META.US": {
+    "name": "Meta",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "GOOGL.US": {
+    "name": "谷歌-A",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "000300.SH": {
+    "name": "沪深300",
+    "sector": "其他",
+    "market": "A股"
+  },
+  ".SPX.US": {
+    "name": "标普 500 指数",
+    "sector": "其他",
+    "market": "美股"
+  },
+  ".IXIC.US": {
+    "name": "纳斯达克综合指数",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "HSI.HK": {
+    "name": "恒生指数",
+    "sector": "其他",
+    "market": "指数"
+  },
+  "HSTECH.HK": {
+    "name": "恒生科技指数",
+    "sector": "其他",
+    "market": "指数"
+  },
+  "3690.HK": {
+    "name": "美团-W",
+    "sector": "互联网",
+    "market": "港股"
+  },
+  "BRK.B.US": {
+    "name": "伯克希尔哈撒韦-B",
+    "sector": "其他",
+    "market": "美股"
+  },
+  "300750.SZ": {
+    "name": "宁德时代",
+    "sector": "新能源",
+    "market": "A股"
+  },
+  "PDD.US": {
+    "name": "拼多多",
+    "sector": "电商",
+    "market": "美股"
+  },
+  "MNSO.US": {
+    "name": "名创优品",
+    "sector": "消费",
+    "market": "美股"
+  },
+  "TSLA.US": {
+    "name": "特斯拉",
+    "sector": "新能源汽车",
+    "market": "美股"
+  },
+  "AAPL.US": {
+    "name": "苹果",
+    "sector": "消费电子",
+    "market": "美股"
+  },
+  "700.HK": {
+    "name": "腾讯控股",
+    "sector": "互联网",
+    "market": "港股"
+  },
+  "600519.SH": {
+    "name": "贵州茅台",
+    "sector": "白酒",
+    "market": "A股"
+  }
+}
