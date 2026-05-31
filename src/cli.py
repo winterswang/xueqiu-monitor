@@ -243,6 +243,9 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             computed_std = 0.0
 
         # ── Store sentiment stat for next run ──
+        # Use max z_score from non-announcement alerts only
+        signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
+        max_z = max((a.z_score for a in signal_alerts), default=0.0)
         today_start = now // 86400 * 86400
         stat = SentimentStat(
             stock_code=stock_code,
@@ -250,8 +253,8 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             posts_count=cr["posts_count"],
             sentiment_mean=cr["sentiment_avg"],
             sentiment_std=computed_std,
-            z_score=max(a.z_score for a in alerts) if alerts else 0.0,
-            z_alert=1 if alerts else 0,
+            z_score=max_z,
+            z_alert=1 if signal_alerts else 0,
         )
         db.insert_sentiment_stat(db_path, stat)
 
@@ -298,10 +301,10 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         # ── Filter ──
         alerts = rule_filter.filter_alerts(alerts, cr["posts_data"], cold, cfg.filter)
 
-        # ── Store alerts ──
-        for alert in alerts:
-            alert_id = db.insert_alert(db_path, alert)
-            alert.id = alert_id
+        # ── Store alerts (batch insert for performance) ──
+        alert_ids = db.insert_alerts_batch(db_path, alerts)
+        for alert, aid in zip(alerts, alert_ids):
+            alert.id = aid
             total_alerts += 1
             all_alerts.append(alert)
 

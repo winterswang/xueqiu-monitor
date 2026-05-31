@@ -163,6 +163,31 @@ def insert_alert(db_path: str, alert: ChangeAlert) -> int:
         return cur.lastrowid
 
 
+def insert_alerts_batch(db_path: str, alerts: list[ChangeAlert]) -> list[int]:
+    """Batch insert multiple alerts in one connection.
+
+    Returns list of inserted ids (None for rows that failed).
+    """
+    if not alerts:
+        return []
+    rows = []
+    with _connect(db_path) as conn:
+        for alert in alerts:
+            d = alert.to_dict()
+            del d["id"]
+            try:
+                cur = conn.execute(
+                    """INSERT INTO change_alert (stock_code, alert_time, alert_type, z_score, magnitude, detail, priority, filtered, filter_reason)
+                       VALUES (:stock_code, :alert_time, :alert_type, :z_score, :magnitude, :detail, :priority, :filtered, :filter_reason)""",
+                    d
+                )
+                rows.append(cur.lastrowid)
+            except Exception as e:
+                logger.warning(f"insert_alert failed: stock={alert.stock_code} error={e}")
+                rows.append(None)
+    return rows
+
+
 def get_pending_alerts(db_path: str, priority: str | None = None) -> list[ChangeAlert]:
     """Get unfiltered alerts, optionally filtered by priority."""
     with _connect(db_path) as conn:

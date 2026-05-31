@@ -255,16 +255,20 @@ def detect_new_announcement(
     curr_announcements: list[dict],
     prev_announcements: list[dict],
     z_threshold: float = 2.0,
+    max_alerts: int = 50,
 ) -> list[ChangeAlert]:
     """Detect new announcements by comparing titles with previous crawl.
 
     A new announcement is one whose normalized title does not appear in
-    the previous day's announcement set.
+    the previous day's announcement set. Capped at max_alerts to prevent
+    alert explosion on first run.
 
     Args:
         stock_code: Stock code (e.g. SH600519)
         curr_announcements: Today's announcements [{title, time, notice_type}]
         prev_announcements: Previous crawl's announcements (same format)
+        z_threshold: Z-score threshold for alert (default 2.0)
+        max_alerts: Max alerts per stock per run (default 50, to prevent P2 explosion)
 
     Returns ChangeAlert per new announcement.
     """
@@ -276,6 +280,8 @@ def detect_new_announcement(
     now_ts = int(time.time())
     alerts = []
     for ann in curr_announcements:
+        if len(alerts) >= max_alerts:
+            break
         norm = _normalize_title(ann.get("title", ""))
         if not norm or len(norm) < 4:
             continue
