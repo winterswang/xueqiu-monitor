@@ -1,9 +1,10 @@
 {
   "db_path": "data/monitor.db",
+  "watchlist_path": "data/watchlist.json",
   "crawler": {
     "timeout_seconds": 1200,
     "max_retries": 0,
-    "concurrency": 1,
+    "concurrency": 2,
     "whitelist": [],
     "xueqiu_analyzer_path": "/Users/wangguangchao/code/claude_code/xueqiu-analyzer-skill/src"
   },
