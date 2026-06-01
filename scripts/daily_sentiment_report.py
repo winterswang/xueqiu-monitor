@@ -172,7 +172,7 @@ def load_alerts(db, cutoff: int) -> list:
             "stock_code": r[0],
             "z_score": r[1],
             "priority": r[2],
-            "detail": (r[3] or '')[:120],
+            "detail": (r[3] or '')[:500],
             "alert_time": r[4],
         })
     return results
