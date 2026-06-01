@@ -1,8 +1,8 @@
 # 📋 项目开发跟踪文档
 
-> 📅 创建于：2026-06-01 | 最后更新：2026-06-01
+> 📅 创建于：2026-06-01 | 最后更新：2026-06-02
 > 🌿 当前分支：main
-> 🤖 最后分析：a332446 | <!-- @@LAST_ANALYZED: a332446 @@-->
+> 🤖 最后分析：aecf72d | <!-- @@LAST_ANALYZED: aecf72d @@-->
 
 ---
 
@@ -94,6 +94,7 @@ cron (07:00)
 | ADR-002 | 2026-05-28 | lark CLI 双模式推送 | 飞书官方 CLI 支持 bot 身份直接推送 | auto 检测 + file fallback | 直接 webhook | notifier.py |
 | ADR-003 | 2026-05-30 | `.env` 文件管理敏感配置 | 环境变量不可追踪，shell 容易泄漏 | python-dotenv 在 `__init__.py` 加载 | shell env / config.json | 全局 |
 | ADR-004 | 2026-05-30 | requests 直连 Longbridge API 替代 Rust SDK | SDK Rust 类无法从 Python 构造，OAuthBuilder 有本地回调端口 bug | HTTP requests + OAuth refresh_token | Rust SDK | sync_watchlist.py |
+| ADR-005 | 2026-06-01 | `crawl()` 增加 `days=1` 增量参数 | 全量爬取 64 只耗时 24h，cron 窗口期不够 | xueqiu-analyzer 的 `crawl(days=1)` 参数 | max_pages=50 全量 | crawler.py |
 
 ---
 
@@ -119,6 +120,7 @@ cron (07:00)
 | F-016 | 结构化日志 + 阶段计时 | P2 | 已发布 | winterswang | 2026-05-30 | v0.1 | cli.py | [PHASE] / [SUMMARY] |
 | F-017 | 健康检查脚本 | P2 | 已发布 | winterswang | 2026-06-01 | v0.1 | health_check.py | |
 | F-018 | 用户反馈闭环 | P0 | 已发布 | winterswang | 2026-05-25 | v0.1 | feedback.py | |
+| F-019 | 自选股情绪日报 | P1 | 已发布 | winterswang | 2026-06-02 | v0.1 | daily_sentiment_report.py | 64只全景看板 |
 
 ---
 
@@ -165,6 +167,20 @@ cron (07:00)
 ---
 
 ## 🔄 版本发布记录
+
+### v0.1.1 (2026-06-02)
+
+**变更摘要**：增量爬取性能优化 + 自选股情绪日报。
+
+#### ✨ 新增功能
+- 自选股情绪日报（`scripts/daily_sentiment_report.py`）：64只全景看板 + 情感聚合 + 板块排行 + 热词提取 + 飞书推送
+- 行业板块映射（`etc/sectors.json`）
+
+#### 🔧 优化改进
+- `crawl()` 增加 `days=1` 参数：增量爬取从 32min 降至 ~9min（65只股）
+
+#### 📚 文档更新
+- 价值投资者工具链种子想法 + 需求文档
 
 ### v0.1.0 (2026-06-01)
 
@@ -219,13 +235,14 @@ cron (07:00)
 
 | 指标 | 数值 | 更新时间 |
 |------|------|----------|
-| Git 提交数 | 39 | 2026-06-01 |
-| 已修复 Bug 数 | 14 | 2026-06-01 |
-| 已完成 Feature 数 | 18 | 2026-06-01 |
-| 活跃分支数 | 1 (main) | 2026-06-01 |
-| 测试覆盖率 | ~53% | 2026-06-01 |
-| 爬取股票数 | 62/64 | 2026-06-01 |
-| 生产运行次数 | 1 | 2026-06-01 |
+| Git 提交数 | 43 | 2026-06-02 |
+| 已修复 Bug 数 | 14 | 2026-06-02 |
+| 已完成 Feature 数 | 19 | 2026-06-02 |
+| 活跃分支数 | 2 (main, feature/daily-sentiment-report) | 2026-06-02 |
+| 测试覆盖率 | ~53% | 2026-06-02 |
+| 爬取股票数 | 65（含新增） | 2026-06-02 |
+| 增量爬取耗时 | 32min → ~9min (days=1) | 2026-06-02 |
+| 生产运行次数 | 2+ | 2026-06-02 |
 
 ---
 
