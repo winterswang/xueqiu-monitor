@@ -436,10 +436,10 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         try:
             xq_code = _to_xueqiu_code(stock_code)
             _crawler = XueqiuCrawler({"headless": True})
-            # V3.1: time-based stop, max_pages=50 as safety cap,
-            # max_articles=20 for detail enrichment (articles prioritized)
+            # V3.2: days=1 增量爬取 — 爬到超过1天的帖子就停止,
+            # DB 层另有 last_crawl_time 二次过滤。max_pages=50 仅做安全兜底
             result_holder["result"] = _crawler.crawl(
-                xq_code, max_pages=50, max_articles=20
+                xq_code, max_pages=50, max_articles=20, days=1
             )
         except Exception as e:
             result_holder["error"] = str(e)
