@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Inspect xueqiu news article page to find correct content selectors."""
 import sys, os, time
-sys.path.insert(0, '/root/code/xueqiu-analyzer-skill/src')
+from pathlib import Path
+sys.path.insert(0, os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
+))
 
 from xueqiu_analyzer.crawler import XueqiuCrawler
 from playwright.sync_api import sync_playwright

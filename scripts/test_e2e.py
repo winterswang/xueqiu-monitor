@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Real E2E test for xueqiu-monitor — crawl SH600519, run full pipeline."""
 import sys, os, time, json, logging
+from pathlib import Path
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s %(message)s')
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, '/root/code/xueqiu-analyzer-skill/src')
+sys.path.insert(0, os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(Path(PROJECT_ROOT).parent / "xueqiu-analyzer-skill" / "src")
+))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
 
 from xueqiu_analyzer.crawler import XueqiuCrawler
