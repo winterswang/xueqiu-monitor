@@ -38,7 +38,11 @@ echo "[$(date '+%Y年 %m月 %d日 %A %H:%M:%S CST')] 开始执行 xueqiu-monitor
 echo "可用内存: ${AVAIL_MB}MB" | tee -a "$LOG_FILE"
 
 cd "$PROJECT_DIR"
-/usr/bin/python3 -m src.cli -c etc/config.json >> "$LOG_FILE" 2>&1
+
+# Python 解释器：默认用 PATH 中的 python3，可通过环境变量覆盖
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+$PYTHON_BIN -m src.cli -c etc/config.json >> "$LOG_FILE" 2>&1
 
 EXIT_CODE=$?
 echo "Exit code: $EXIT_CODE" | tee -a "$LOG_FILE"
