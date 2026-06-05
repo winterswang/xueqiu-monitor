@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
+# Default paths: sibling directories relative to this project root
+# Overridable via env vars or config.json
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 DEFAULT_CONFIG = {
     "db_path": "data/monitor.db",
     "watchlist_path": "../morning-brief/data/watchlist.json",
@@ -17,8 +20,14 @@ DEFAULT_CONFIG = {
         "max_retries": 0,         # no immediate retry, retry on next schedule
         "concurrency": 1,          # sequential (Playwright single-process)
         "whitelist": [],            # 非空时仅爬取列表中的股票，空=全量
-        "xueqiu_analyzer_path": "/root/code/xueqiu-analyzer-skill/src",
-        "morning_brief_db": "/root/code/morning-brief/data/morning-brief.db",
+        "xueqiu_analyzer_path": os.environ.get(
+            "XUEQIU_ANALYZER_PATH",
+            str(Path(_PROJECT_ROOT).parent / "xueqiu-analyzer-skill" / "src"),
+        ),
+        "morning_brief_db": os.environ.get(
+            "MORNING_BRIEF_DB",
+            str(Path(_PROJECT_ROOT).parent / "morning-brief" / "data" / "morning-brief.db"),
+        ),
     },
     "detector": {
         "z_score_window_days": 14,

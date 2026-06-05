@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Verify news content extraction fix — check if content is richer now."""
 import sys, os
-sys.path.insert(0, '/root/code/xueqiu-analyzer-skill/src')
+from pathlib import Path
+sys.path.insert(0, os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
+))
 
 from xueqiu_analyzer.crawler import XueqiuCrawler
 

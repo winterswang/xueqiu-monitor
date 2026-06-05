@@ -13,12 +13,16 @@ Usage:
     python3 scripts/init_historical.py --dry-run          # preview only
 """
 import sys, os, time, json, random, argparse, logging
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, '/root/code/xueqiu-analyzer-skill/src')
+sys.path.insert(0, os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(Path(PROJECT_ROOT).parent / "xueqiu-analyzer-skill" / "src")
+))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
 
 from config import Config

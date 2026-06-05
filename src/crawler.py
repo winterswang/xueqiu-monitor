@@ -19,7 +19,9 @@ from .db import get_existing_post_ids, get_last_crawl_time, update_last_crawl_ti
 from . import sentiment
 
 # Add xueqiu-analyzer to path (configurable via XUEQIU_ANALYZER_PATH env var)
-_XA_PATH = os.environ.get("XUEQIU_ANALYZER_PATH", "/root/code/xueqiu-analyzer-skill/src")
+# Default: sibling directory ../xueqiu-analyzer-skill/src (works on macOS/Linux/Docker)
+_DEFAULT_XA = str(Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
+_XA_PATH = os.environ.get("XUEQIU_ANALYZER_PATH", _DEFAULT_XA)
 if _XA_PATH and _XA_PATH not in sys.path:
     sys.path.insert(0, _XA_PATH)
 
