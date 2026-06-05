@@ -11,3 +11,4 @@ output/
 htmlcov/
 etc/config.local.json
 data/watchlist.json
+DAILY_LOG.md
