@@ -370,11 +370,11 @@ class TestPipelineE2E:
         assert shorts == [0], f"Expected [0], got {shorts}"
         print(f"✅ filter_short_posts: {shorts}")
 
-        # ── Priority assignment ──
+        # ── Priority assignment (thresholds: P0 > 5.0, P1 > 3.0, P2 ≤ 3.0) ──
         assert rule_filter.assign_priority(
-            ChangeAlert(stock_code="T", alert_type="test", z_score=3.5, magnitude=0)) == "P0"
+            ChangeAlert(stock_code="T", alert_type="test", z_score=6.0, magnitude=0)) == "P0"
         assert rule_filter.assign_priority(
-            ChangeAlert(stock_code="T", alert_type="test", z_score=2.5, magnitude=0)) == "P1"
+            ChangeAlert(stock_code="T", alert_type="test", z_score=3.5, magnitude=0)) == "P1"
         assert rule_filter.assign_priority(
             ChangeAlert(stock_code="T", alert_type="test", z_score=1.5, magnitude=0)) == "P2"
         print(f"✅ assign_priority: P0/P1/P2 correct")

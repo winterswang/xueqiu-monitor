@@ -6,6 +6,7 @@ No ORM — raw sqlite3 with parameterized queries.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -306,18 +307,19 @@ def insert_comments(db_path: str, comments: list[Comment]) -> int:
 # ════════════════════════════════════════════════════════
 
 def insert_announcements(db_path: str, anns: list[Announcement]) -> int:
+    inserted = 0
     with _connect(db_path) as conn:
-        count = 0
         for a in anns:
             d = a.to_dict()
             del d["id"]
-            conn.execute(
+            cur = conn.execute(
                 """INSERT OR IGNORE INTO announcements (snapshot_id, stock_code, ann_title, ann_date, ann_type, is_new)
                    VALUES (:snapshot_id, :stock_code, :ann_title, :ann_date, :ann_type, :is_new)""",
                 d
             )
-            count += 1
-        return count
+            if cur.rowcount > 0:
+                inserted += 1
+        return inserted
 
 
 def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
@@ -331,6 +333,55 @@ def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
             {"title": r["ann_title"], "time": str(r["ann_date"]), "notice_type": r["ann_type"]}
             for r in rows
         ]
+
+
+def get_recent_announcement_alerts(
+    db_path: str, stock_code: str, title: str, days: int = 7
+) -> list[dict]:
+    """Check if an announcement was already alerted within N days.
+
+    Returns existing alerts matching stock_code + announcement title hash.
+    Used for deduplication in detect_new_announcement.
+    """
+    import hashlib
+    title_hash = hashlib.md5(title.encode()).hexdigest()
+    cutoff = int(time.time()) - days * 86400
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, detail FROM change_alert
+               WHERE stock_code=? AND alert_type='new_announcement'
+               AND alert_time >= ?""",
+            (stock_code, cutoff)
+        ).fetchall()
+        matches = []
+        for r in rows:
+            try:
+                detail = json.loads(r["detail"]) if r["detail"] else {}
+            except (json.JSONDecodeError, TypeError):
+                detail = {}
+            if detail.get("title_hash") == title_hash:
+                matches.append({"id": r["id"], "title": detail.get("title", "")})
+        return matches
+
+
+def get_historical_new_announcement_counts(
+    db_path: str, stock_code: str, window_days: int = 14
+) -> list[float]:
+    """Get daily new_announcement alert counts for Z-score baseline.
+
+    Returns list of daily counts (one value per day with alerts) for
+    computing Z-score on new announcement volume.
+    """
+    cutoff = int(time.time()) - window_days * 86400
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT COUNT(*) as cnt FROM change_alert
+               WHERE stock_code=? AND alert_type='new_announcement'
+               AND alert_time >= ?
+               GROUP BY (alert_time / 86400)""",
+            (stock_code, cutoff)
+        ).fetchall()
+        return [float(r["cnt"]) for r in rows]
 
 
 # ════════════════════════════════════════════════════════

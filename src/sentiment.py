@@ -46,8 +46,9 @@ MAX_TOKENS_ARTICLE_R    = 8192
 # ── Timeout overrides ────────────────────────────────────────
 # MiniMax can take 2-5 min for large batches; 300s gives enough
 # headroom while catching true hangs.
-LLM_CLIENT_TIMEOUT = 300.0
-LLM_CALL_TIMEOUT   = 300.0
+LLM_CLIENT_TIMEOUT = 120.0
+LLM_CALL_TIMEOUT   = 90.0
+SENTIMENT_TOTAL_TIMEOUT = 120.0  # thread-level cap for entire sentiment call
 
 _client: Any | None = None
 
@@ -145,50 +146,88 @@ def _get_client() -> Any | None:
 # ════════════════════════════════════════════════════════
 
 def analyze_sentiment_batch(posts: list[dict]) -> list[float]:
-    """Analyse sentiment for all posts.
+    """Analyse sentiment for all posts with a hard thread-level timeout.
 
     Strategy:
       1. Group by type (discussion / article / news)
-      2. News → keyword matching (0 LLM calls)
-      3. Each group → one LLM call (titles only for discussions,
+      2. News -> keyword matching (0 LLM calls)
+      3. Each group -> one LLM call (titles only for discussions,
          titles + first 100 chars of body for articles)
 
     Returns sentiment scores in the same order as posts.
+    Falls back to all-zeros if total call exceeds SENTIMENT_TOTAL_TIMEOUT.
     """
+    import threading
+
     n = len(posts)
     if n == 0:
         return []
 
-    # ── Group by type ──────────────────────────────────
+    _result: list[float] = []
+    _done = threading.Event()
+
+    def _run():
+        try:
+            _result.extend(_analyze_sentiment_impl(posts))
+        except Exception as e:
+            logger.warning(f"Sentiment total failed: {e}")
+            _result.extend([0.0] * n)
+        finally:
+            _done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t0 = time.time()
+    t.start()
+    finished = _done.wait(timeout=SENTIMENT_TOTAL_TIMEOUT)
+    elapsed = time.time() - t0
+
+    if not finished:
+        logger.warning(
+            f"Sentiment total timeout ({SENTIMENT_TOTAL_TIMEOUT}s, "
+            f"elapsed={elapsed:.1f}s), fallback to 0.0"
+        )
+        return [0.0] * n
+
+    if len(_result) != n:
+        logger.warning(f"Sentiment result mismatch ({len(_result)} vs {n})")
+        return _result[:n] + [0.0] * max(0, n - len(_result)) if _result else [0.0] * n
+
+    return _result
+
+
+def _analyze_sentiment_impl(posts: list[dict]) -> list[float]:
+    """Actual implementation -- called inside timeout wrapper."""
+    n = len(posts)
+
+    # Group by type
     groups: dict[str, list[int]] = {"discussion": [], "article": [], "news": []}
     for i, p in enumerate(posts):
         t = p.get("type", "discussion")
         groups.setdefault(t, []).append(i)
 
-    # ── Sentiment array (init neutral) ─────────────────
+    # Sentiment array (init neutral)
     scores = [0.0] * n
 
     client = _get_client()
     if not client:
-        # Without client → news still gets keyword, rest = 0
         _analyze_news(posts, groups.get("news", []), scores)
         return scores
 
-    # ── News: keyword (always, regardless of client) ───
+    # News: keyword (always, regardless of client)
     news_idxs = groups.get("news", [])
     if news_idxs:
         _analyze_news(posts, news_idxs, scores)
-        logger.info(f"Sentiment news (keyword): {len(news_idxs)} 条")
+        logger.info(f"Sentiment news (keyword): {len(news_idxs)} posts")
 
-    # ── Discussions: sub-batched to avoid timeout ────────
+    # Discussions: sub-batched to avoid timeout
     disc_idxs = groups.get("discussion", [])
     if disc_idxs:
         n_disc = len(disc_idxs)
         n_batches = (n_disc + DISCUSSION_BATCH_SIZE - 1) // DISCUSSION_BATCH_SIZE
         if n_batches > 1:
             logger.info(
-                f"Sentiment discussion: {n_disc} 条 → {n_batches} 批次 "
-                f"(每批≤{DISCUSSION_BATCH_SIZE})"
+                f"Sentiment discussion: {n_disc} posts -> {n_batches} batches "
+                f"(<={DISCUSSION_BATCH_SIZE}/batch)"
             )
         for b in range(n_batches):
             start = b * DISCUSSION_BATCH_SIZE
@@ -201,7 +240,7 @@ def analyze_sentiment_batch(posts: list[dict]) -> list[float]:
                 max_tokens_retry=MAX_TOKENS_DISCUSSION_R,
             )
 
-    # ── Articles: single call ──────────────────────────
+    # Articles: single call
     art_idxs = groups.get("article", [])
     if art_idxs:
         _analyze_group(
@@ -212,11 +251,6 @@ def analyze_sentiment_batch(posts: list[dict]) -> list[float]:
         )
 
     return scores
-
-
-# ════════════════════════════════════════════════════════
-# Per-group analysis
-# ════════════════════════════════════════════════════════
 
 def _analyze_group(
     posts: list[dict],

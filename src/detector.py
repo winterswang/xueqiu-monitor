@@ -9,6 +9,7 @@ Phase 1: rule-based detection, no LLM.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -254,23 +255,29 @@ def detect_new_announcement(
     stock_code: str,
     curr_announcements: list[dict],
     prev_announcements: list[dict],
+    db_path: str | None = None,
     z_threshold: float = 2.0,
     max_alerts: int = 50,
 ) -> list[ChangeAlert]:
-    """Detect new announcements by comparing titles with previous crawl.
+    """Detect new announcements with DB-level dedup and real Z-score.
 
-    A new announcement is one whose normalized title does not appear in
-    the previous day's announcement set. Capped at max_alerts to prevent
-    alert explosion on first run.
+    Two-stage dedup:
+    1. Cross-check against previous snapshot's announcement titles
+    2. DB-level check: skip if same stock+title was alerted within 7 days
+
+    Z-score is computed from historical daily new-announcement counts
+    (replaces hardcoded Z=3.00 sentinel).
 
     Args:
         stock_code: Stock code (e.g. SH600519)
         curr_announcements: Today's announcements [{title, time, notice_type}]
         prev_announcements: Previous crawl's announcements (same format)
+        db_path: Path to SQLite DB for cross-run dedup + Z-score baseline.
+                 When None, falls back to Z=3.00 sentinel (no DB context).
         z_threshold: Z-score threshold for alert (default 2.0)
-        max_alerts: Max alerts per stock per run (default 50, to prevent P2 explosion)
+        max_alerts: Max alerts per stock per run (default 50)
 
-    Returns ChangeAlert per new announcement.
+    Returns ChangeAlert per genuinely new announcement.
     """
     if not curr_announcements:
         return []
@@ -279,26 +286,56 @@ def detect_new_announcement(
 
     now_ts = int(time.time())
     alerts = []
+
+    # Compute Z-score from historical daily announcement counts
+    if db_path:
+        from . import db  # lazy import to avoid circular dependency at module level
+        hist_counts = db.get_historical_new_announcement_counts(db_path, stock_code)
+        z_score = compute_z_score(
+            float(len(curr_announcements)), hist_counts
+        ) if len(hist_counts) >= 2 else 0.0
+    else:
+        z_score = 3.0  # legacy sentinel, no DB context
+
     for ann in curr_announcements:
         if len(alerts) >= max_alerts:
             break
-        norm = _normalize_title(ann.get("title", ""))
+
+        title = ann.get("title", "")
+        norm = _normalize_title(title)
         if not norm or len(norm) < 4:
             continue
+
+        # Stage 1: cross-check against previous snapshot
         if norm in prev_titles:
             continue
+
+        # Stage 2: DB-level dedup (7-day window)
+        if db_path:
+            from . import db
+            recent = db.get_recent_announcement_alerts(db_path, stock_code, title, days=7)
+            if recent:
+                logger.debug(
+                    f"  {stock_code}: skip dup announcement \"{title[:40]}...\" "
+                    f"(alerted {len(recent)}x in last 7d)"
+                )
+                continue
+
+        title_hash = hashlib.md5(title.encode()).hexdigest()
         alerts.append(ChangeAlert(
             stock_code=stock_code,
             alert_time=now_ts,
             alert_type="new_announcement",
-            z_score=3.0,  # announcements are binary new/old, fixed significant Z
-            magnitude=1.0,
+            z_score=round(abs(z_score), 2),  # real Z-score from historical volume
+            magnitude=float(len(curr_announcements)),  # total new announcements today
             detail={
-                "title": ann.get("title", ""),
+                "title": title,
+                "title_hash": title_hash,
                 "time": ann.get("time", ""),
                 "notice_type": ann.get("notice_type", ""),
                 "prev_count": len(prev_announcements),
                 "new_count": len(curr_announcements),
+                "ann_z_score": round(abs(z_score), 2),
             },
         ))
     return alerts
@@ -314,6 +351,7 @@ def detect_changes(
     historical_stats: list[SentimentStat],
     historical_events: list[HotWordEvent],
     cold_start: bool,
+    db_path: str | None = None,
 ) -> list[ChangeAlert]:
     """Unified detection entry point — orchestrates all 4 detection types.
 
@@ -337,6 +375,6 @@ def detect_changes(
         stock_code, curr_posts_texts, historical_events))
 
     alerts.extend(detect_new_announcement(
-        stock_code, curr_announcements, prev_announcements))
+        stock_code, curr_announcements, prev_announcements, db_path))
 
     return alerts
