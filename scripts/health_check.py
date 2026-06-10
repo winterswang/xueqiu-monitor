@@ -26,15 +26,14 @@ FAIL = "fail"
 
 
 def _get_latest_log() -> Path | None:
-    """Get the most recent log file. Checks run_*.log first (manual runs),
-    then falls back to pipeline.log (cron tee output)."""
-    run_logs = sorted(LOG_DIR.glob("run_*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if run_logs and run_logs[0].stat().st_size > 0:
-        return run_logs[0]
-    pipeline_log = LOG_DIR / "pipeline.log"
-    if pipeline_log.exists() and pipeline_log.stat().st_size > 0:
-        return pipeline_log
-    return run_logs[0] if run_logs else None
+    """Get the most recent non-empty log file by modification time.
+    Searches across all log types (run_*.log and pipeline*.log) and returns
+    the newest one — no type has priority."""
+    all_logs = list(LOG_DIR.glob("run_*.log")) + list(LOG_DIR.glob("pipeline*.log"))
+    non_empty = [f for f in all_logs if f.stat().st_size > 0]
+    if non_empty:
+        return max(non_empty, key=lambda f: f.stat().st_mtime)
+    return None
 
 
 def _get_latest_cron_log() -> Path | None:
