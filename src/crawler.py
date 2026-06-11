@@ -149,85 +149,141 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
     }
     t_start = time.time()
     try:
-        crawl_info = _crawl_with_timeout(stock_code, timeout)
+        # ── Tier 1: opencli pre-fetch (main thread, zero-WAF) ──
+        _opencli_posts = []
+        _opencli_notices = []
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.expanduser("~/code/claude_code/xueqiu-analyzer-skill/src"))
+            from xueqiu_analyzer.fetcher_opencli import is_available as _ocli_ok
+            from xueqiu_analyzer.fetcher_opencli import fetch_discussions as _ocli_discs
+            from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
+            if _ocli_ok():
+                logger.info(f"  opencli: 预取 {stock_code}")
+                try:
+                    for item in (_ocli_discs(stock_code, limit=100) or []):
+                        _opencli_posts.append({
+                            "type": "discussion",
+                            "post_id": item.get("url", "") or item.get("id", ""),
+                            "title": (item.get("text", "") or "")[:100],
+                            "content": (item.get("text", "") or "")[:500],
+                            "link": item.get("url", ""),
+                            "author": item.get("author", ""),
+                            "time": item.get("created_at", ""),
+                            "sentiment_score": 0.0,
+                            "comment_count": item.get("replies", 0) or 0,
+                            "like_count": item.get("likes", 0) or 0,
+                        })
+                    logger.info(f"  opencli: {len(_opencli_posts)} 条讨论")
+                except Exception as e:
+                    logger.warning(f"  opencli 讨论失败: {e}")
+                try:
+                    for item in (_ocli_notices(stock_code, limit=50) or []):
+                        _opencli_notices.append({
+                            "title": item.get("title", ""),
+                            "time": item.get("created_at", ""),
+                            "notice_type": item.get("type", ""),
+                        })
+                    logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
+                except Exception as e:
+                    logger.warning(f"  opencli 公告失败: {e}")
+        except Exception as e:
+            logger.debug(f"  opencli 跳过: {e}")
+
+        # ── opencli got data → skip Playwright entirely ──
+        if _opencli_posts or _opencli_notices:
+            logger.info(f"  opencli 已获取数据，跳过 Playwright")
+            crawl_info = {
+                "result": None,
+                "diagnostic": {
+                    "timed_out": False,
+                    "error_type": None,
+                    "error_message": None,
+                    "crawl_duration_ms": 0,
+                    "discussions_count": 0,
+                    "news_count": 0,
+                    "articles_count": 0,
+                    "notices_count": 0,
+                },
+            }
+        else:
+            logger.info(f"  opencli 无数据，回退 Playwright (timeout={timeout}s)")
+            crawl_info = _crawl_with_timeout(stock_code, timeout)
         crawl_result = crawl_info["result"]
         diagnostic = crawl_info["diagnostic"]
         result["diagnostic"] = diagnostic
 
+        # ── Merge opencli data early (survives Playwright failure) ──
+        posts = list(_opencli_posts) if _opencli_posts else []
+        for item in _opencli_notices:
+            result["announcements"].append({
+                "title": item.get("title", ""),
+                "time": item.get("time", ""),
+                "notice_type": item.get("notice_type", ""),
+            })
+
         if crawl_result is None:
             if diagnostic.get("timed_out"):
-                result["status"] = "timeout"
-                result["error"] = diagnostic.get("error_message", f"爬取超时（{timeout}s）")
-                logger.warning(
-                    f"{stock_code} 爬取超时 ({timeout}s, elapsed={diagnostic.get('crawl_duration_ms', 0)}ms)"
-                )
+                result["status"] = "partial"
+                result["error"] = diagnostic.get("error_message", f"Playwright 超时（{timeout}s）")
+                logger.warning(f"{stock_code} Playwright 超时, opencli 提供 {len(posts)} 条帖子")
             else:
                 result["status"] = "failed"
                 result["error"] = diagnostic.get("error_message", "未知爬取错误")
-                logger.error(
-                    f"{stock_code} 爬取异常: type={diagnostic.get('error_type')}, "
-                    f"msg={result['error']}"
-                )
-            elapsed = time.time() - t_start
-            logger.debug(
-                f"{stock_code} 总耗时: {elapsed:.1f}s, status={result['status']}, "
-                f"posts={result['posts_count']}"
-            )
-            return result
-
-        posts = []
-        for d in crawl_result.discussions:
-            posts.append({
-                "type": "discussion",
-                "post_id": d.link or d.content[:20],
-                "title": d.content[:100] or "",
-                "content": d.content or "",
-                "link": d.link or "",
-                "author": _clean_author(d.author or ""),
-                "time": d.time or "",
-                "sentiment_score": 0.0,  # placeholder — LLM later
-                "comment_count": getattr(d, "comment_count", 0) or 0,
-                "forward_count": getattr(d, "forward_count", 0) or 0,
-                "like_count": getattr(d, "like_count", 0) or 0,
-            })
-        for n in crawl_result.news:
-            posts.append({
-                "type": "news",
-                "post_id": n.link or n.title,
-                "title": n.title or "",
-                "content": n.content or "",
-                "link": n.link or "",
-                "author": _clean_author(n.source or "") or _extract_news_source(n.title or ""),
-                "time": n.time or "",
-                "sentiment_score": 0.0,
-            })
-        for a in crawl_result.articles:
-            posts.append({
-                "type": "article",
-                "post_id": a.link or a.article_id or a.title,
-                "title": a.title or "",
-                "content": a.content or "",
-                "link": a.link or "",
-                "author": _clean_author(a.author or ""),
-                "time": a.time or "",
-                "sentiment_score": 0.0,
-            })
-        for nt in crawl_result.notices:
-            title_raw = nt.title or ""
-            # xueqiu format: "股票名 日期· 来自公告\n实际标题\n更多内容"
-            # First line is always prefix → skip it, join the rest
-            lines = title_raw.split('\n')
-            if len(lines) > 1:
-                title = '\n'.join(lines[1:]).strip()[:100]
-            else:
-                title = title_raw.strip()[:100]
-            if not title:
-                title = title_raw.strip()[:100]
-            result["announcements"].append({
-                "title": title,
-                "time": nt.time or "",
-                "notice_type": nt.notice_type or "",
-            })
+            if not posts:
+                elapsed = time.time() - t_start
+                return result
+        else:
+            for d in crawl_result.discussions:
+                posts.append({
+                    "type": "discussion",
+                    "post_id": d.link or d.content[:20],
+                    "title": d.content[:100] or "",
+                    "content": d.content or "",
+                    "link": d.link or "",
+                    "author": _clean_author(d.author or ""),
+                    "time": d.time or "",
+                    "sentiment_score": 0.0,
+                    "comment_count": getattr(d, "comment_count", 0) or 0,
+                    "forward_count": getattr(d, "forward_count", 0) or 0,
+                    "like_count": getattr(d, "like_count", 0) or 0,
+                })
+            for n in crawl_result.news:
+                posts.append({
+                    "type": "news",
+                    "post_id": n.link or n.title,
+                    "title": n.title or "",
+                    "content": n.content or "",
+                    "link": n.link or "",
+                    "author": _clean_author(n.source or "") or _extract_news_source(n.title or ""),
+                    "time": n.time or "",
+                    "sentiment_score": 0.0,
+                })
+            for a in crawl_result.articles:
+                posts.append({
+                    "type": "article",
+                    "post_id": a.link or a.article_id or a.title,
+                    "title": a.title or "",
+                    "content": a.content or "",
+                    "link": a.link or "",
+                    "author": _clean_author(a.author or ""),
+                    "time": a.time or "",
+                    "sentiment_score": 0.0,
+                })
+            for nt in crawl_result.notices:
+                title_raw = nt.title or ""
+                lines = title_raw.split('\n')
+                if len(lines) > 1:
+                    title = '\n'.join(lines[1:]).strip()[:100]
+                else:
+                    title = title_raw.strip()[:100]
+                if not title:
+                    title = title_raw.strip()[:100]
+                result["announcements"].append({
+                    "title": title,
+                    "time": nt.time or "",
+                    "notice_type": nt.notice_type or "",
+                })
 
         result["posts_count"] = len(posts)
         result["posts_data"] = posts
@@ -438,10 +494,10 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         try:
             xq_code = _to_xueqiu_code(stock_code)
             _crawler = XueqiuCrawler({"headless": True})
-            # V3.2: days=1 增量爬取 — 爬到超过1天的帖子就停止,
-            # DB 层另有 last_crawl_time 二次过滤。max_pages=50 仅做安全兜底
+            # days=N 时间窗口驱动 — 遇到超过 N 天的帖子就停止翻页,
+            # max_pages/max_articles 仅做安全兜底，实际由 days 控制停止
             result_holder["result"] = _crawler.crawl(
-                xq_code, max_pages=50, max_articles=20, days=1
+                xq_code, max_pages=1000, max_articles=200, days=2
             )
         except Exception as e:
             result_holder["error"] = str(e)

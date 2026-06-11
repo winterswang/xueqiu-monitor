@@ -8,6 +8,15 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+# Load .env if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    _DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+    if _DOTENV_PATH.exists():
+        load_dotenv(_DOTENV_PATH)
+except ImportError:
+    pass
+
 
 # Default paths: sibling directories relative to this project root
 # Overridable via env vars or config.json
@@ -40,8 +49,8 @@ DEFAULT_CONFIG = {
         "ad_keywords": ["开户", "佣金", "万一", "万0.5", "低手续费", "加群", "荐股", "内幕"],
         "duplicate_similarity_threshold": 0.85,
         "short_post_threshold": 20,
-        "p0_z_threshold": 3.0,
-        "p1_z_threshold": 2.0,
+        "p0_z_threshold": 5.0,
+        "p1_z_threshold": 3.0,
     },
     "notification": {
         "webhook_url": "",         # set via env FEISHU_WEBHOOK_URL
@@ -53,7 +62,7 @@ DEFAULT_CONFIG = {
     },
     "cold_start": {
         "enabled": True,
-        "days": 28,
+        "days": 7,
         "min_data_points": 7,      # minimum data points before Z-score is meaningful
     },
     "feedback": {

@@ -26,13 +26,31 @@ FAIL = "fail"
 
 
 def _get_latest_log() -> Path | None:
-    logs = sorted(LOG_DIR.glob("run_*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
-    return logs[0] if logs else None
+    """Get the most recent non-empty log file by modification time.
+    Searches across all log types (run_*.log and pipeline*.log) and returns
+    the newest one — no type has priority."""
+    all_logs = list(LOG_DIR.glob("run_*.log")) + list(LOG_DIR.glob("pipeline*.log"))
+    non_empty = [f for f in all_logs if f.stat().st_size > 0]
+    if non_empty:
+        return max(non_empty, key=lambda f: f.stat().st_mtime)
+    return None
 
 
 def _get_latest_cron_log() -> Path | None:
     log = LOG_DIR / "cron.log"
     return log if log.exists() else None
+
+
+def _is_pipeline_running() -> bool:
+    """Check if pipeline process is still running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"python.*src\.cli"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def check():
@@ -62,8 +80,10 @@ def check():
 
         if summary_match:
             results.append({"check": "pipeline_completed", "status": OK, "detail": summary_match.group(1)})
+        elif _is_pipeline_running():
+            results.append({"check": "pipeline_completed", "status": OK, "detail": "Pipeline still running — check back later"})
         else:
-            results.append({"check": "pipeline_completed", "status": WARN, "detail": "No [SUMMARY] entry found — pipeline may still be running"})
+            results.append({"check": "pipeline_completed", "status": WARN, "detail": "No [SUMMARY] entry found — pipeline may have failed"})
             errors.append("no_summary")
 
         # Phase durations

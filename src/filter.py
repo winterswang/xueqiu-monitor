@@ -26,8 +26,8 @@ AD_KEYWORDS = ["开户", "佣金", "万一", "万0.5", "低手续费", "加群",
 DUPLICATE_SIMILARITY_THRESHOLD = 0.85
 CONTENT_SIMILARITY_THRESHOLD = 0.85
 SHORT_POST_THRESHOLD = 20
-P0_Z_THRESHOLD = 3.0
-P1_Z_THRESHOLD = 2.0
+P0_Z_THRESHOLD = 5.0
+P1_Z_THRESHOLD = 3.0
 
 
 # ════════════════════════════════════════════════════════
@@ -155,9 +155,13 @@ def filter_alerts(
 
     # Step 1: assign priority
     for alert in alerts:
-        alert.priority = assign_priority(alert, config)
-        if cold_start:
+        # Announcements are informational events, not statistical anomalies → always P2
+        if alert.alert_type == "new_announcement":
             alert.priority = "P2"
+        else:
+            alert.priority = assign_priority(alert, config)
+            if cold_start and alert.priority != "P0":
+                alert.priority = "P2"
 
     # Step 2: detect noise posts
     ad_set = set(filter_ads(posts_data, ad_kw))

@@ -1,5 +1,9 @@
 data/*.db
 data/*.db-*
+data/*.db.bak*
+data/daily_reports/
+data/monitor.db.bak*
+data/watchlist.db.bak*
 logs/
 __pycache__/
 *.pyc

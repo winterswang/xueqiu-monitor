@@ -198,7 +198,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 prev_snap_anns = db.get_announcements_by_snapshot(db_path, prev_snap.id)
         curr_anns = cr.get("announcements", [])
         ann_alerts = detector.detect_new_announcement(
-            stock_code, curr_anns, prev_snap_anns
+            stock_code, curr_anns, prev_snap_anns, db_path
         )
         for a in ann_alerts:
             a.alert_time = now
@@ -312,14 +312,14 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     pending_path = cfg.notification.get("pending_path", "/tmp/xueqiu_monitor_pending.json")
     p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
     p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
+    p2_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P2"]
 
     pending_messages: list[str] = []
 
     if not dry_run:
-        # P0: format immediate alert messages (one per alert)
-        for alert in p0_alerts:
+        def _key_data_for(alert):
             extra = stock_extra.get(alert.stock_code, {})
-            key_data = {
+            return {
                 "stock_code": alert.stock_code,
                 "stock_name": extra.get("stock_name", ""),
                 "alert_type": alert.alert_type,
@@ -334,14 +334,17 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "priority": alert.priority,
                 "trigger_time": extra.get("trigger_time", ""),
             }
-            msg = notifier.format_immediate_alert_message(alert, key_data)
+
+        # P0: format immediate alert messages (one per alert)
+        for alert in p0_alerts:
+            msg = notifier.format_immediate_alert_message(alert, _key_data_for(alert))
             pending_messages.append(msg)
             db.insert_push(db_path, PushHistory(
                 stock_code=alert.stock_code,
                 alert_id=alert.id or 0,
                 priority="P0",
-                content=f"Z={alert.z_score} {alert.alert_type}",
-                status="pending",
+                content=f"Z={alert.z_score:.2f} {alert.alert_type}",
+                status="sent",
             ))
 
         # P1: format digest message
@@ -355,8 +358,18 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     alert_id=alert.id or 0,
                     priority="P1",
                     content="digest",
-                    status="pending",
+                    status="sent",
                 ))
+
+        # P2: write push_history for tracking (no message push for P2 volume)
+        for alert in p2_alerts:
+            db.insert_push(db_path, PushHistory(
+                stock_code=alert.stock_code,
+                alert_id=alert.id or 0,
+                priority="P2",
+                content=f"{alert.alert_type} Z={alert.z_score:.2f}",
+                status="logged",
+            ))
 
         # Dispatch messages via lark-cli or file fallback
         if pending_messages:
