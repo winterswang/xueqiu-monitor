@@ -355,11 +355,13 @@ def detect_changes(
 ) -> list[ChangeAlert]:
     """Unified detection entry point — orchestrates all 4 detection types.
 
-    Returns combined list of ChangeAlert (unfiltered, no priority assigned).
-    Cold start suppresses all alerts (returns empty).
+    During cold start, still generates alerts but marks them for priority handling.
+    P0 alerts pass through even in cold start; P1/P2 may be suppressed.
     """
     if cold_start:
-        return []
+        # During cold start, still generate alerts — filter.py handles priority
+        # (P0 passes through, P1/P2 may be suppressed)
+        pass
 
     alerts: list[ChangeAlert] = []
 

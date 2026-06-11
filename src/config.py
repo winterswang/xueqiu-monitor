@@ -62,7 +62,7 @@ DEFAULT_CONFIG = {
     },
     "cold_start": {
         "enabled": True,
-        "days": 28,
+        "days": 7,
         "min_data_points": 7,      # minimum data points before Z-score is meaningful
     },
     "feedback": {

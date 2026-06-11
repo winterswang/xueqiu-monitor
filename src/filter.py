@@ -160,7 +160,7 @@ def filter_alerts(
             alert.priority = "P2"
         else:
             alert.priority = assign_priority(alert, config)
-            if cold_start:
+            if cold_start and alert.priority != "P0":
                 alert.priority = "P2"
 
     # Step 2: detect noise posts
