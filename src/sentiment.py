@@ -7,7 +7,7 @@ news uses keyword matching (no API cost).
 Batch strategy:
   - Discussions: sub-batch of 80 items max (avoids MiniMax timeout on
     400+ item groups). Each sub-batch = one compact LLM call.
-  - Articles (up to 30 items):   single call, max_tokens=4096
+  - Articles (up to 30 items):   single call, max_tokens=16384
   - News:                        keyword-based (0 calls)
 
 Key design decisions:
@@ -36,19 +36,19 @@ DISCUSSION_BATCH_SIZE = 80
 
 # ── Per-call token budgets ───────────────────────────────────
 # For discussions (sub-batch ≤80 items): moderate budget
-MAX_TOKENS_DISCUSSION   = 4096
-MAX_TOKENS_DISCUSSION_R = 8192
+MAX_TOKENS_DISCUSSION   = 16384
+MAX_TOKENS_DISCUSSION_R = 16384
 
 # For articles (small group, detailed content): moderate budgets
-MAX_TOKENS_ARTICLE      = 4096
-MAX_TOKENS_ARTICLE_R    = 8192
+MAX_TOKENS_ARTICLE      = 16384
+MAX_TOKENS_ARTICLE_R    = 16384
 
 # ── Timeout overrides ────────────────────────────────────────
 # MiniMax can take 2-5 min for large batches; 300s gives enough
 # headroom while catching true hangs.
-LLM_CLIENT_TIMEOUT = 120.0
-LLM_CALL_TIMEOUT   = 90.0
-SENTIMENT_TOTAL_TIMEOUT = 120.0  # thread-level cap for entire sentiment call
+LLM_CLIENT_TIMEOUT = 180.0
+LLM_CALL_TIMEOUT   = 150.0
+SENTIMENT_TOTAL_TIMEOUT = 180.0  # thread-level cap for entire sentiment call
 
 _client: Any | None = None
 
