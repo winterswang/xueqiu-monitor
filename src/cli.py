@@ -404,22 +404,32 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         "elapsed_seconds": crawl_elapsed,
         "report": str(report_path),
     }
+    # ── Crawl Health Report ──
+    crawl_health = _log_crawl_health(crawl_results, summary, logger)
+    summary["crawl_health"] = crawl_health
+    if crawl_health.get("status") == "degraded":
+        summary["error"] = "crawl_health_degraded"
+
     logger.info(f"Pipeline完成: {json.dumps(summary, ensure_ascii=False)}")
 
-    # ── Crawl Health Report ──
-    _log_crawl_health(crawl_results, summary, logger)
-
-    # ── Health alert: success rate < 98% (§2.1) ──
+    # ── Health alert: success rate < 98% or posts coverage degraded (§2.1) ──
     total_stocks = len(crawl_results)
     if not dry_run and total_stocks > 0:
         success_count = summary["crawled"]
         success_rate = success_count / total_stocks
-        if success_rate < 0.98:
-            failed_count = total_stocks - success_count
+        failed_count = total_stocks - success_count
+        health_status = summary.get("crawl_health", {}).get("status", "healthy")
+        if success_rate < 0.98 or health_status in {"warn", "degraded"}:
+            health = summary.get("crawl_health", {})
+            coverage = health.get("posts_coverage", 0)
+            zero_count = health.get("empty_success", 0)
+            level = "🚨" if health_status == "degraded" else "⚠️"
             health_msg = (
-                f"⚠️ **爬取健康告警**\n\n"
-                f"成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）\n\n"
-                f"请检查网络状态和 xueqiu-analyzer 日志。"
+                f"{level} **爬取健康告警**\n\n"
+                f"成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）\n"
+                f"有帖覆盖率 {coverage:.0%}（{health.get('success_with_posts', 0)}/{total_stocks} 有帖）\n"
+                f"成功但零帖 {zero_count} 只，超时 {health.get('timeout', 0)} 只。\n\n"
+                f"请检查 opencli / xueqiu-analyzer / 雪球页面结构与登录状态。"
             )
             notifier.dispatch_messages(
                 [health_msg], pending_path,
@@ -427,7 +437,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
             )
             logger.warning(
-                f"爬取成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）→ 已写入待发送消息"
+                f"爬取健康异常 status={health_status} success_rate={success_rate:.0%} posts_coverage={coverage:.0%} → 已写入待发送消息"
             )
 
     # ── Log structured summary ──
@@ -481,55 +491,104 @@ def _get_stock_name(stocks: list[dict], code: str) -> str:
     return ""
 
 
-def _log_crawl_health(
-    crawl_results: list[dict], summary: dict, logger: logging.Logger
-) -> None:
-    """Log a crawl health report: posts coverage, zero-post stocks, timeout ratio.
+def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
+    """Classify crawl health using posts coverage, not only status=success.
 
-    Helps distinguish "stock genuinely has no content" from "crawler is broken".
+    status thresholds:
+      - healthy: posts coverage >= 50%
+      - warn:    20% <= posts coverage < 50%
+      - degraded: posts coverage < 20%
+
+    This catches the historical failure mode where most stocks were marked
+    status=success while posts_count=0 because API/DOM fallback returned no data.
     """
     total = len(crawl_results)
     if total == 0:
-        return
+        return {
+            "status": "degraded",
+            "total": 0,
+            "success_with_posts": 0,
+            "empty_success": 0,
+            "failed": 0,
+            "timeout": 0,
+            "posts_coverage": 0.0,
+        }
 
-    # ── 1. Posts coverage ──
-    stocks_with_posts = [
+    success_with_posts = [
         r for r in crawl_results
-        if r.get("posts_count", 0) > 0
+        if r.get("status") == "success" and r.get("posts_count", 0) > 0
     ]
-    stocks_success_zero = [
+    empty_success = [
         r for r in crawl_results
-        if r["status"] == "success" and r.get("posts_count", 0) == 0
+        if r.get("status") == "success" and r.get("posts_count", 0) == 0
     ]
-    stocks_timeout = [r for r in crawl_results if r["status"] == "timeout"]
-    stocks_failed = [r for r in crawl_results if r["status"] == "failed"]
+    timeout = [r for r in crawl_results if r.get("status") == "timeout"]
+    failed = [r for r in crawl_results if r.get("status") not in {"success", "timeout"}]
+    coverage = len(success_with_posts) / total
 
-    posts_ratio = len(stocks_with_posts) / total * 100
+    if coverage < 0.20:
+        status = "degraded"
+    elif coverage < 0.50:
+        status = "warn"
+    else:
+        status = "healthy"
 
-    logger.info(
-        "═" * 50
-    )
+    return {
+        "status": status,
+        "total": total,
+        "success_with_posts": len(success_with_posts),
+        "empty_success": len(empty_success),
+        "failed": len(failed),
+        "timeout": len(timeout),
+        "posts_coverage": coverage,
+        "empty_success_codes": [r.get("stock_code", "?") for r in empty_success],
+        "failed_codes": [r.get("stock_code", "?") for r in failed],
+        "timeout_codes": [r.get("stock_code", "?") for r in timeout],
+    }
+
+
+def _log_crawl_health(
+    crawl_results: list[dict], summary: dict, logger: logging.Logger
+) -> dict:
+    """Log and return a crawl health report.
+
+    Helps distinguish "stock genuinely has no content" from "crawler is broken".
+    """
+    health = _evaluate_crawl_health(crawl_results)
+    total = health["total"]
+    if total == 0:
+        logger.warning("⚠ 没有任何爬取结果 —— 爬虫健康状态 degraded")
+        return health
+
+    posts_ratio = health["posts_coverage"] * 100
+    stocks_timeout = health["timeout"]
+
+    logger.info("═" * 50)
     logger.info("爬取健康报告")
+    logger.info("═" * 50)
     logger.info(
-        "═" * 50
+        f"有帖股票数: {health['success_with_posts']}/{total} ({posts_ratio:.0f}%) | "
+        f"health={health['status']}"
     )
     logger.info(
-        f"有帖股票数: {len(stocks_with_posts)}/{total} ({posts_ratio:.0f}%)"
-    )
-    logger.info(
-        f"成功但零帖: {len(stocks_success_zero)} | "
-        f"超时: {len(stocks_timeout)} | "
-        f"失败: {len(stocks_failed)}"
+        f"成功但零帖: {health['empty_success']} | "
+        f"超时: {health['timeout']} | "
+        f"失败: {health['failed']}"
     )
 
-    # ── 2. WARNING: ALL stocks have zero posts ──
-    if len(stocks_with_posts) == 0:
+    # ── 2. Coverage gate ──
+    if health["status"] == "degraded":
+        logger.error(
+            f"🚨 有帖覆盖率 {posts_ratio:.0f}%（<20%）—— 爬虫结果 degraded，"
+            "status=success 但零帖不能视为健康成功"
+        )
+    elif health["status"] == "warn":
         logger.warning(
-            "⚠ 所有股票 posts_count=0 —— 爬虫可能已失效或雪球无数据返回"
+            f"⚠ 有帖覆盖率 {posts_ratio:.0f}%（<50%）—— 爬虫可能部分失效"
         )
 
     # ── 3. WARNING: >50% timeout ──
-    timeout_ratio = len(stocks_timeout) / total * 100
+    timeout_ratio = stocks_timeout / total * 100
     if timeout_ratio > 50:
         logger.warning(
             f"⚠ 超时率 {timeout_ratio:.0f}%（>{50}%）—— "
@@ -537,8 +596,8 @@ def _log_crawl_health(
         )
 
     # ── 4. List suspicious zero-post stocks (success but no content) ──
-    if stocks_success_zero:
-        zero_codes = [r["stock_code"] for r in stocks_success_zero]
+    zero_codes = health.get("empty_success_codes", [])
+    if zero_codes:
         logger.warning(
             f"⚠ 以下股票爬取成功但帖数为0（可能爬虫对该股票失效）: "
             f"{', '.join(zero_codes[:20])}"
@@ -560,9 +619,8 @@ def _log_crawl_health(
                 f"nt={diag.get('notices_count')}"
             )
 
-    logger.info(
-        "═" * 50
-    )
+    logger.info("═" * 50)
+    return health
 
 
 # ════════════════════════════════════════════════════════
