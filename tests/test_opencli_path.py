@@ -11,14 +11,17 @@ from src import crawler
 
 def test_opencli_analyzer_path_uses_sibling_default(monkeypatch):
     monkeypatch.delenv("XUEQIU_ANALYZER_PATH", raising=False)
-    hardcoded = str(Path.home() / "code" / "claude_code" / "xueqiu-analyzer-skill" / "src")
-    sys.path[:] = [p for p in sys.path if p != hardcoded and "xueqiu-analyzer-skill/src" not in p]
+    sys.path[:] = [p for p in sys.path if "xueqiu-analyzer-skill/src" not in p]
 
     path = crawler._ensure_xueqiu_analyzer_path()
 
-    assert path == crawler._DEFAULT_XA
+    # _DEFAULT_XA must derive from the crawler module's location (sibling repo),
+    # not from a hardcoded user-home prefix — verify it's anchored to crawler.__file__.
+    expected = str(Path(crawler.__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
+    assert path == crawler._DEFAULT_XA == expected
     assert path in sys.path
-    assert hardcoded not in sys.path
+    # ensure there's only one analyzer entry on sys.path (no leak from older hardcoded insertions)
+    assert sum(1 for p in sys.path if p.endswith("xueqiu-analyzer-skill/src")) == 1
 
 
 def test_opencli_analyzer_path_honors_env(monkeypatch, tmp_path):
