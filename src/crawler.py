@@ -28,6 +28,19 @@ if _XA_PATH and _XA_PATH not in sys.path:
 logger = logging.getLogger(__name__)
 
 
+def _ensure_xueqiu_analyzer_path() -> str:
+    """Ensure xueqiu-analyzer-skill src path is importable.
+
+    Keep the opencli pre-fetch path aligned with module-level analyzer imports:
+    XUEQIU_ANALYZER_PATH wins, otherwise use the sibling checkout default.
+    """
+    analyzer_path = os.environ.get("XUEQIU_ANALYZER_PATH", _DEFAULT_XA)
+    analyzer_path = os.path.expanduser(analyzer_path)
+    if analyzer_path and analyzer_path not in sys.path:
+        sys.path.insert(0, analyzer_path)
+    return analyzer_path
+
+
 def _clean_author(raw: str) -> str:
     """Clean author name: trim trailing metadata and filter noise."""
     if not raw:
@@ -77,7 +90,8 @@ def load_watchlist(config: dict) -> list[dict]:
     Returns list of {'stock_code': str, 'stock_name': str}.
     """
     # Try morning-brief DB first (configurable via config.crawler.morning_brief_db)
-    mb_db = config.get("morning_brief_db", os.environ.get("MORNING_BRIEF_DB", "/root/code/morning-brief/data/morning-brief.db"))
+    default_mb_db = str(Path(__file__).resolve().parent.parent.parent / "morning-brief" / "data" / "morning-brief.db")
+    mb_db = config.get("morning_brief_db", os.environ.get("MORNING_BRIEF_DB", default_mb_db))
     if mb_db and os.path.exists(mb_db):
         try:
             conn = sqlite3.connect(mb_db)
@@ -153,8 +167,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
         _opencli_posts = []
         _opencli_notices = []
         try:
-            import sys as _sys
-            _sys.path.insert(0, os.path.expanduser("~/code/claude_code/xueqiu-analyzer-skill/src"))
+            _ensure_xueqiu_analyzer_path()
             from xueqiu_analyzer.fetcher_opencli import is_available as _ocli_ok
             from xueqiu_analyzer.fetcher_opencli import fetch_discussions as _ocli_discs
             from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
