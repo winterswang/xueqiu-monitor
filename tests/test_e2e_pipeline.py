@@ -188,15 +188,15 @@ def temp_db(tmp_path):
 class TestPipelineE2E:
     """End-to-end pipeline test with mocked crawler."""
 
-    def test_full_pipeline(self, temp_db, mock_crawl_result, mock_stocks, mocker):
+    def test_full_pipeline(self, temp_db, mock_crawl_result, mock_stocks, monkeypatch):
         """Run full pipeline and verify all outputs."""
         from src import db, cli
         from src import crawler as crawler_mod
         from src.models import ChangeAlert, SentimentStat
 
         # ── Mock ──
-        mocker.patch.object(crawler_mod, "load_watchlist", return_value=mock_stocks)
-        mocker.patch.object(crawler_mod, "crawl_watchlist", return_value=mock_crawl_result)
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(crawler_mod, "crawl_watchlist", lambda *_args, **_kwargs: mock_crawl_result)
 
         # ── Run pipeline (dry_run=True to skip message writing) ──
         # We need to call run_pipeline directly
@@ -258,13 +258,13 @@ class TestPipelineE2E:
         finally:
             os.unlink(config_path)
 
-    def test_cold_start_suppression(self, temp_db, mock_crawl_result, mock_stocks, mocker):
+    def test_cold_start_suppression(self, temp_db, mock_crawl_result, mock_stocks, monkeypatch):
         """Cold start period should suppress all alerts."""
         from src import cli
         from src import crawler as crawler_mod
 
-        mocker.patch.object(crawler_mod, "load_watchlist", return_value=mock_stocks)
-        mocker.patch.object(crawler_mod, "crawl_watchlist", return_value=mock_crawl_result)
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(crawler_mod, "crawl_watchlist", lambda *_args, **_kwargs: mock_crawl_result)
 
         # Set cold start to 28 days
         temp_db.cold_start["days"] = 28
