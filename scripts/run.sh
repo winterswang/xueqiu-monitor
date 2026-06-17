@@ -65,10 +65,13 @@ cd "$PROJECT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # 同步自选股（依赖 longbridge CLI 共享 OAuth token）
-if "$PYTHON_BIN" scripts/sync_watchlist.py 2>&1 | tee -a "$LOG_FILE"; then
+# set -euo pipefail 下 pipeline 失败会触发 exit，用 || SYNC_EXIT=$? 捕获
+SYNC_EXIT=0
+"$PYTHON_BIN" scripts/sync_watchlist.py 2>&1 | tee -a "$LOG_FILE" || SYNC_EXIT=$?
+if [ "$SYNC_EXIT" -eq 0 ]; then
     :
 else
-    echo "[$(date)] sync_watchlist.py 失败 (exit=$?)，继续执行主流程" | tee -a "$LOG_FILE"
+    echo "[$(date)] sync_watchlist.py 失败 (exit=$SYNC_EXIT)，继续执行主流程" | tee -a "$LOG_FILE"
 fi
 
 # 主流程

@@ -15,30 +15,61 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = PROJECT_ROOT / "data" / "watchlist.json"
 
 
+class WatchlistError(Exception):
+    """Non-recoverable error during watchlist fetch."""
+
+
 def fetch_watchlist() -> list[dict]:
     """Run `longbridge watchlist --format json` and flatten to [{stock_code, stock_name}]."""
     cli = shutil.which("longbridge")
     if not cli:
-        print("❌ 未找到 longbridge CLI，请先 `cargo install --path .` 或 `brew install`", file=sys.stderr)
-        sys.exit(1)
+        raise WatchlistError(
+            "未找到 longbridge CLI，请先 `cargo install --path .` 或 `brew install`"
+        )
 
-    result = subprocess.run(
-        [cli, "watchlist", "--format", "json"],
-        capture_output=True, text=True, timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            [cli, "watchlist", "--format", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise WatchlistError("longbridge CLI 超时 (30s)")
+
     if result.returncode != 0:
-        print(f"❌ longbridge CLI 失败 (exit={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
-        sys.exit(1)
+        raise WatchlistError(
+            f"longbridge CLI 失败 (exit={result.returncode}): {result.stderr.strip()[:200]}"
+        )
 
-    groups = json.loads(result.stdout)
+    try:
+        groups = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise WatchlistError("longbridge CLI 输出非 JSON 格式")
+
+    if not isinstance(groups, list):
+        raise WatchlistError(
+            f"longbridge CLI 输出格式异常（期望数组，实际 {type(groups).__name__}）"
+        )
+
     return [
-        {"stock_code": sec["symbol"], "stock_name": sec["name"]}
-        for g in groups for sec in g.get("securities", [])
+        {
+            "stock_code": sec.get("symbol", ""),
+            "stock_name": (
+                sec.get("name", "")
+                or sec.get("name_cn", "")
+                or sec.get("name_en", "")
+            ),
+        }
+        for g in groups
+        for sec in g.get("securities", [])
     ]
 
 
 def main() -> None:
-    stocks = fetch_watchlist()
+    try:
+        stocks = fetch_watchlist()
+    except WatchlistError as e:
+        print(f"❌ {e}", file=sys.stderr)
+        sys.exit(1)
     if not stocks:
         print("⚠️  watchlist 为空")
         sys.exit(1)
