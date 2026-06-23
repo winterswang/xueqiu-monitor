@@ -104,16 +104,28 @@ def _load_openclaw_api_key() -> tuple[str, str] | None:
     return None
 
 
+def _load_ark_env_config() -> tuple[str, str]:
+    """Load ARK coding plan API key/base URL from environment.
+
+    Prefer the explicit ARK_API_KEY, but also support ARKCODE_API_KEY used by
+    the local Hermes/code-plan setup. Do not read legacy MINIMAX_* variables
+    because those can point to the deprecated MiniMax endpoint and silently
+    break this OpenAI-compatible client.
+    """
+    api_key = os.environ.get("ARK_API_KEY", "") or os.environ.get("ARKCODE_API_KEY", "")
+    base_url = os.environ.get(
+        "ARK_CODING_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3"
+    )
+    return api_key, base_url
+
+
 def _get_client() -> Any | None:
     global _client
     if _client is not None:
         return _client
 
     # 字节 coding plan（OpenAI 兼容），取代即将废弃的 MiniMax 官方 anthropic baseURL。
-    api_key = os.environ.get("ARK_API_KEY", "")
-    base_url = os.environ.get(
-        "ARK_CODING_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3"
-    )
+    api_key, base_url = _load_ark_env_config()
 
     # Fallback: read from OpenClaw gateway config
     if not api_key:
@@ -123,7 +135,7 @@ def _get_client() -> Any | None:
             logger.info("Sentiment LLM: loaded API key from OpenClaw config")
 
     if not api_key:
-        logger.warning("ARK_API_KEY 未设置，sentiment 返回 0.0")
+        logger.warning("ARK_API_KEY/ARKCODE_API_KEY 未设置，sentiment 返回 0.0")
         _client = None
         return None
 
