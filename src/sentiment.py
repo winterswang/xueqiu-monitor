@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 DISCUSSION_BATCH_SIZE = 80
 
 # ── Per-call token budgets ───────────────────────────────────
+# minimax-m3 是 1M 上下文模型，实测 coding plan 接受 ≥30000 输出 token。
+# sentiment 输出紧凑 JSON 数组，16384 为原作者调优值，对 ≤80 条批量足够。
 # For discussions (sub-batch ≤80 items): moderate budget
 MAX_TOKENS_DISCUSSION   = 16384
 MAX_TOKENS_DISCUSSION_R = 16384
@@ -64,24 +66,26 @@ _BEARISH_PAT = re.compile(
 
 
 def _extract_text(response: Any) -> str:
-    """Extract text from response, preferring TextBlock over ThinkingBlock."""
-    text = ""
-    thinking_fallback = ""
-    for block in response.content:
-        if hasattr(block, "text") and block.text:
-            text = str(block.text)
-            break
-        try:
-            t = getattr(block, "thinking", "")
-            if isinstance(t, str) and t:
-                thinking_fallback += t
-        except Exception:
-            pass
-    return text or thinking_fallback
+    """Extract text from OpenAI-compatible response.
+
+    coding plan minimax-m3 返回 OpenAI 格式；content 为空时回退 reasoning_content。
+    """
+    try:
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        if not choice or not choice.message:
+            return ""
+        text = choice.message.content or ""
+        if text:
+            return str(text)
+        # 正文为空时回退推理内容
+        reasoning = getattr(choice.message, "reasoning_content", "") or ""
+        return str(reasoning)
+    except Exception:
+        return ""
 
 
 def _load_openclaw_api_key() -> tuple[str, str] | None:
-    """Try to read MiniMax API key from OpenClaw gateway config."""
+    """Try to read ARK coding plan API key/baseURL from OpenClaw gateway config."""
     import json
     from pathlib import Path
     config_path = Path.home() / ".openclaw" / "openclaw.json"
@@ -90,9 +94,9 @@ def _load_openclaw_api_key() -> tuple[str, str] | None:
     try:
         with open(config_path) as f:
             cfg = json.load(f)
-        minimax = cfg.get("models", {}).get("providers", {}).get("minimax", {})
-        api_key = minimax.get("apiKey", "")
-        base_url = minimax.get("baseUrl", "")
+        ark = cfg.get("providers", {}).get("ark", {})
+        api_key = ark.get("apiKey", "")
+        base_url = ark.get("baseUrl", "")
         if api_key and base_url:
             return api_key, base_url
     except Exception as e:
@@ -100,17 +104,30 @@ def _load_openclaw_api_key() -> tuple[str, str] | None:
     return None
 
 
+def _load_ark_env_config() -> tuple[str, str]:
+    """Load ARK coding plan API key/base URL from environment.
+
+    Prefer the explicit ARK_API_KEY, but also support ARKCODE_API_KEY used by
+    the local Hermes/code-plan setup. Do not read legacy MINIMAX_* variables
+    because those can point to the deprecated MiniMax endpoint and silently
+    break this OpenAI-compatible client.
+    """
+    api_key = os.environ.get("ARK_API_KEY", "") or os.environ.get("ARKCODE_API_KEY", "")
+    base_url = os.environ.get(
+        "ARK_CODING_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3"
+    )
+    return api_key, base_url
+
+
 def _get_client() -> Any | None:
     global _client
     if _client is not None:
         return _client
 
-    api_key = os.environ.get("MINIMAX_API_KEY", "")
-    base_url = os.environ.get(
-        "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"
-    )
+    # 字节 coding plan（OpenAI 兼容），取代即将废弃的 MiniMax 官方 anthropic baseURL。
+    api_key, base_url = _load_ark_env_config()
 
-    # Fallback: read from OpenClaw gateway config (like morning-brief does)
+    # Fallback: read from OpenClaw gateway config
     if not api_key:
         oc = _load_openclaw_api_key()
         if oc:
@@ -118,13 +135,13 @@ def _get_client() -> Any | None:
             logger.info("Sentiment LLM: loaded API key from OpenClaw config")
 
     if not api_key:
-        logger.warning("MINIMAX_API_KEY 未设置，sentiment 返回 0.0")
+        logger.warning("ARK_API_KEY/ARKCODE_API_KEY 未设置，sentiment 返回 0.0")
         _client = None
         return None
 
     try:
-        from anthropic import Anthropic
-        _client = Anthropic(
+        from openai import OpenAI
+        _client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             max_retries=1,
@@ -133,7 +150,7 @@ def _get_client() -> Any | None:
         logger.info(f"Sentiment LLM ready: base_url={base_url}, timeout={LLM_CLIENT_TIMEOUT}s")
         return _client
     except ImportError:
-        logger.warning("anthropic 未安装")
+        logger.warning("openai 未安装")
         _client = None
     except Exception as e:
         logger.error(f"LLM client init failed: {e}")
@@ -291,8 +308,9 @@ def _analyze_group(
     for attempt, mt in enumerate([max_tokens, max_tokens_retry]):
         try:
             t0 = time.time()
-            response = client.messages.create(
-                model="MiniMax-M2.7",
+            model_name = os.environ.get("SENTIMENT_LLM_MODEL", "minimax-m3")
+            response = client.chat.completions.create(
+                model=model_name,
                 max_tokens=mt,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
@@ -301,9 +319,14 @@ def _analyze_group(
             elapsed_ms = (time.time() - t0) * 1000
 
             text = _extract_text(response)
+            _finish = (
+                response.choices[0].finish_reason
+                if getattr(response, "choices", None)
+                else "unknown"
+            )
             if not text and attempt == 0:
                 logger.warning(
-                    f"Sentiment {group_label}: no text (stop={response.stop_reason}), "
+                    f"Sentiment {group_label}: no text (finish={_finish}), "
                     f"retrying max_tokens={max_tokens_retry}"
                 )
                 continue
