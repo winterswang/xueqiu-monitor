@@ -35,14 +35,15 @@ logger = logging.getLogger(__name__)
 DISCUSSION_BATCH_SIZE = 80
 
 # ── Per-call token budgets ───────────────────────────────────
-# coding plan minimax-m3 maxTokens 上限 8192；sentiment 仅输出紧凑 JSON 数组，足够。
+# minimax-m3 是 1M 上下文模型，实测 coding plan 接受 ≥30000 输出 token。
+# sentiment 输出紧凑 JSON 数组，16384 为原作者调优值，对 ≤80 条批量足够。
 # For discussions (sub-batch ≤80 items): moderate budget
-MAX_TOKENS_DISCUSSION   = 8192
-MAX_TOKENS_DISCUSSION_R = 8192
+MAX_TOKENS_DISCUSSION   = 16384
+MAX_TOKENS_DISCUSSION_R = 16384
 
 # For articles (small group, detailed content): moderate budgets
-MAX_TOKENS_ARTICLE      = 8192
-MAX_TOKENS_ARTICLE_R    = 8192
+MAX_TOKENS_ARTICLE      = 16384
+MAX_TOKENS_ARTICLE_R    = 16384
 
 # ── Timeout overrides ────────────────────────────────────────
 # MiniMax can take 2-5 min for large batches; 300s gives enough
