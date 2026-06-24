@@ -48,9 +48,9 @@ MAX_TOKENS_ARTICLE_R    = 16384
 # ── Timeout overrides ────────────────────────────────────────
 # MiniMax can take 2-5 min for large batches; 300s gives enough
 # headroom while catching true hangs.
-LLM_CLIENT_TIMEOUT = 180.0
-LLM_CALL_TIMEOUT   = 150.0
-SENTIMENT_TOTAL_TIMEOUT = 180.0  # thread-level cap for entire sentiment call
+LLM_CLIENT_TIMEOUT     = 300.0
+LLM_CALL_TIMEOUT       = 300.0
+SENTIMENT_TOTAL_TIMEOUT = 300.0  # thread-level cap for entire sentiment call
 
 _client: Any | None = None
 
