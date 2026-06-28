@@ -11,15 +11,24 @@ sys.path.insert(0, os.environ.get(
 ))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
 
+# Ensure src/ is recognized as a package for relative imports
+_src_init = os.path.join(PROJECT_ROOT, 'src', '__init__.py')
+if os.path.exists(_src_init) and 'src' not in sys.modules:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("src", _src_init)
+    _src_mod = importlib.util.module_from_spec(_spec)
+    sys.modules['src'] = _src_mod
+    _spec.loader.exec_module(_src_mod)
+
 from xueqiu_analyzer.crawler import XueqiuCrawler
-from config import Config
-from db import (init_db, insert_snapshot, insert_alert,
-                get_historical_stats, get_today_alerts,
-                count_sentiment_days)
-from models import CrawlSnapshot
-from detector import is_cold_start, detect_post_spike, detect_sentiment_shift
-from filter import filter_alerts, assign_priority
-from notifier import generate_daily_report
+from src.config import Config
+from src.db import (init_db, insert_snapshot, insert_alert,
+                    get_historical_stats, get_today_alerts,
+                    count_sentiment_days)
+from src.models import CrawlSnapshot
+from src.detector import is_cold_start, detect_post_spike, detect_sentiment_shift
+from src.filter import filter_alerts, assign_priority
+from src.notifier import generate_daily_report
 
 cfg = Config.from_file(os.path.join(PROJECT_ROOT, 'config/config.json'))
 init_db(cfg.db_path)
