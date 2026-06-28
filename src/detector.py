@@ -134,12 +134,65 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) >= 2]
 
 
-# Chinese stopwords — xueqiu UI noise and common low-signal words
+# Chinese stopwords — xueqiu UI noise, unit words, rendered placeholders,
+# and short ASCII tokens that hit 80-100% of posts but carry no signal.
+# These are filtered during TF-IDF vectorization (never appear in results).
 _CN_STOPWORDS = {
+    # xueqiu UI noise
     '讨论', '来源', '回复', '小时前', '来自', '转发', '关注', '发布', '查看',
     '评论', '单位', '扫描', '分享', '收藏', '展开', '全部', '公告',
-    '亿元', '万美元', '亿港元', '亿美元',  # unit words, not signal
+    # unit words (6/24 300750.SZ「万元」P0 z=9.84 was missing from original set)
+    '万元', '亿元', '万亿', '千万', '百万', '十万',
+    '万美元', '亿港元', '亿美元', '美元', '港元', '元', '块',
+    # rendered placeholders — xueqiu UI text embedded in post body
+    # (6/27 300750.SZ「网页链接」P1 z=3.78)
+    '网页链接', '图片', '视频', '收起',
+    # exchange code suffixes — always noise
+    'hk', 'sz', 'sh',
 }
+
+
+# ════════════════════════════════════════════════════════
+# Hot word pre-filters (dynamic, run after TF-IDF, before Z-score)
+# ════════════════════════════════════════════════════════
+
+def _is_short_token(word: str) -> bool:
+    """Filter short tokens that statistically dominate but carry no specific signal.
+
+    Catches: pe (PE ratio), ai, etf, ipo — tokens that appear in 80-100% of
+    posts about any stock but have no topic value as standalone words.
+    Real signal words (yoyo=4, molly=5, labubu=6) are longer and pass.
+
+    Rule: pure ASCII ≤3 chars, or Chinese ≤2 chars with total len ≤3.
+    """
+    chinese_chars = sum(1 for c in word if '\u4e00' <= c <= '\u9fff')
+    if chinese_chars == 0 and len(word) <= 3:
+        return True
+    if chinese_chars <= 2 and len(word) <= 3:
+        return True
+    return False
+
+
+def _is_username_like(word: str, posts_texts: list[str]) -> bool:
+    """Detect if a hot word is actually a username in @mention patterns.
+
+    Xueqiu reply chains embed usernames as '回复 @<username> :' or '// @<username> :'.
+    When a KOL posts, their name gets high TF-IDF but it's not a topic word.
+
+    Heuristic: if >70% of the word's occurrences are preceded by @, it's a username.
+    Cases: '多伦多的大道信徒' (PDD 6/23 z=5.44), '大道无形我有型' (9992 6/24 z=3.02).
+    """
+    total = 0
+    mentions = 0
+    word_lower = word.lower()
+    at_pattern = re.compile(r'@\s*' + re.escape(word_lower), re.IGNORECASE)
+    for text in posts_texts:
+        lower_text = text.lower()
+        total += lower_text.count(word_lower)
+        mentions += len(at_pattern.findall(lower_text))
+    if total == 0:
+        return False
+    return (mentions / total) > 0.7
 
 
 def compute_tfidf(
@@ -201,6 +254,14 @@ def detect_hot_word_emergence(
 
     alerts = []
     for word, score in curr_tfidf.items():
+        # Layer 2: dynamic pre-filters (run before Z-score to prevent false alerts)
+        if _is_short_token(word):
+            logger.debug(f"[FILTER] skip short token: {word!r}")
+            continue
+        if _is_username_like(word, curr_posts_texts):
+            logger.debug(f"[FILTER] skip username-like word: {word!r}")
+            continue
+
         hist = hist_tfidfs.get(word, [])
         if len(hist) < 3:  # need some history for meaningful Z-score
             continue
@@ -225,7 +286,7 @@ def detect_hot_word_emergence(
 # Cold start helper
 # ════════════════════════════════════════════════════════
 
-def is_cold_start(historical_stats: list[SentimentStat], min_days: int = 28) -> bool:
+def is_cold_start(historical_stats: list[SentimentStat], min_days: int = 7) -> bool:
     """Check if we're still in cold start (insufficient baseline data)."""
     if not historical_stats:
         return True
