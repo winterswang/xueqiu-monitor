@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field, asdict
@@ -94,7 +95,7 @@ class Config:
     @classmethod
     def from_file(cls, path: str) -> Config:
         """Load config from JSON file, merge env overrides."""
-        cfg = DEFAULT_CONFIG.copy()
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
         p = Path(path)
         if p.exists():
             user_cfg = json.loads(p.read_text())
@@ -114,7 +115,7 @@ class Config:
     @classmethod
     def default(cls) -> Config:
         """Default config (mostly for tests)."""
-        return cls(**DEFAULT_CONFIG)
+        return cls(**copy.deepcopy(DEFAULT_CONFIG))
 
 
 def _deep_merge(base: dict, override: dict) -> None:

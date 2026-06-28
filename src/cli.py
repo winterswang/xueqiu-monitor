@@ -271,13 +271,19 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
             # Store hot word events + update hot_word_dict
             curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
+            # Build historical TF-IDF per word for z_score computation
+            hist_tfidfs: dict[str, list[float]] = {}
+            for he in hist_events:
+                hist_tfidfs.setdefault(he.word, []).append(he.tfidf_score)
             for word, score in curr_tfidf.items():
+                hist = hist_tfidfs.get(word, [])
+                z = detector.compute_z_score(score, hist) if len(hist) >= 3 else 0.0
                 db.insert_hot_word_event(db_path, HotWordEvent(
                     stock_code=stock_code,
                     word=word,
                     tfidf_score=round(score, 4),
                     event_time=now,
-                    z_score=0.0,  # computed above
+                    z_score=round(z, 2) if z else 0.0,
                 ))
                 db.upsert_hot_word(db_path, word, now)
 
