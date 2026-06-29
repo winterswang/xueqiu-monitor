@@ -351,7 +351,6 @@ class UserPreference:
     user_id: str
     p0_threshold: float = 3.0
     p1_threshold: float = 2.0
-    cold_start_days: int = 28
     notify_immediate: int = 1
     notify_digest: int = 1
     updated_at: int = field(default_factory=_now)
@@ -367,7 +366,6 @@ class UserPreference:
             user_id=d["user_id"],
             p0_threshold=d.get("p0_threshold", 3.0),
             p1_threshold=d.get("p1_threshold", 2.0),
-            cold_start_days=d.get("cold_start_days", 28),
             notify_immediate=d.get("notify_immediate", 1),
             notify_digest=d.get("notify_digest", 1),
             updated_at=d.get("updated_at", _now()),
@@ -377,5 +375,5 @@ class UserPreference:
     def from_row(cls, row: tuple | dict) -> UserPreference:
         if isinstance(row, dict):
             return cls.from_dict(row)
-        cols = ["id","user_id","p0_threshold","p1_threshold","cold_start_days","notify_immediate","notify_digest","updated_at"]
+        cols = ["id","user_id","p0_threshold","p1_threshold","notify_immediate","notify_digest","updated_at"]
         return cls.from_dict(dict(zip(cols, row)))
