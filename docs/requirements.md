@@ -782,7 +782,6 @@ def adjust_weight(source: str, keyword: str, verdict: str) -> float:
 | user_id | TEXT | 是 | 用户标识 |
 | p0_threshold | REAL | 否 | P0 触发阈值（默认 Z>3.0） |
 | p1_threshold | REAL | 否 | P1 触发阈值（默认 2.0<Z≤3.0） |
-| cold_start_days | INTEGER | 否 | 冷启动天数（默认 28 天） |
 | notify_immediate | INTEGER | 否 | P0 是否即时推（默认 1） |
 | notify_digest | INTEGER | 否 | P1 是否汇总推（默认 1） |
 | updated_at | DATETIME | 是 | 更新时间 |

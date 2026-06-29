@@ -113,7 +113,6 @@ CREATE TABLE IF NOT EXISTS user_preference (
     user_id          TEXT    NOT NULL,
     p0_threshold     REAL    NOT NULL DEFAULT 3.0,
     p1_threshold     REAL    NOT NULL DEFAULT 2.0,
-    cold_start_days  INTEGER NOT NULL DEFAULT 28,
     notify_immediate INTEGER NOT NULL DEFAULT 1,       -- P0即时推
     notify_digest    INTEGER NOT NULL DEFAULT 1,       -- P1汇总推
     updated_at       INTEGER NOT NULL

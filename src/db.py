@@ -40,15 +40,33 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str, schema_path: str | None = None) -> None:
-    """Initialize database with schema."""
+    """Initialize database with schema, then run idempotent migrations."""
     if schema_path is None:
         schema_path = str(Path(__file__).parent / "schema.sql")
     conn = _connect(db_path)
     try:
         conn.executescript(Path(schema_path).read_text())
+        _run_migrations(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Idempotent schema migrations for legacy databases.
+
+    Safe to run on every init_db(): each step inspects current state first.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    # Drop dead column: cold_start_days was never read at runtime (the cold-start
+    # window is always sourced from global config), so it accumulated as a legacy
+    # NOT NULL DEFAULT 28 column. Remove it from pre-existing databases.
+    cols = conn.execute("PRAGMA table_info(user_preference)").fetchall()
+    if any(c[1] == "cold_start_days" for c in cols):
+        conn.execute("ALTER TABLE user_preference DROP COLUMN cold_start_days")
+        log.info("[migrate] dropped dead column cold_start_days from user_preference")
 
 
 # ════════════════════════════════════════════════════════
@@ -449,10 +467,10 @@ def upsert_user_preference(db_path: str, pref: UserPreference) -> None:
     d["updated_at"] = int(time.time())
     with _connect(db_path) as conn:
         conn.execute(
-            """INSERT INTO user_preference (user_id, p0_threshold, p1_threshold, cold_start_days, notify_immediate, notify_digest, updated_at)
-               VALUES (:user_id, :p0_threshold, :p1_threshold, :cold_start_days, :notify_immediate, :notify_digest, :updated_at)
+            """INSERT INTO user_preference (user_id, p0_threshold, p1_threshold, notify_immediate, notify_digest, updated_at)
+               VALUES (:user_id, :p0_threshold, :p1_threshold, :notify_immediate, :notify_digest, :updated_at)
                ON CONFLICT(user_id) DO UPDATE SET
-               p0_threshold=:p0_threshold, p1_threshold=:p1_threshold, cold_start_days=:cold_start_days,
+               p0_threshold=:p0_threshold, p1_threshold=:p1_threshold,
                notify_immediate=:notify_immediate, notify_digest=:notify_digest, updated_at=:updated_at""",
             d
         )
