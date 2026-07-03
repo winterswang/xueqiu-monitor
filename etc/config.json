@@ -2,15 +2,14 @@
   "db_path": "data/monitor.db",
   "watchlist_path": "data/watchlist.json",
   "crawler": {
-    "timeout_seconds": 1200,
+    "timeout_seconds": 600,
     "max_retries": 0,
-    "concurrency": 2,
+    "concurrency": 1,
     "whitelist": [
       "PDD.US",
       "300750.SZ",
       "9992.HK"
-    ],
-    "xueqiu_analyzer_path": "/Users/wangguangchao/code/claude_code/xueqiu-analyzer-skill/src"
+    ]
   },
   "detector": {
     "z_score_window_days": 14
@@ -19,19 +18,10 @@
     "webhook_url": "",
     "mode": "auto",
     "pending_path": "/tmp/xueqiu_monitor_pending.json",
-    "lark_chat_id": ""
+    "lark_chat_id": "oc_5d38729181081d4ee50d2d2ad2b662f7"
   },
   "filter": {
-    "ad_keywords": [
-      "开户",
-      "佣金",
-      "万一",
-      "万0.5",
-      "低手续费",
-      "加群",
-      "荐股",
-      "内幕"
-    ],
+    "ad_keywords": [],
     "duplicate_similarity_threshold": 0.85,
     "short_post_threshold": 20,
     "p0_z_threshold": 5.0,
