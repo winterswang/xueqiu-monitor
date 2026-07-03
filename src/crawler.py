@@ -500,27 +500,52 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         "done": False,
         "error": None,
         "error_type": None,
+        "engine": None,
     }
 
-    def _do_crawl():
-        _crawler = None
+    def _crawl_nodriver(xq_code):
+        """Tier 1: nodriver 引擎（反检测，绕过阿里云 WAF）。
+
+        经控制变量实验证实：nodriver 能过 WAF 滑动验证，playwright 不能。
+        抛 WafDetectedError 或任何异常 → 上层回退 playwright。
+        """
+        from xueqiu_analyzer.crawler_nodriver import XueqiuNodriverCrawler
+        _c = XueqiuNodriverCrawler({"headless": True})
+        # max_pages 收紧：讨论页刷新快，2 天内海量新帖，翻 20 页会 >150s 超时丢数据。
+        # 实测每页 ~10 条，6 页≈ 60 条/tab，足够覆盖近期内容且能在 timeout 内返回。
+        return _c.crawl(xq_code, max_pages=6, max_articles=200, days=2)
+
+    def _crawl_playwright(xq_code):
+        """Tier 2 回退: playwright 引擎（原实现）。"""
+        _crawler = XueqiuCrawler({"headless": True})
         try:
-            xq_code = _to_xueqiu_code(stock_code)
-            _crawler = XueqiuCrawler({"headless": True})
-            # days=N 时间窗口驱动 — 遇到超过 N 天的帖子就停止翻页,
-            # max_pages/max_articles 仅做安全兜底，实际由 days 控制停止
-            result_holder["result"] = _crawler.crawl(
+            return _crawler.crawl(
                 xq_code, max_pages=1000, max_articles=200, days=2
             )
+        finally:
+            try:
+                _crawler.close()
+            except Exception:
+                pass
+
+    def _do_crawl():
+        try:
+            xq_code = _to_xueqiu_code(stock_code)
+            # ── Tier 1: nodriver（优先）──
+            try:
+                result_holder["result"] = _crawl_nodriver(xq_code)
+                result_holder["engine"] = "nodriver"
+            except Exception as e_nd:
+                logger.warning(
+                    f"  nodriver 失败({type(e_nd).__name__}: {e_nd})，回退 playwright"
+                )
+                # ── Tier 2: playwright（回退）──
+                result_holder["result"] = _crawl_playwright(xq_code)
+                result_holder["engine"] = "playwright"
         except Exception as e:
             result_holder["error"] = str(e)
             result_holder["error_type"] = type(e).__name__
         finally:
-            if _crawler is not None:
-                try:
-                    _crawler.close()
-                except Exception:
-                    pass
             result_holder["done"] = True
 
     t = threading.Thread(target=_do_crawl, daemon=True)
