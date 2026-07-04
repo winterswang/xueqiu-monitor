@@ -358,7 +358,7 @@ def analyze_stock(
         t0 = time.time()
         response = client.chat.completions.create(
             model=model,
-            max_tokens=2000,
+            max_tokens=32000,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
@@ -558,10 +558,30 @@ def _build_hot_words_section(
             return "## 三、今日热词\n\n今日无热词数据。\n"
 
         lines = ["## 三、今日热词\n"]
-        # Aggregate by word across stocks
+        # Build stock-name blocklist (short names, codes, lowercased)
+        stock_blocklist = set()
+        for code, info in stocks_cfg.items():
+            stock_blocklist.add(info.get("name", ""))
+            stock_blocklist.add(code.lower())
+            stock_blocklist.add(code.split(".")[0].lower())
+        # Common low-signal stopwords
+        stopwords = {
+            "ai", "股票", "投资", "市场", "今天", "今日", "现在", "可以",
+            "什么", "一个", "这个", "我们", "他们", "已经", "没有", "觉得",
+            "公司", "股价", "买入", "卖出", "持有", "仓位", "操作",
+        }
+
+        # Aggregate by word across stocks (filter out noise)
         word_counts: dict[str, list[str]] = {}
         for r in rows:
             word = r["word"]
+            wl = word.lower().strip()
+            # Skip stock names, codes, and stopwords
+            if wl in stock_blocklist or word in stock_blocklist or wl in stopwords:
+                continue
+            # Skip pure numbers or single chars
+            if len(word) < 2 or word.isdigit():
+                continue
             stock_code = r["stock_code"]
             stock_name = stocks_cfg.get(stock_code, {}).get("name", stock_code)
             word_counts.setdefault(word, []).append(stock_name)
