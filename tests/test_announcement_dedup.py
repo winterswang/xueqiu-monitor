@@ -105,3 +105,35 @@ class TestAnnouncementWithinBatchDedup:
             )
 
         assert len(alerts) == 0
+
+    def test_same_title_different_time_survives(self):
+        """Same title with different ann times are distinct announcements.
+
+        Real case: SPCX.US had 6 "财报披露" entries on different dates
+        (06-27, 06-24, 06-22, 06-18, 06-16, 06-16) — all legitimate
+        distinct announcements sharing a generic title. Dedup key must
+        include ann time so these survive.
+        """
+        curr_anns = [
+            {"title": "财报披露", "time": "06-30 19:45", "notice_type": ""},
+            {"title": "财报披露", "time": "06-25 18:55", "notice_type": ""},
+            {"title": "财报披露", "time": "06-12 04:15", "notice_type": ""},
+            {"title": "财报披露", "time": "06-30 19:45", "notice_type": ""},  # true dup
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test_monitor.db")
+            db.init_db(db_path)
+
+            alerts = detector.detect_new_announcement(
+                stock_code="SPCX.US",
+                curr_announcements=curr_anns,
+                prev_announcements=[],
+                db_path=db_path,
+            )
+
+        # 3 distinct dates + 1 exact dup collapsed = 3 alerts
+        assert len(alerts) == 3
+        # All share same title_hash (title-only, consistent with db.py)
+        hashes = {a.detail["title_hash"] for a in alerts}
+        assert len(hashes) == 1, "Same-title alerts should share title_hash"
