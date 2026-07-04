@@ -6,6 +6,7 @@ hot-word-*.md references.
 """
 
 from src import detector
+from src.detector import compute_tfidf
 
 
 # ════════════════════════════════════════════════════════
@@ -122,3 +123,139 @@ class TestIsUsernameLike:
     def test_returns_false_for_zero_occurrences(self):
         """Edge case: word not in any post text."""
         assert detector._is_username_like("不存在", ["无关内容"]) is False
+
+
+# ════════════════════════════════════════════════════════
+# Layer 0: _tokenize jieba segmentation (Issue #22)
+# ════════════════════════════════════════════════════════
+
+class TestJiebaTokenize:
+    """Verify jieba segments continuous Chinese runs instead of treating
+    them as single tokens (the root cause of Issue #22)."""
+
+    def test_company_name_is_segmented(self):
+        """7/4 data: '心动公司' was a single token → polluted hot words.
+        After jieba: should be split into ['心动', '公司']."""
+        tokens = detector._tokenize("心动公司发布财报")
+        assert "心动公司" not in tokens, "公司全名不应是单个 token"
+        assert "心动" in tokens
+
+    def test_long_company_name_is_segmented(self):
+        """7/4 data: '深圳迈瑞生物医疗电子股份有限公司申请一项名为' was ONE token.
+        This was the worst pollution case — 19-char string as a 'hot word'."""
+        text = "深圳迈瑞生物医疗电子股份有限公司申请一项名为"
+        tokens = detector._tokenize(text)
+        # The full string must NOT appear as a single token
+        assert text not in tokens
+        # Should be broken into multiple meaningful tokens
+        assert len(tokens) >= 3, f"Expected segmentation, got {tokens}"
+
+    def test_patent_boilerplate_is_segmented(self):
+        """7/4 data: '国家知识产权局信息显示' was a hot 'word'."""
+        tokens = detector._tokenize("国家知识产权局信息显示")
+        assert "国家知识产权局信息显示" not in tokens
+
+    def test_english_tokens_preserved(self):
+        """English tokens like PDD, NVDA should still be extracted correctly.
+        jieba would split 'PDD.US' on the dot, so we use regex for English."""
+        tokens = detector._tokenize("PDD.US 拼多多 Temu 出海")
+        assert "pdd" in tokens  # lowercase
+        assert "temu" in tokens
+
+    def test_mixed_cn_en_both_extracted(self):
+        """Mixed Chinese/English text should yield tokens from both."""
+        tokens = detector._tokenize("NVDA GPU 算力 rubin 平台")
+        assert "nvda" in tokens
+        assert "算力" in tokens
+
+    def test_short_tokens_filtered(self):
+        """Single-char tokens (< 2 chars) should be filtered out."""
+        tokens = detector._tokenize("a 是 b 的 c")
+        for t in tokens:
+            assert len(t) >= 2
+
+
+# ════════════════════════════════════════════════════════
+# Layer 1b: Expanded stopwords (Issue #22)
+# ════════════════════════════════════════════════════════
+
+class TestExpandedStopwords:
+    """Verify new stopwords (media accounts, boilerplate, fragments) are present."""
+
+    def test_media_accounts_in_stoplist(self):
+        """7/4 data: 环球市场播报, 新浪证券, 格隆汇 dominated hot words."""
+        for word in ["环球市场播报", "新浪证券", "格隆汇", "红岸工作室"]:
+            assert word in detector._CN_STOPWORDS, f"{word!r} missing"
+
+    def test_patent_boilerplate_in_stoplist(self):
+        """7/4 data: 国家知识产权局, 申请号 etc. from patent announcements."""
+        assert "国家知识产权局" in detector._CN_STOPWORDS
+        assert "申请号" in detector._CN_STOPWORDS
+
+    def test_generic_finance_in_stoplist(self):
+        """同比增长/回购/增持 — high freq across all stocks, no specificity."""
+        for word in ["同比增长", "回购", "增持", "减持"]:
+            assert word in detector._CN_STOPWORDS, f"{word!r} missing"
+
+    def test_company_fragments_in_stoplist(self):
+        """jieba splits 心动公司→[心动,公司]; '公司' is noise."""
+        for word in ["公司", "有限公司", "股份", "集团"]:
+            assert word in detector._CN_STOPWORDS, f"{word!r} missing"
+
+    def test_real_signal_words_still_pass(self):
+        """Core signal words must NOT be in stoplist."""
+        for word in ["labubu", "taptap", "算力", "雄安", "专利", "超声"]:
+            assert word not in detector._CN_STOPWORDS, f"{word!r} should not be stopword"
+
+
+# ════════════════════════════════════════════════════════
+# Integration: compute_tfidf end-to-end quality (Issue #22)
+# ════════════════════════════════════════════════════════
+
+class TestTfidfQuality:
+    """End-to-end: verify TF-IDF output is free of known noise patterns."""
+
+    NOISE_PATTERNS = [
+        "心动公司",           # stock full name
+        "迈瑞医疗",           # stock full name
+        "深圳迈瑞生物医疗",   # company legal name fragment
+        "环球市场播报",       # media account
+        "国家知识产权局信息显示",  # boilerplate
+        "新浪证券",           # media account
+    ]
+
+    def test_no_company_names_in_tfidf(self):
+        """Company full names should not appear as TF-IDF tokens."""
+        # Simulate posts that would have triggered company-name pollution
+        posts = [
+            "心动公司今天发布了新游戏，心动公司股价大涨",
+            "心动公司的TapTap平台用户增长",
+            "心动公司回购股份，心动公司业绩不错",
+            "游戏行业利好，心动公司受益",
+        ]
+        result = dict(compute_tfidf(posts, min_df=2, max_df=0.8))
+        for noise in self.NOISE_PATTERNS:
+            assert noise not in result, f"{noise!r} should not be a hot word: {list(result.keys())}"
+
+    def test_meaningful_words_surface(self):
+        """After jieba + stopword filtering, meaningful topic words should surface.
+        Uses enough posts to meet min_df=2 threshold reliably."""
+        posts = [
+            "雄安新区建设加速，拼多多入驻",
+            "拼多多在雄安设立新公司",
+            "雄安成为互联网公司新战场",
+            "拼多多雄安布局引发关注",
+            "雄安新区政策落地",
+            "拼多多雄安招聘启动",
+            "雄安商机无限",
+            "拼多多扎根雄安",
+        ]
+        result = compute_tfidf(posts, min_df=2, max_df=0.8)
+        result_words = [w for w, _ in result]
+        # 雄安 should surface (either as unigram or in a bigram)
+        xiongan_found = any("雄安" in w for w in result_words)
+        assert xiongan_found, f"雄安 should surface in hot words, got: {result_words}"
+        # Stock name fragments should NOT dominate
+        for w in result_words:
+            assert "心动公司" not in w
+            assert "迈瑞医疗" not in w
