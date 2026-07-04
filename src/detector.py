@@ -346,7 +346,7 @@ def detect_new_announcement(
     prev_titles = {_normalize_title(p.get("title", "")) for p in prev_announcements}
     # Dedup within the current batch — crawler can return duplicate titles
     # (e.g. daily share-buyback reports appear N times in the API response).
-    seen_hashes: set[str] = set()
+    seen_keys: set[str] = set()
 
     now_ts = int(time.time())
     alerts = []
@@ -370,11 +370,16 @@ def detect_new_announcement(
         if not norm or len(norm) < 4:
             continue
 
-        # Stage 0: within-batch dedup (same title seen earlier this loop)
-        title_hash = hashlib.md5(title.encode()).hexdigest()
-        if title_hash in seen_hashes:
+        # Stage 0: within-batch dedup (same title+time seen earlier this loop).
+        # Key includes ann time so that legitimately distinct announcements
+        # sharing a generic title (e.g. "财报披露" on different dates) survive.
+        ann_time = ann.get("time", "")
+        dedup_key = f"{title}|{ann_time}"
+        if dedup_key in seen_keys:
             continue
-        seen_hashes.add(title_hash)
+        seen_keys.add(dedup_key)
+        # title_hash (title-only) stays consistent with db.py Stage 2 lookup
+        title_hash = hashlib.md5(title.encode()).hexdigest()
 
         # Stage 1: cross-check against previous snapshot
         if norm in prev_titles:
