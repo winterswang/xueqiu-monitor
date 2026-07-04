@@ -1,0 +1,32 @@
+{
+  "db_path": "data/monitor.db",
+  "report_output_dir": "data/daily_reports",
+  "stocks": {
+    "PDD.US": {"name": "拼多多", "sector": "消费"},
+    "9992.HK": {"name": "泡泡玛特", "sector": "消费"},
+    "300750.SZ": {"name": "宁德时代", "sector": "新能源"},
+    "700.HK": {"name": "腾讯", "sector": "互联网/游戏"},
+    "2400.HK": {"name": "心动公司", "sector": "互联网/游戏"},
+    "NVDA.US": {"name": "英伟达", "sector": "AI/科技"},
+    "APP.US": {"name": "AppLovin", "sector": "AI/科技"},
+    "TCOM.US": {"name": "携程", "sector": "出行/酒旅"},
+    "1179.HK": {"name": "华住", "sector": "出行/酒旅"},
+    "SPCX.US": {"name": "SpaceX概念", "sector": "航天"},
+    "300760.SZ": {"name": "迈瑞医疗", "sector": "医疗器械"},
+    "2899.HK": {"name": "紫金矿业", "sector": "矿业"}
+  },
+  "llm": {
+    "model": "minimax-m3",
+    "concurrency": 3,
+    "max_posts_per_stock": 0,
+    "min_post_length": 30,
+    "timeout_seconds": 300
+  },
+  "ima": {
+    "folder_name": "自选股舆情日报",
+    "folder_id": ""
+  },
+  "notification": {
+    "lark_chat_id": "oc_2fe3cfa05bfe4860c71a1bd1efbe3751"
+  }
+}
