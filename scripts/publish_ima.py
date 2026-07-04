@@ -53,12 +53,10 @@ def create_ima_note(
         print("❌ IMA 凭证缺失: 请设置 IMA_OPENAPI_CLIENTID / IMA_OPENAPI_APIKEY")
         return None
 
-    # If folder_id empty, search by folder_name to find/create it
+    # If folder_id empty, search by folder_name; if still empty, import_doc
+    # will auto-create/match by folder_name (empty folder_id is valid).
     if not folder_id:
         folder_id = _find_or_create_folder(client_id, api_key, folder_name) or ""
-        if not folder_id:
-            print(f"❌ 无法定位或创建笔记本: {folder_name}")
-            return None
 
     url = "https://ima.qq.com/openapi/note/v1/import_doc"
     body = {
