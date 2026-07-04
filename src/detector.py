@@ -128,10 +128,51 @@ def detect_sentiment_shift(
 # TF-IDF hot word detection
 # ════════════════════════════════════════════════════════
 
+# Multi-word entities that jieba would otherwise fragment (媒体账号名、
+# 公告模板、通用金融词). By adding them to jieba's custom dict BEFORE
+# segmentation, they become single tokens and can be cleanly filtered by
+# _CN_STOPWORDS. This avoids the sklearn "inconsistent stop_words" warning
+# caused by pre-fragmenting multi-word stopwords.
+_JIEBA_CUSTOM_WORDS = {
+    # media accounts — keep as single tokens
+    "环球市场播报", "新浪证券", "红岸工作室", "市场资讯", "财联社",
+    "每日经济新闻", "证券时报", "国际金融报", "国家知识产权局",
+    # generic finance phrases — keep as single tokens
+    "同比增长", "同比下降", "环比增长", "申请公布号",
+    # phrases that should stay whole to avoid fragment noise
+    "以下简称", "小时前", "网页链接",
+}
+
+# Register custom words once at import time
+for _w in _JIEBA_CUSTOM_WORDS:
+    import jieba
+    jieba.add_word(_w)
+
+
 def _tokenize(text: str) -> list[str]:
-    """Simple Chinese/English tokenizer: split on non-word chars, filter short tokens."""
-    tokens = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', text.lower())
-    return [t for t in tokens if len(t) >= 2]
+    """Hybrid Chinese/English tokenizer for TF-IDF.
+
+    English tokens: regex split (preserves PDD.US → pdd, us — jieba would
+    split on the dot, creating a '.' noise token).
+
+    Chinese tokens: jieba.cut (segments continuous CJK runs into words).
+    This is the critical fix — the old regex [\u4e00-\u9fff]+ treated
+    "心动公司" or "深圳迈瑞生物医疗电子股份有限公司申请一项名为" as a
+    single token, polluting hot word rankings with company names and
+    announcement boilerplate.
+    """
+    import jieba
+
+    text = text.lower()
+    # English: regex (unchanged behavior)
+    en_tokens = re.findall(r"[a-zA-Z]+", text)
+    # Chinese: jieba segmentation
+    cn_tokens = []
+    for w in jieba.cut(text, cut_all=False):
+        w = w.strip()
+        if w and "\u4e00" <= w[0] <= "\u9fff":
+            cn_tokens.append(w)
+    return [t for t in en_tokens + cn_tokens if len(t) >= 2]
 
 
 # Chinese stopwords — xueqiu UI noise, unit words, rendered placeholders,
@@ -149,6 +190,28 @@ _CN_STOPWORDS = {
     '网页链接', '图片', '视频', '收起',
     # exchange code suffixes — always noise
     'hk', 'sz', 'sh',
+    # media accounts (whole tokens via jieba custom dict)
+    '环球市场播报', '新浪证券', '格隆汇', '红岸工作室', '市场资讯',
+    '每日经济新闻', '证券时报', '国际金融报', '国家知识产权局',
+    # media account fragments (jieba splits these, so list the fragments)
+    '联社',  # 财联社 → 联社
+    '新闻',  # 每日经济新闻 also appears standalone
+    # announcement/patent boilerplate fragments
+    '信息显示', '申请号', '申请公布号', '消息', '发布公告',
+    '知识产权', '申请', '公布', '信息', '显示',
+    # generic finance terms (whole tokens via jieba custom dict)
+    '同比增长', '同比下降', '环比增长',
+    '回购', '增持', '减持', '市值', '估值', '涨停', '跌停',
+    # jieba fragmentation debris — company names like 心动公司/紫金矿业 get
+    # segmented into [心动, 公司] / [紫金, 矿业]; these generic fragments
+    # carry no topic signal
+    '公司', '有限公司', '股份', '集团', '有限',
+    # geographic/qualifier fragments with no topic specificity
+    '深圳',  # 迈瑞/腾讯 company location
+    # high-frequency generic Chinese words (jieba segments these out)
+    '一个', '金额', '授权', '决议', '设备', '观点',
+    # 拼多多 → [拼多, 多多] fragment
+    '多多',
 }
 
 
