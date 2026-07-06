@@ -8,9 +8,12 @@
     "700.HK": {"name": "腾讯", "sector": "互联网/游戏"},
     "2400.HK": {"name": "心动公司", "sector": "互联网/游戏"},
     "NVDA.US": {"name": "英伟达", "sector": "AI/科技"},
+    "TSM.US": {"name": "台积电", "sector": "AI/科技"},
     "APP.US": {"name": "AppLovin", "sector": "AI/科技"},
+    "CBRS.US": {"name": "Cerebras", "sector": "AI/科技"},
     "TCOM.US": {"name": "携程", "sector": "出行/酒旅"},
     "1179.HK": {"name": "华住", "sector": "出行/酒旅"},
+    "ABNB.US": {"name": "Airbnb", "sector": "出行/酒旅"},
     "SPCX.US": {"name": "SpaceX概念", "sector": "航天"},
     "300760.SZ": {"name": "迈瑞医疗", "sector": "医疗器械"},
     "2899.HK": {"name": "紫金矿业", "sector": "矿业"}

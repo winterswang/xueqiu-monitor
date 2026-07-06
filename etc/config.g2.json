@@ -8,7 +8,8 @@
     "whitelist": [
       "TCOM.US",
       "1179.HK",
-      "SPCX.US"
+      "SPCX.US",
+      "ABNB.US"
     ]
   },
   "detector": {

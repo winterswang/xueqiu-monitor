@@ -8,7 +8,8 @@
     "whitelist": [
       "APP.US",
       "300760.SZ",
-      "2899.HK"
+      "2899.HK",
+      "CBRS.US"
     ]
   },
   "detector": {
