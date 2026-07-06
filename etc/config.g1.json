@@ -8,7 +8,8 @@
     "whitelist": [
       "700.HK",
       "2400.HK",
-      "NVDA.US"
+      "NVDA.US",
+      "TSM.US"
     ]
   },
   "detector": {
