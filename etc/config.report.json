@@ -29,6 +29,10 @@
     "folder_name": "自选股舆情日报",
     "folder_id": ""
   },
+  "knowledge_base": {
+    "name": "雪球内容数据",
+    "id": ""
+  },
   "notification": {
     "lark_chat_id": "oc_2fe3cfa05bfe4860c71a1bd1efbe3751"
   }
