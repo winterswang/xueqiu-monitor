@@ -89,6 +89,7 @@ STOCKS_CFG = {
 # fetch_all_posts tests
 # ════════════════════════════════════════════════════════
 
+
 class TestFetchAllPosts:
     """Test fetch_all_posts data extraction."""
 
@@ -180,7 +181,7 @@ class TestFetchAllPosts:
         posts_new = [{"type": "discussion", "title": "新帖标题标题标题标题",
                       "content": "新帖内容内容内容内容内容"}]
         tmp_db.insert_snapshot("TEST.HK", posts_old)
-        time.sleep(1.1)  # ensure newer timestamp (second precision)
+        time.sleep(0.01)  # ensure newer timestamp
         tmp_db.insert_snapshot("TEST.HK", posts_new)
         result = export_csv.fetch_all_posts(
             str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
@@ -217,6 +218,7 @@ class TestFetchAllPosts:
 # fetch_announcements tests
 # ════════════════════════════════════════════════════════
 
+
 class TestFetchAnnouncements:
     """Test announcement data extraction."""
 
@@ -249,6 +251,7 @@ class TestFetchAnnouncements:
 # ════════════════════════════════════════════════════════
 # generate_csv tests
 # ════════════════════════════════════════════════════════
+
 
 class TestGenerateCsv:
     """Test CSV file generation."""
@@ -371,6 +374,7 @@ class TestGenerateCsv:
 # find_knowledge_base_id tests (mocked)
 # ════════════════════════════════════════════════════════
 
+
 class TestFindKnowledgeBaseId:
     """Test knowledge base search (API mocked)."""
 
@@ -414,18 +418,14 @@ class TestFindKnowledgeBaseId:
 # upload_csv_to_kb tests (mocked)
 # ════════════════════════════════════════════════════════
 
+
 class TestUploadCsvToKb:
     """Test upload flow (API + COS mocked)."""
 
     @patch.object(export_csv.subprocess, "run")
-    @patch.object(export_csv, "COS_UPLOAD_SCRIPT")
     @patch.object(export_csv, "_ima_api")
-    def test_successful_upload(self, mock_api, mock_cos_script, mock_subproc):
+    def test_successful_upload(self, mock_api, mock_subproc):
         """Full happy path: check → create → COS → add → media_id."""
-        mock_cos_script.exists.return_value = True
-        # Mock check_repeated_names → not repeated
-        # Mock create_media → returns media_id + cos_credential
-        # Mock add_knowledge → returns media_id
         mock_api.side_effect = [
             {"code": 0, "data": {"results": [{"name": "test.csv", "is_repeated": False}]}},
             {
@@ -448,7 +448,7 @@ class TestUploadCsvToKb:
         ]
         mock_subproc.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
 
-        csv_path = Path("/tmp/fake_test.csv")
+        csv_path = Path("/tmp/fake_test_export_csv.csv")
         csv_path.write_text("dummy", encoding="utf-8")
         try:
             result = export_csv.upload_csv_to_kb(csv_path, "kb123")
@@ -465,7 +465,7 @@ class TestUploadCsvToKb:
             {"code": 0, "data": {"results": [{"is_repeated": False}]}},
             {"code": 110001, "msg": "参数非法"},
         ]
-        csv_path = Path("/tmp/fake_test2.csv")
+        csv_path = Path("/tmp/fake_test2_export_csv.csv")
         csv_path.write_text("dummy", encoding="utf-8")
         try:
             result = export_csv.upload_csv_to_kb(csv_path, "kb123")
@@ -493,7 +493,7 @@ class TestUploadCsvToKb:
         ]
         mock_subproc.return_value = MagicMock(returncode=1, stdout="", stderr="upload error")
 
-        csv_path = Path("/tmp/fake_test3.csv")
+        csv_path = Path("/tmp/fake_test3_export_csv.csv")
         csv_path.write_text("dummy", encoding="utf-8")
         try:
             result = export_csv.upload_csv_to_kb(csv_path, "kb123")

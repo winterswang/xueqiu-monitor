@@ -132,7 +132,7 @@ def fetch_all_posts(
         rows = conn.execute(
             """SELECT stock_code, posts_data FROM crawl_snapshots
                WHERE date(crawl_time,'unixepoch','localtime')=?
-               ORDER BY stock_code, crawl_time DESC""",
+               ORDER BY stock_code, crawl_time DESC, id DESC""",
             (date_str,),
         ).fetchall()
 
