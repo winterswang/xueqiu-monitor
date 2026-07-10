@@ -213,6 +213,55 @@ class TestFetchAllPosts:
         )
         assert result == []
 
+    def test_dedup_same_post_across_stocks(self, tmp_db):
+        """Same post_id in different stocks → only first occurrence kept."""
+        shared_post = {
+            "type": "discussion",
+            "post_id": "https://xueqiu.com/12345/67890",
+            "title": "跨股票重复帖子标题标题标题",
+            "content": "这个帖子同时讨论了多只股票内容内容",
+        }
+        tmp_db.insert_snapshot("TEST.HK", [shared_post])
+        tmp_db.insert_snapshot("DEMO.US", [shared_post])
+        result = export_csv.fetch_all_posts(
+            str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
+        )
+        assert len(result) == 1
+
+    def test_dedup_same_post_within_snapshot(self, tmp_db):
+        """Duplicate post_id within the same snapshot → only first kept."""
+        post = {
+            "type": "discussion",
+            "post_id": "https://xueqiu.com/111/222",
+            "title": "重复帖子标题标题标题标题",
+            "content": "内容内容内容内容内容内容",
+        }
+        tmp_db.insert_snapshot("TEST.HK", [post, post])
+        result = export_csv.fetch_all_posts(
+            str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
+        )
+        assert len(result) == 1
+
+    def test_no_post_id_not_dropped(self, tmp_db):
+        """Posts without post_id are still included (no dedup possible)."""
+        posts = [
+            {
+                "type": "news",
+                "title": "没有post_id的新闻标题标题",
+                "content": "内容内容内容内容内容",
+            },
+            {
+                "type": "news",
+                "title": "另一条没有post_id的新闻标题",
+                "content": "内容内容内容内容内容",
+            },
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = export_csv.fetch_all_posts(
+            str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
+        )
+        assert len(result) == 2
+
 
 # ════════════════════════════════════════════════════════
 # fetch_announcements tests

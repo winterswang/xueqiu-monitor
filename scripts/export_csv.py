@@ -125,9 +125,15 @@ def fetch_all_posts(
     - Skip reply posts (回复@ prefix)
     - Skip posts shorter than min_length chars
     - Content capped to CONTENT_MAX_CHARS
+
+    Deduplication:
+    - Snapshot level: only the latest snapshot per stock is used
+    - Post level: deduplicate by post_id across stocks and snapshots,
+      so the same post mentioned for multiple stocks only appears once
     """
     conn = _connect(db_path)
     rows_data = []
+    seen_post_ids: set[str] = set()
     try:
         rows = conn.execute(
             """SELECT stock_code, posts_data FROM crawl_snapshots
@@ -150,6 +156,11 @@ def fetch_all_posts(
             stock_name = stocks_cfg.get(stock_code, {}).get("name", stock_code)
             posts = json.loads(row["posts_data"])
             for p in posts:
+                # Post-level dedup by post_id (cross-stock + cross-snapshot)
+                post_id = p.get("post_id") or p.get("link") or ""
+                if post_id and post_id in seen_post_ids:
+                    continue
+
                 title = (p.get("title") or "")[:200]
                 content = p.get("content") or ""
                 # Skip reply posts
@@ -159,6 +170,9 @@ def fetch_all_posts(
                 full_text = f"{title} {content}".strip()
                 if len(full_text) < min_length:
                     continue
+
+                if post_id:
+                    seen_post_ids.add(post_id)
                 rows_data.append(
                     {
                         "date": date_str,
