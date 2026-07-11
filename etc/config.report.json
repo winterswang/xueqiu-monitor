@@ -16,7 +16,12 @@
     "ABNB.US": {"name": "Airbnb", "sector": "出行/酒旅"},
     "SPCX.US": {"name": "SpaceX概念", "sector": "航天"},
     "300760.SZ": {"name": "迈瑞医疗", "sector": "医疗器械"},
-    "2899.HK": {"name": "紫金矿业", "sector": "矿业"}
+    "2899.HK": {"name": "紫金矿业", "sector": "矿业"},
+    "LKNCY.US": {"name": "瑞幸咖啡", "sector": "消费"},
+    "DUOL.US": {"name": "Duolingo", "sector": "教育/科技"},
+    "ASML.US": {"name": "ASML", "sector": "AI/半导体"},
+    "CRCL.US": {"name": "Circle", "sector": "金融科技"},
+    "883.HK": {"name": "中海油", "sector": "能源"}
   },
   "llm": {
     "model": "minimax-m3",
