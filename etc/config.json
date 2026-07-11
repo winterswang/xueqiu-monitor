@@ -8,7 +8,9 @@
     "whitelist": [
       "PDD.US",
       "300750.SZ",
-      "9992.HK"
+      "9992.HK",
+      "LKNCY.US",
+      "DUOL.US"
     ]
   },
   "detector": {
