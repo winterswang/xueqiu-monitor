@@ -21,7 +21,12 @@
     "DUOL.US": {"name": "Duolingo", "sector": "教育/科技"},
     "ASML.US": {"name": "ASML", "sector": "AI/半导体"},
     "CRCL.US": {"name": "Circle", "sector": "金融科技"},
-    "883.HK": {"name": "中海油", "sector": "能源"}
+    "883.HK": {"name": "中海油", "sector": "能源"},
+    "3690.HK": {"name": "美团", "sector": "互联网"},
+    "600519.SH": {"name": "茅台", "sector": "消费"},
+    "9926.HK": {"name": "康方生物", "sector": "医药"},
+    "BABA.US": {"name": "阿里巴巴", "sector": "互联网"},
+    "TAL.US": {"name": "好未来", "sector": "教育"}
   },
   "llm": {
     "model": "minimax-m3",

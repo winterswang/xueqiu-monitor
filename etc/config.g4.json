@@ -1,0 +1,37 @@
+{
+  "db_path": "data/monitor.db",
+  "watchlist_path": "data/watchlist.json",
+  "crawler": {
+    "timeout_seconds": 600,
+    "max_retries": 0,
+    "concurrency": 1,
+    "whitelist": [
+      "3690.HK",
+      "600519.SH",
+      "9926.HK",
+      "BABA.US",
+      "TAL.US"
+    ]
+  },
+  "detector": {
+    "z_score_window_days": 14
+  },
+  "notification": {
+    "webhook_url": "",
+    "mode": "auto",
+    "pending_path": "/tmp/xueqiu_monitor_pending.json",
+    "lark_chat_id": "oc_2fe3cfa05bfe4860c71a1bd1efbe3751"
+  },
+  "filter": {
+    "ad_keywords": [],
+    "duplicate_similarity_threshold": 0.85,
+    "short_post_threshold": 20,
+    "p0_z_threshold": 5.0,
+    "p1_z_threshold": 3.0
+  },
+  "cold_start": {
+    "enabled": true,
+    "days": 7,
+    "min_data_points": 7
+  }
+}
