@@ -111,6 +111,95 @@ class TestBuildPrompt:
         prompt = rg._build_analysis_prompt("测试", "T.US", posts, trend, [], [])
         assert "数据积累中" in prompt
 
+    def test_prompt_includes_yesterday_delta(self):
+        """Prompt includes yesterday comparison when provided."""
+        posts = [{"title": "测试", "content": "内容", "author": "A",
+                   "like_count": 0, "forward_count": 0, "comment_count": 0}]
+        trend = {"has_trend": True, "today_mean": 0.15, "avg_mean": 0.05,
+                 "avg_std": 0.02, "trend": "上升", "days": 7}
+        yesterday = {
+            "has_data": True,
+            "yesterday_str": "2026-07-23",
+            "sentiment": 0.05,
+            "posts_count": 60,
+            "top_hot_words": ["储能", "电池"],
+        }
+        prompt = rg._build_analysis_prompt("测试", "T.US", posts, trend, [], [], yesterday=yesterday)
+        assert "昨日对比" in prompt
+        assert "0.05" in prompt
+        assert "储能" in prompt
+        assert "↑" in prompt  # 0.15 - 0.05 = 0.10 > 0.05
+
+    def test_prompt_includes_streaks_annotation(self):
+        """Prompt annotates hot words with streak counts."""
+        posts = [{"title": "测试", "content": "内容", "author": "A",
+                   "like_count": 0, "forward_count": 0, "comment_count": 0}]
+        trend = {"has_trend": True, "today_mean": 0.0, "avg_mean": 0.0,
+                 "avg_std": 0.01, "trend": "平稳", "days": 7}
+        streaks = [
+            {"word": "储能", "today_tfidf": 3.5, "streak_days": 5, "is_persistent": True},
+            {"word": "新话题", "today_tfidf": 1.2, "streak_days": 1, "is_persistent": False},
+        ]
+        prompt = rg._build_analysis_prompt("测试", "T.US", posts, trend, [], [],
+                                           streaks=streaks)
+        assert "连续5天" in prompt
+        assert "🆕新增" in prompt
+        assert "话题连续性" in prompt
+
+    def test_prompt_handles_missing_yesterday(self):
+        """Prompt shows 'no data' when yesterday context absent."""
+        posts = []
+        trend = {"has_trend": False, "days": 1}
+        prompt = rg._build_analysis_prompt("测试", "T.US", posts, trend, [], [])
+        assert "无昨日数据" in prompt
+
+
+class TestYesterdaySummary:
+    """Test fetch_yesterday_summary."""
+
+    def test_returns_has_data_when_yesterday_exists(self, tmp_db):
+        """Yesterday sentiment_stats present → has_data=True."""
+        tmp_db.insert_sentiment_stat("TEST.HK", sentiment_mean=0.15, days_ago=1)
+        result = rg.fetch_yesterday_summary(str(tmp_db.path), "TEST.HK", tmp_db.date_str)
+        assert result["has_data"] is True
+        assert result["sentiment"] == 0.15
+
+    def test_returns_no_data_when_missing(self, tmp_db):
+        """No yesterday data → has_data=False."""
+        result = rg.fetch_yesterday_summary(str(tmp_db.path), "NOEXIST.US", tmp_db.date_str)
+        assert result["has_data"] is False
+
+
+class TestHotWordStreaks:
+    """Test fetch_hot_word_streaks."""
+
+    def test_persistent_vs_new(self, tmp_db):
+        """Words appearing 3+ days → persistent; 1 day → new."""
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_db.path))
+        now = int(time.time())
+        # Insert hot words across 4 days
+        for days_ago in range(4):
+            ts = now - days_ago * 86400
+            conn.execute(
+                "INSERT INTO hot_word_event (stock_code, word, tfidf_score, event_time, z_score) VALUES (?, ?, ?, ?, 0)",
+                ("TEST.HK", "持续词", 3.0, ts)
+            )
+        # New word today only
+        conn.execute(
+            "INSERT INTO hot_word_event (stock_code, word, tfidf_score, event_time, z_score) VALUES (?, ?, ?, ?, 0)",
+            ("TEST.HK", "新词", 1.5, now)
+        )
+        conn.commit()
+        conn.close()
+
+        streaks = rg.fetch_hot_word_streaks(str(tmp_db.path), "TEST.HK", tmp_db.date_str)
+        assert len(streaks) >= 2
+        by_word = {s["word"]: s for s in streaks}
+        assert by_word["持续词"]["is_persistent"] is True
+        assert by_word["持续词"]["streak_days"] >= 3
+        assert by_word["新词"]["is_persistent"] is False
+
 
 class TestThermometerSection:
     """Test market thermometer Markdown generation."""
