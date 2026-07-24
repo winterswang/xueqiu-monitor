@@ -207,6 +207,108 @@ def fetch_hot_words(
         conn.close()
 
 
+def fetch_hot_word_streaks(
+    db_path: str, stock_code: str, date_str: str, lookback_days: int = 7
+) -> list[dict]:
+    """Fetch hot words with their consecutive-day streak count.
+
+    For each of today's top hot words, counts how many of the past
+    `lookback_days` days it also appeared in. Used to distinguish
+    persistent narratives from newly emerging topics.
+
+    Returns list of {word, today_tfidf, streak_days, first_seen} sorted by
+    streak_days DESC, then today_tfidf DESC.
+    """
+    conn = _connect(db_path)
+    try:
+        # Parse date_str to unix timestamp range
+        target_date = datetime.strptime(date_str, "%Y-%m-%d")
+        end_ts = int((target_date + timedelta(days=1)).timestamp())
+        start_ts = int((target_date - timedelta(days=lookback_days - 1)).timestamp())
+
+        # Today's hot words
+        today_rows = conn.execute(
+            """SELECT word, tfidf_score FROM hot_word_event
+               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               ORDER BY tfidf_score DESC LIMIT 15""",
+            (stock_code, date_str),
+        ).fetchall()
+        if not today_rows:
+            return []
+
+        # History: which words appeared on which days
+        hist_rows = conn.execute(
+            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') as day
+               FROM hot_word_event
+               WHERE stock_code=? AND event_time >= ? AND event_time < ?""",
+            (stock_code, start_ts, end_ts),
+        ).fetchall()
+        word_days: dict[str, set[str]] = {}
+        for r in hist_rows:
+            word_days.setdefault(r["word"], set()).add(r["day"])
+
+        results = []
+        for r in today_rows:
+            word = r["word"]
+            days = word_days.get(word, set())
+            results.append({
+                "word": word,
+                "today_tfidf": round(r["tfidf_score"], 2),
+                "streak_days": len(days),
+                "is_persistent": len(days) >= 3,
+            })
+        # Sort: persistent first (by streak), then by today's tfidf
+        results.sort(key=lambda x: (-x["streak_days"], -x["today_tfidf"]))
+        return results
+    finally:
+        conn.close()
+
+
+def fetch_yesterday_summary(
+    db_path: str, stock_code: str, date_str: str
+) -> dict:
+    """Fetch yesterday's sentiment + hot words for delta comparison.
+
+    Returns {has_data, sentiment, posts_count, top_hot_words, sentiment_delta}
+    where sentiment_delta = today_sentiment - yesterday_sentiment.
+    """
+    conn = _connect(db_path)
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d")
+        yesterday_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Yesterday sentiment_stats
+        yest_ts_start = int((target_date - timedelta(days=1)).timestamp())
+        yest_ts_end = int(target_date.timestamp())
+        row = conn.execute(
+            """SELECT sentiment_mean, posts_count FROM sentiment_stats
+               WHERE stock_code=? AND stat_date >= ? AND stat_date < ?""",
+            (stock_code, yest_ts_start, yest_ts_end),
+        ).fetchone()
+
+        # Yesterday hot words (top 5)
+        yest_hw = conn.execute(
+            """SELECT word FROM hot_word_event
+               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               ORDER BY tfidf_score DESC LIMIT 5""",
+            (stock_code, yesterday_str),
+        ).fetchall()
+        yest_words = [r["word"] for r in yest_hw] if yest_hw else []
+
+        if not row:
+            return {"has_data": False, "yesterday_str": yesterday_str}
+
+        return {
+            "has_data": True,
+            "yesterday_str": yesterday_str,
+            "sentiment": round(row["sentiment_mean"], 3),
+            "posts_count": row["posts_count"],
+            "top_hot_words": yest_words,
+        }
+    finally:
+        conn.close()
+
+
 def fetch_market_thermometer(db_path: str, date_str: str) -> list[dict]:
     """Fetch sentiment overview for all stocks on a given date."""
     conn = _connect(db_path)
@@ -259,8 +361,16 @@ def _build_analysis_prompt(
     trend: dict,
     alerts: list[dict],
     hot_words: list[str],
+    yesterday: Optional[dict] = None,
+    streaks: Optional[list] = None,
 ) -> str:
-    """Build the LLM prompt for per-stock analysis."""
+    """Build the LLM prompt for per-stock analysis.
+
+    Args:
+        yesterday: Yesterday's sentiment + hot words for delta comparison.
+        streaks: Hot words with consecutive-day streak counts, used to
+            distinguish persistent narratives from new topics.
+    """
     # Format posts
     posts_text = ""
     for i, p in enumerate(posts, 1):
@@ -282,6 +392,23 @@ def _build_analysis_prompt(
     else:
         trend_text = f"数据积累中（仅 {trend.get('days', 0)} 天），暂无趋势"
 
+    # Format yesterday delta
+    delta_text = "无昨日数据（首次覆盖或数据缺失）"
+    if yesterday and yesterday.get("has_data"):
+        y_sent = yesterday["sentiment"]
+        today_sent = trend.get("today_mean")
+        if today_sent is not None:
+            delta = round(today_sent - y_sent, 3)
+            direction = "↑" if delta > 0.05 else ("↓" if delta < -0.05 else "→")
+        else:
+            delta = "N/A"
+            direction = ""
+        y_words = ", ".join(yesterday["top_hot_words"][:5]) if yesterday["top_hot_words"] else "无"
+        delta_text = (
+            f"昨日情感分: {y_sent} | 今日 vs 昨日: {delta} {direction}\n"
+            f"昨日热词: {y_words}"
+        )
+
     # Format alerts
     if alerts:
         alert_text = "\n".join(
@@ -290,18 +417,28 @@ def _build_analysis_prompt(
     else:
         alert_text = "无显著异常信号"
 
-    # Format hot words
-    hot_words_text = ", ".join(hot_words) if hot_words else "无"
+    # Format hot words with streak annotations
+    if streaks:
+        hw_parts = []
+        for s in streaks[:10]:
+            tag = f"📊连续{s['streak_days']}天" if s["is_persistent"] else "🆕新增"
+            hw_parts.append(f"{s['word']}({s['today_tfidf']}) {tag}")
+        hot_words_text = "\n".join(f"- {w}" for w in hw_parts)
+    else:
+        hot_words_text = ", ".join(hot_words) if hot_words else "无"
 
     return f"""你是雪球舆情分析师。请分析以下「{stock_name}（{stock_code}）」今日的雪球讨论。
 
 ## 情感数据
 {trend_text}
 
+## 昨日对比
+{delta_text}
+
 ## 今日异常信号
 {alert_text}
 
-## 今日热词（TF-IDF top）
+## 今日热词（TF-IDF top，已标注连续天数）
 {hot_words_text}
 
 ## 今日讨论帖（共 {len(posts)} 帖，按互动量排序）
@@ -309,7 +446,7 @@ def _build_analysis_prompt(
 
 ---
 
-请输出结构化分析（Markdown 格式），包含以下四个部分：
+请输出结构化分析（Markdown 格式），包含以下五个部分：
 
 ### 讨论焦点
 提炼 3-5 条今日核心讨论观点（每条一句话概括，附代表性帖子编号）
@@ -319,6 +456,11 @@ def _build_analysis_prompt(
 
 ### 风险提示
 帖子中提到的关键风险（如无则标注"暂无明显风险讨论"）
+
+### 话题连续性
+区分以下两类内容（如全部为新增则说明"今日无持续叙事"）：
+- **📊 持续叙事**：与昨日/近期重复的话题，简要标注已持续天数，重点说**今日有何新进展或新角度**
+- **🆕 今日新增**：昨日未出现的新话题、新事件、新观点
 
 ### 情感解读
 结合情感数据和帖子内容，一句话总结今日市场情绪"""
@@ -342,9 +484,12 @@ def analyze_stock(
     trend = fetch_sentiment_trend(db_path, stock_code)
     alerts = fetch_stock_alerts(db_path, stock_code, date_str)
     hot_words = fetch_hot_words(db_path, stock_code, date_str)
+    yesterday = fetch_yesterday_summary(db_path, stock_code, date_str)
+    streaks = fetch_hot_word_streaks(db_path, stock_code, date_str)
 
     prompt = _build_analysis_prompt(
-        stock_name, stock_code, posts, trend, alerts, hot_words
+        stock_name, stock_code, posts, trend, alerts, hot_words,
+        yesterday=yesterday, streaks=streaks,
     )
 
     logger.info(
