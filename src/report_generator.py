@@ -216,7 +216,7 @@ def fetch_hot_word_streaks(
     `lookback_days` days it also appeared in. Used to distinguish
     persistent narratives from newly emerging topics.
 
-    Returns list of {word, today_tfidf, streak_days, first_seen} sorted by
+    Returns list of {word, today_tfidf, streak_days, is_persistent} sorted by
     streak_days DESC, then today_tfidf DESC.
     """
     conn = _connect(db_path)
@@ -269,8 +269,8 @@ def fetch_yesterday_summary(
 ) -> dict:
     """Fetch yesterday's sentiment + hot words for delta comparison.
 
-    Returns {has_data, sentiment, posts_count, top_hot_words, sentiment_delta}
-    where sentiment_delta = today_sentiment - yesterday_sentiment.
+    Returns {has_data, yesterday_str, sentiment, posts_count, top_hot_words}.
+    The day-over-day delta is computed in _build_analysis_prompt, not here.
     """
     conn = _connect(db_path)
     try:
