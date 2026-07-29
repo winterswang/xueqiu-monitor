@@ -312,19 +312,33 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                 filtered_posts = []
                 skipped = 0
                 rescued = 0  # 时间戳判断要过滤，但 DB 里没有 → 救回
+                unparseable = 0  # 时间无法解析的帖子计数（fail-safe 监控）
                 for post in posts:
                     post_time_str = post.get("time", "")
                     post_ts = _parse_post_time(post_time_str, _now)
-                    if post_ts == 0 or post_ts >= last_crawl_ts:
-                        filtered_posts.append(post)
-                    elif post.get("post_id") not in existing_ids:
-                        # 时间戳 < last_crawl 但 post_id 不在 DB → 上次没爬到，保留
-                        rescued += 1
-                        filtered_posts.append(post)
+                    if post_ts > 0 and post_ts < last_crawl_ts:
+                        # 旧帖：时间戳早于上次抓取
+                        if post.get("post_id") not in existing_ids:
+                            # 时间戳 < last_crawl 但 post_id 不在 DB → 上次没爬到，保留
+                            rescued += 1
+                            filtered_posts.append(post)
+                        else:
+                            skipped += 1
+                    elif post_ts == 0:
+                        # 时间无法解析 → fail-safe：DB 已有则视为旧帖跳过，否则保留
+                        unparseable += 1
+                        if post.get("post_id") in existing_ids:
+                            skipped += 1
+                        else:
+                            filtered_posts.append(post)
                     else:
-                        skipped += 1
-                if skipped > 0 or rescued > 0:
-                    logger.info(f"  {stock_code}: 过滤 {skipped} 条旧帖, 救回 {rescued} 条(DB无记录)")
+                        # post_ts >= last_crawl_ts → 新帖，保留
+                        filtered_posts.append(post)
+                if skipped > 0 or rescued > 0 or unparseable > 0:
+                    logger.info(
+                        f"  {stock_code}: 过滤 {skipped} 条旧帖, 救回 {rescued} 条(DB无记录), "
+                        f"时间无法解析 {unparseable} 条"
+                    )
                 posts = filtered_posts
                 result["posts_count"] = len(posts)
                 result["posts_data"] = posts
@@ -622,6 +636,8 @@ def _parse_post_time(time_str: str, now: float) -> float:
       - "MM-DD HH:MM" → this year
       - "MM-DD" → this year 00:00
       - "HH:MM" → today
+      - "YYYY-MM-DD" → absolute date (posts from previous years, news)
+      - "YYYY-MM-DD HH:MM" → absolute date with time
     """
     import re
     from datetime import datetime, timedelta
@@ -690,5 +706,23 @@ def _parse_post_time(time_str: str, now: float) -> float:
             hour=hour, minute=minute, second=0, microsecond=0
         )
         return target.timestamp()
+
+    # "YYYY-MM-DD" (posts from previous years, news/announcement absolute dates)
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})$', time_str)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(y, mo, d).timestamp()
+        except ValueError:
+            return 0.0
+
+    # "YYYY-MM-DD HH:MM"
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
+    if m:
+        y, mo, d, h, mi = (int(m.group(i)) for i in range(1, 6))
+        try:
+            return datetime(y, mo, d, h, mi).timestamp()
+        except ValueError:
+            return 0.0
 
     return 0.0
