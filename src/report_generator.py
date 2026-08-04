@@ -55,11 +55,21 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def fetch_stock_posts(
     db_path: str, stock_code: str, date_str: str, min_length: int = 30
 ) -> list[dict]:
-    """Fetch all non-reply posts for a stock on a given date.
+    """Fetch today's posts for a stock, filtered from the latest snapshot.
+
+    The snapshot from 雪球 is a mixed stream of latest posts + historical
+    hot posts. This function filters to keep only posts authored on
+    ``date_str``, so the LLM analyzes today's discussion instead of
+    rehashing old high-engagement posts.
 
     Filters out:
     - Reply posts ("回复@" prefix in title)
     - Posts shorter than min_length chars
+    - Posts whose parsed time falls outside ``date_str`` (fail-open:
+      posts with unparseable time are kept)
+
+    Sort: newest first (by timestamp), ties broken by engagement desc.
+    Posts with unknown time sort last, ordered by engagement.
     """
     conn = _connect(db_path)
     try:
@@ -75,7 +85,17 @@ def fetch_stock_posts(
             return []
 
         posts = json.loads(row["posts_data"])
-        # Filter: remove replies and short posts
+
+        # Compute the [day_start, day_end) window for date_str (local time)
+        target_date = datetime.strptime(date_str, "%Y-%m-%d")
+        day_start = int(target_date.timestamp())
+        day_end = day_start + 86400
+
+        # Lazy import to avoid a module-load-time circular dependency
+        from .crawler import _parse_post_time
+
+        now = time.time()
+
         filtered = []
         for p in posts:
             title = (p.get("title") or "")[:200]
@@ -87,6 +107,13 @@ def fetch_stock_posts(
             full_text = f"{title} {content}".strip()
             if len(full_text) < min_length:
                 continue
+            # Filter out posts not authored on date_str.
+            # Fail-open: unparseable time (ts == 0) is kept, so missing
+            # time data never blanks out a stock's entire feed.
+            post_time_str = p.get("time", "")
+            post_ts = _parse_post_time(post_time_str, now)
+            if post_ts > 0 and not (day_start <= post_ts < day_end):
+                continue
             filtered.append(
                 {
                     "title": title,
@@ -96,16 +123,22 @@ def fetch_stock_posts(
                     "forward_count": p.get("forward_count", 0),
                     "comment_count": p.get("comment_count", 0),
                     "link": p.get("link", ""),
-                    "time": p.get("time", ""),
+                    "time": post_time_str,
+                    "_ts": post_ts,  # internal sort key, stripped before return
                 }
             )
-        # Sort by engagement (likes + forwards + comments) descending
+        # Stable two-pass sort: engagement desc, then timestamp desc.
+        # Result: newest first; same-timestamp ties keep engagement order;
+        # unknown-time posts (ts=0) sink to the end in engagement order.
         filtered.sort(
             key=lambda p: p["like_count"]
             + p["forward_count"]
             + p["comment_count"],
             reverse=True,
         )
+        filtered.sort(key=lambda p: p["_ts"], reverse=True)
+        for p in filtered:
+            p.pop("_ts", None)
         return filtered
     finally:
         conn.close()
@@ -377,7 +410,8 @@ def _build_analysis_prompt(
         engagement = (
             f"❤️{p['like_count']} 💬{p['comment_count']} 🔄{p['forward_count']}"
         )
-        posts_text += f"\n---\n[{i}] {p['author']} ({engagement})\n{p['title']}\n{p['content']}\n"
+        time_str = p.get("time", "") or "时间未知"
+        posts_text += f"\n---\n[{i}] {p['author']} | 🕐{time_str} | ({engagement})\n{p['title']}\n{p['content']}\n"
         if i >= 100:  # safety cap
             posts_text += f"\n...（共 {len(posts)} 帖，已截取前 100 帖）\n"
             break
@@ -441,7 +475,7 @@ def _build_analysis_prompt(
 ## 今日热词（TF-IDF top，已标注连续天数）
 {hot_words_text}
 
-## 今日讨论帖（共 {len(posts)} 帖，按互动量排序）
+## 今日讨论帖（共 {len(posts)} 帖，按发帖时间倒序排列）
 {posts_text}
 
 ---

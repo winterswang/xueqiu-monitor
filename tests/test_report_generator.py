@@ -47,7 +47,7 @@ class TestFetchStockPosts:
         assert result == []
 
     def test_sorted_by_engagement(self, tmp_db):
-        """Posts sorted by engagement (likes+forwards+comments) descending."""
+        """Posts with unknown time sort by engagement desc (stable fallback)."""
         posts = [
             {"title": "低互动", "content": "内容内容内容内容", "like_count": 0, "forward_count": 0, "comment_count": 1},
             {"title": "高互动", "content": "内容内容内容内容", "like_count": 100, "forward_count": 50, "comment_count": 20},
@@ -55,9 +55,56 @@ class TestFetchStockPosts:
         ]
         tmp_db.insert_snapshot("TEST.HK", posts)
         result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        # All posts have no time field → fall back to engagement sort
         assert result[0]["title"] == "高互动"
         assert result[1]["title"] == "中互动"
         assert result[2]["title"] == "低互动"
+
+    def test_filters_old_posts_by_time(self, tmp_db):
+        """Posts with an old MM-DD time must be filtered out."""
+        posts = [
+            {"title": "今日新帖足够长度", "content": "这是今天发的帖子内容", "time": "2小时前"},
+            {"title": "历史热门帖足够长度", "content": "这是五月发的旧帖子内容", "time": "05-27 14:30",
+             "like_count": 999},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        # Only today's post survives, even though the old one has higher engagement
+        assert len(result) == 1
+        assert result[0]["title"] == "今日新帖足够长度"
+
+    def test_fail_open_unparseable_time_kept(self, tmp_db):
+        """Posts with unparseable time must be kept (fail-open)."""
+        posts = [
+            {"title": "无时间字段的帖子内容", "content": "这个帖子没有time字段但内容够长", "time": ""},
+            {"title": "时间格式奇怪的帖子", "content": "这个帖子的时间格式无法解析但内容够长", "time": "garbage!!"},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        # Both kept because time can't be parsed (fail-open)
+        assert len(result) == 2
+
+    def test_sorted_newest_first(self, tmp_db):
+        """Posts with known time sort newest first."""
+        posts = [
+            {"title": "较早的今日帖", "content": "内容内容内容内容", "time": "3小时前",
+             "like_count": 100},
+            {"title": "最新的今日帖", "content": "内容内容内容内容", "time": "5分钟前",
+             "like_count": 0},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        # Newest (5分钟前) first despite lower engagement
+        assert result[0]["title"] == "最新的今日帖"
+        assert result[1]["title"] == "较早的今日帖"
+
+    def test_internal_ts_key_stripped(self, tmp_db):
+        """Internal _ts sort key must not leak into returned dicts."""
+        tmp_db.insert_snapshot("TEST.HK", [
+            {"title": "测试帖子内容足够长", "content": "内容内容内容内容", "time": "1小时前"}
+        ])
+        result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        assert result and "_ts" not in result[0]
 
 
 class TestSentimentTrend:
@@ -103,6 +150,18 @@ class TestBuildPrompt:
         assert "多空分歧" in prompt
         assert "风险提示" in prompt
         assert "情感解读" in prompt
+
+    def test_prompt_includes_post_time(self):
+        """Prompt must surface each post's time so LLM can tell new from old."""
+        posts = [{"title": "测试帖子", "content": "内容", "author": "A",
+                  "like_count": 1, "forward_count": 0, "comment_count": 0,
+                  "link": "", "time": "3小时前"}]
+        trend = {"has_trend": True, "today_mean": 0.1, "avg_mean": 0.05,
+                 "avg_std": 0.02, "trend": "上升", "days": 7}
+        prompt = rg._build_analysis_prompt("测试股", "T.US", posts, trend, [], [])
+        assert "3小时前" in prompt
+        # Posts sorted by time, not engagement
+        assert "按发帖时间倒序" in prompt
 
     def test_prompt_with_no_trend(self):
         """Prompt handles missing trend gracefully."""
