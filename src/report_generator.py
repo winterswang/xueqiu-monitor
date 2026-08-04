@@ -223,6 +223,39 @@ def fetch_stock_alerts(
         conn.close()
 
 
+def fetch_stock_announcements(
+    db_path: str, stock_code: str, date_str: str, limit: int = 10
+) -> list[dict]:
+    """Fetch today's announcements for a stock, newest first.
+
+    Returns list of {title, time, notice_type, link}. Used to surface
+    official announcements (with detail-page URLs) in the LLM prompt so
+    the analysis can reference primary sources alongside user discussion.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT a.ann_title, a.ann_type, a.ann_link, s.crawl_time
+               FROM announcements a
+               JOIN crawl_snapshots s ON a.snapshot_id = s.id
+               WHERE a.stock_code=?
+                 AND date(s.crawl_time,'unixepoch','localtime')=?
+               ORDER BY s.crawl_time DESC LIMIT ?""",
+            (stock_code, date_str, limit),
+        ).fetchall()
+        return [
+            {
+                "title": r["ann_title"],
+                "notice_type": r["ann_type"],
+                "link": r["ann_link"],
+                "time": str(r["crawl_time"]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
 def fetch_hot_words(
     db_path: str, stock_code: str, date_str: str
 ) -> list[str]:
@@ -397,6 +430,7 @@ def _build_analysis_prompt(
     hot_words: list[str],
     yesterday: Optional[dict] = None,
     streaks: Optional[list] = None,
+    announcements: Optional[list[dict]] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -452,6 +486,17 @@ def _build_analysis_prompt(
     else:
         alert_text = "无显著异常信号"
 
+    # Format announcements (official filings with detail-page URLs)
+    if announcements:
+        ann_parts = []
+        for a in announcements:
+            link = a.get("link", "")
+            link_md = f" [🔗]({link})" if link else ""
+            ann_parts.append(f"- {a['title']}{link_md}")
+        ann_text = "\n".join(ann_parts)
+    else:
+        ann_text = "今日无新公告"
+
     # Format hot words with streak annotations
     if streaks:
         hw_parts = []
@@ -472,6 +517,9 @@ def _build_analysis_prompt(
 
 ## 今日异常信号
 {alert_text}
+
+## 今日公告（官方披露，附详情页链接）
+{ann_text}
 
 ## 今日热词（TF-IDF top，已标注连续天数）
 {hot_words_text}
@@ -521,10 +569,11 @@ def analyze_stock(
     hot_words = fetch_hot_words(db_path, stock_code, date_str)
     yesterday = fetch_yesterday_summary(db_path, stock_code, date_str)
     streaks = fetch_hot_word_streaks(db_path, stock_code, date_str)
+    announcements = fetch_stock_announcements(db_path, stock_code, date_str)
 
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
-        yesterday=yesterday, streaks=streaks,
+        yesterday=yesterday, streaks=streaks, announcements=announcements,
     )
 
     logger.info(

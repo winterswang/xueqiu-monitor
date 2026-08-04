@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS announcements (
     ann_title   TEXT    NOT NULL DEFAULT '',
     ann_date    INTEGER NOT NULL,
     ann_type    TEXT    NOT NULL DEFAULT '',
+    ann_link    TEXT    NOT NULL DEFAULT '',
     is_new      INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (snapshot_id) REFERENCES crawl_snapshots(id)
 );

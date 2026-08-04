@@ -329,6 +329,26 @@ class TmpDB:
         )
         self.conn.commit()
 
+    def insert_announcement(self, stock_code: str, title: str,
+                            ann_link: str = "", notice_type: str = ""):
+        """Insert a crawl snapshot + linked announcement row."""
+        import json
+        ts = int(time.time())
+        cur = self.conn.execute(
+            """INSERT INTO crawl_snapshots
+               (stock_code, crawl_time, posts_count, posts_data, sentiment_avg, status)
+               VALUES (?, ?, 0, '[]', 0.0, 'success')""",
+            (stock_code, ts)
+        )
+        snapshot_id = cur.lastrowid
+        self.conn.execute(
+            """INSERT OR IGNORE INTO announcements
+               (snapshot_id, stock_code, ann_title, ann_date, ann_type, ann_link, is_new)
+               VALUES (?, ?, ?, ?, ?, ?, 0)""",
+            (snapshot_id, stock_code, title, ts, notice_type, ann_link)
+        )
+        self.conn.commit()
+
     def cleanup(self):
         self.conn.close()
 
@@ -341,3 +361,71 @@ def tmp_db():
         db = TmpDB(str(db_path), time.strftime("%Y-%m-%d"))
         yield db
         db.cleanup()
+
+
+# ════════════════════════════════════════════════════════
+# Announcement URL passthrough tests
+# ════════════════════════════════════════════════════════
+
+
+class TestAnnouncementUrlPassthrough:
+    """Verify announcement detail-page URLs survive the full pipeline:
+    crawler -> DB -> fetch_stock_announcements -> LLM prompt."""
+
+    def test_fetch_stock_announcements_returns_link(self, tmp_db):
+        """fetch_stock_announcements must include ann_link in each row."""
+        tmp_db.insert_announcement(
+            "TEST.HK", "季度财报公告",
+            ann_link="https://xueqiu.com/announcement/12345",
+            notice_type="财报",
+        )
+        result = rg.fetch_stock_announcements(
+            str(tmp_db.path), "TEST.HK", tmp_db.date_str
+        )
+        assert len(result) == 1
+        assert result[0]["link"] == "https://xueqiu.com/announcement/12345"
+        assert result[0]["title"] == "季度财报公告"
+
+    def test_fetch_stock_announcements_empty_link(self, tmp_db):
+        """Announcements without URL still surface (link='')."""
+        tmp_db.insert_announcement("TEST.HK", "无链接公告", ann_link="")
+        result = rg.fetch_stock_announcements(
+            str(tmp_db.path), "TEST.HK", tmp_db.date_str
+        )
+        assert len(result) == 1
+        assert result[0]["link"] == ""
+
+    def test_prompt_includes_announcement_section_with_link(self, tmp_db):
+        """_build_analysis_prompt must render announcement titles + links."""
+        tmp_db.insert_announcement(
+            "TEST.HK", "回购股份公告",
+            ann_link="https://xueqiu.com/announcement/99999",
+        )
+        anns = rg.fetch_stock_announcements(
+            str(tmp_db.path), "TEST.HK", tmp_db.date_str
+        )
+        prompt = rg._build_analysis_prompt(
+            "测试股", "TEST.HK",
+            posts=[{"title": "t", "content": "c", "author": "a",
+                    "like_count": 0, "forward_count": 0, "comment_count": 0,
+                    "link": "", "time": ""}],
+            trend={"has_trend": False, "days": 0},
+            alerts=[], hot_words=[],
+            announcements=anns,
+        )
+        assert "今日公告" in prompt
+        assert "回购股份公告" in prompt
+        assert "https://xueqiu.com/announcement/99999" in prompt
+
+    def test_prompt_announcement_section_empty_when_none(self):
+        """No announcements -> prompt shows placeholder text."""
+        prompt = rg._build_analysis_prompt(
+            "测试股", "TEST.HK",
+            posts=[{"title": "t", "content": "c", "author": "a",
+                    "like_count": 0, "forward_count": 0, "comment_count": 0,
+                    "link": "", "time": ""}],
+            trend={"has_trend": False, "days": 0},
+            alerts=[], hot_words=[],
+            announcements=[],
+        )
+        assert "今日无新公告" in prompt
