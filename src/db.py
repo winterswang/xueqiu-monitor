@@ -7,6 +7,7 @@ No ORM — raw sqlite3 with parameterized queries.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -18,11 +19,43 @@ from .models import (
     Comment, Announcement, ContentWeight, UserPreference,
 )
 
+logger = logging.getLogger(__name__)
 
-def _connect(db_path: str) -> sqlite3.Connection:
+
+class _ClosingConnection:
+    """Wrapper around sqlite3.Connection that closes on __exit__.
+
+    sqlite3.Connection's context manager only commits — it does NOT close.
+    This proxy delegates attribute access to the underlying connection but
+    implements __exit__ to call both commit() and close(), preventing the
+    connection leaks that affected all 30+ `with _connect() as conn:` sites.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn
+
+    def __getattr__(self, name):
+        """Delegate attribute access to the underlying connection."""
+        return getattr(self._conn, name)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is None:
+                self._conn.commit()
+        finally:
+            self._conn.close()
+        return False
+
+
+def _connect(db_path: str) -> _ClosingConnection:
     """Open SQLite connection with WAL mode, busy timeout, and retry.
 
     Per §3.4: waits 3s (busy_timeout=3000ms) and retries up to 3 times.
+    Returns a _ClosingConnection wrapper so `with _connect(...) as conn:`
+    commits AND closes (raw sqlite3 only commits).
     """
     for attempt in range(3):
         try:
@@ -31,7 +64,7 @@ def _connect(db_path: str) -> sqlite3.Connection:
             conn.execute("PRAGMA busy_timeout=3000")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            return conn
+            return _ClosingConnection(conn)
         except sqlite3.OperationalError as e:
             if attempt < 2:
                 time.sleep(1)
@@ -57,16 +90,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     Safe to run on every init_db(): each step inspects current state first.
     """
-    import logging
-    log = logging.getLogger(__name__)
-
     # Drop dead column: cold_start_days was never read at runtime (the cold-start
     # window is always sourced from global config), so it accumulated as a legacy
     # NOT NULL DEFAULT 28 column. Remove it from pre-existing databases.
     cols = conn.execute("PRAGMA table_info(user_preference)").fetchall()
     if any(c[1] == "cold_start_days" for c in cols):
         conn.execute("ALTER TABLE user_preference DROP COLUMN cold_start_days")
-        log.info("[migrate] dropped dead column cold_start_days from user_preference")
+        logger.info("[migrate] dropped dead column cold_start_days from user_preference")
 
 
 # ════════════════════════════════════════════════════════
