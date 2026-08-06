@@ -27,7 +27,7 @@ DEFAULT_CONFIG = {
     "watchlist_path": "../morning-brief/data/watchlist.json",
     "crawler": {
         "timeout_seconds": 30,
-        "max_retries": 0,         # no immediate retry, retry on next schedule
+        "max_retries": 2,         # immediate retry on transient failures (browser handshake etc.)
         "concurrency": 1,          # sequential (Playwright single-process)
         "whitelist": [],            # 非空时仅爬取列表中的股票，空=全量
         "xueqiu_analyzer_path": os.environ.get(

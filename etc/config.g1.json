@@ -3,7 +3,7 @@
   "watchlist_path": "data/watchlist.json",
   "crawler": {
     "timeout_seconds": 600,
-    "max_retries": 0,
+    "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
       "700.HK",

@@ -125,7 +125,8 @@ def load_watchlist(config: dict) -> list[dict]:
 # Crawler wrapper
 # ════════════════════════════════════════════════════════
 
-def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None = None) -> dict:
+def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None = None,
+                       max_retries: int = 0) -> dict:
     """Crawl a single stock using xueqiu-analyzer.
 
     Returns:
@@ -221,7 +222,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             }
         else:
             logger.info(f"  opencli 无数据，回退 Playwright (timeout={timeout}s)")
-            crawl_info = _crawl_with_timeout(stock_code, timeout)
+            crawl_info = _crawl_with_retry(stock_code, timeout, max_retries=max_retries)
         crawl_result = crawl_info["result"]
         diagnostic = crawl_info["diagnostic"]
         result["diagnostic"] = diagnostic
@@ -389,7 +390,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
 
 
 def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None,
-                    concurrency: int = 1) -> list[dict]:
+                    concurrency: int = 1, max_retries: int = 0) -> list[dict]:
     """Crawl all stocks with configurable concurrency.
 
     Sequential mode (concurrency=1): simple for-loop.
@@ -399,18 +400,19 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None =
     Returns list of crawl result dicts (order may differ from input when parallel).
     """
     if concurrency <= 1:
-        return _crawl_sequential(stocks, timeout, db_path)
-    return _crawl_parallel(stocks, timeout, db_path, concurrency)
+        return _crawl_sequential(stocks, timeout, db_path, max_retries)
+    return _crawl_parallel(stocks, timeout, db_path, concurrency, max_retries)
 
 
-def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None) -> list[dict]:
+def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None,
+                      max_retries: int = 0) -> list[dict]:
     results = []
     total = len(stocks)
     for i, s in enumerate(stocks):
         code = s["stock_code"]
         logger.info(f"[{i+1}/{total}] 爬取 {code} ...")
         start = time.time()
-        r = crawl_single_stock(code, timeout, db_path)
+        r = crawl_single_stock(code, timeout, db_path, max_retries=max_retries)
         elapsed = time.time() - start
         r["_elapsed"] = round(elapsed, 1)
         results.append(r)
@@ -421,7 +423,7 @@ def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None) -> 
 
 
 def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
-                   concurrency: int) -> list[dict]:
+                   concurrency: int, max_retries: int = 0) -> list[dict]:
     import concurrent.futures
     results = []
     total = len(stocks)
@@ -429,7 +431,8 @@ def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_map: dict[concurrent.futures.Future, str] = {}
         for s in stocks:
-            f = executor.submit(crawl_single_stock, s["stock_code"], timeout, db_path)
+            f = executor.submit(crawl_single_stock, s["stock_code"], timeout, db_path,
+                                max_retries=max_retries)
             future_map[f] = s["stock_code"]
         for f in concurrent.futures.as_completed(future_map):
             code = future_map[f]
@@ -617,6 +620,61 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
             pass
 
     return {"result": result_holder["result"], "diagnostic": diagnostic}
+
+
+def _crawl_with_retry(stock_code: str, timeout: int, max_retries: int = 0,
+                      retry_delay: float = 2.0) -> dict:
+    """Wrap _crawl_with_timeout with immediate retry on transient failures.
+
+    Retries when crawl result is None AND not timed out (e.g. nodriver browser
+    handshake errors like 9992.HK on 2026-08-05). Timeouts are NOT retried —
+    the per-attempt time budget is already exhausted, retrying would likely
+    timeout again and waste another full timeout window.
+
+    Args:
+        stock_code: Stock code to crawl.
+        timeout: Per-attempt timeout in seconds (passed to _crawl_with_timeout).
+        max_retries: Max retry attempts after the initial try (0 = single attempt,
+            preserves legacy behavior; matches config crawler.max_retries).
+        retry_delay: Base seconds to sleep between retries; scales linearly per
+            attempt (attempt 1 sleeps retry_delay*1, attempt 2 sleeps retry_delay*2).
+
+    Returns:
+        Same shape as _crawl_with_timeout: {"result": CrawlResult|None, "diagnostic": dict}.
+        On success returns immediately. On exhaustion returns the last failure.
+    """
+    last_result: dict = {}
+    for attempt in range(max_retries + 1):
+        result = _crawl_with_timeout(stock_code, timeout)
+        last_result = result
+
+        # Success → return immediately
+        if result["result"] is not None:
+            if attempt > 0:
+                logger.info(f"  {stock_code}: 重试第{attempt}次成功")
+            return result
+
+        diag = result.get("diagnostic", {})
+
+        # Timeout → do NOT retry (time budget already exhausted)
+        if diag.get("timed_out"):
+            if attempt < max_retries:
+                logger.info(f"  {stock_code}: 超时，不重试（时间预算已耗尽）")
+            return result
+
+        # Transient failure (result None, not timeout) → retry if budget remains
+        if attempt < max_retries:
+            sleep_secs = retry_delay * (attempt + 1)
+            logger.info(
+                f"  {stock_code}: 失败({diag.get('error_message', '?')}), "
+                f"{sleep_secs}s 后重试 ({attempt + 1}/{max_retries})"
+            )
+            time.sleep(sleep_secs)
+
+    # All retries exhausted
+    if max_retries > 0:
+        logger.warning(f"  {stock_code}: {max_retries} 次重试全部失败")
+    return last_result
 
 
 def _compute_sentiment_avg(posts: list[dict]) -> float:
