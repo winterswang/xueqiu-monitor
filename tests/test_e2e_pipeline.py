@@ -169,7 +169,7 @@ def temp_db(tmp_path):
                      "decay_rate": 0.05, "weight_floor": 0.3},
         "schedule": {"interval_hours": 4},
         "crawler": {
-            "timeout_seconds": 30, "max_retries": 0, "concurrency": 1,
+            "timeout_seconds": 30, "max_retries": 2, "concurrency": 1,
             "whitelist": [],
             "xueqiu_analyzer_path": "/dev/null/nonexistent",
             "morning_brief_db": "/dev/null/nonexistent",
