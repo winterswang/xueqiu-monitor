@@ -229,31 +229,39 @@ def _lark_cli_available() -> tuple[bool, str]:
         return False, str(e)
 
 
-def _send_via_lark_cli(text: str, chat_id: str) -> bool:
+def _send_via_lark_cli(text: str, chat_id: str,
+                       push_timeout: int = 30, max_retries: int = 0) -> bool:
     """Send a single markdown message via lark-cli.
+
+    Args:
+        push_timeout: subprocess timeout in seconds (from notification.push_timeout).
+        max_retries: retry attempts on failure (from notification.max_retries).
 
     Returns True on success.
     """
-    try:
-        result = subprocess.run(
-            ["lark-cli", "im", "+messages-send",
-             "--chat-id", chat_id,
-             "--markdown", text,
-             "--as", "bot"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info(f"lark-cli 消息发送成功: chat_id={chat_id[:12]}...")
-            return True
-        else:
-            logger.warning(f"lark-cli 发送失败: {result.stderr[:200]}")
-            return False
-    except subprocess.TimeoutExpired:
-        logger.warning("lark-cli 发送超时")
-        return False
-    except OSError as e:
-        logger.warning(f"lark-cli 调用失败: {e}")
-        return False
+    for attempt in range(max_retries + 1):
+        try:
+            result = subprocess.run(
+                ["lark-cli", "im", "+messages-send",
+                 "--chat-id", chat_id,
+                 "--markdown", text,
+                 "--as", "bot"],
+                capture_output=True, text=True, timeout=push_timeout,
+            )
+            if result.returncode == 0:
+                logger.info(f"lark-cli 消息发送成功: chat_id={chat_id[:12]}...")
+                return True
+            else:
+                logger.warning(f"lark-cli 发送失败 (attempt {attempt+1}): {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"lark-cli 发送超时 (attempt {attempt+1}, timeout={push_timeout}s)")
+        except OSError as e:
+            logger.warning(f"lark-cli 调用失败 (attempt {attempt+1}): {e}")
+
+        if attempt < max_retries:
+            time.sleep(2 * (attempt + 1))
+
+    return False
 
 
 def dispatch_messages(
@@ -261,6 +269,8 @@ def dispatch_messages(
     pending_path: str,
     mode: str = "auto",
     lark_chat_id: str | None = None,
+    push_timeout: int = 30,
+    max_retries: int = 0,
 ) -> int:
     """Dispatch messages via the best available channel.
 
@@ -269,6 +279,8 @@ def dispatch_messages(
         pending_path: Fallback file path when lark-cli is unavailable.
         mode: "auto" | "lark_cli" | "file"
         lark_chat_id: Required for lark_cli mode.
+        push_timeout: subprocess timeout (from notification.push_timeout).
+        max_retries: retry count on failure (from notification.max_retries).
 
     Returns:
         Number of messages dispatched.
@@ -292,7 +304,8 @@ def dispatch_messages(
         else:
             sent = 0
             for msg in messages:
-                if _send_via_lark_cli(msg, lark_chat_id):
+                if _send_via_lark_cli(msg, lark_chat_id,
+                                      push_timeout=push_timeout, max_retries=max_retries):
                     sent += 1
             return sent
 

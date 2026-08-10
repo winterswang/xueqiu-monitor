@@ -147,174 +147,180 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             logger.debug(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
             continue
 
-        stock_code = cr["stock_code"]
-        stock_start = time.time()
-        now = int(time.time())
+        try:
+            stock_code = cr["stock_code"]
+            stock_start = time.time()
+            now = int(time.time())
 
-        # ── Store snapshot ──
-        snap = CrawlSnapshot(
-            stock_code=stock_code,
-            crawl_time=cr["crawl_time"],
-            posts_count=cr["posts_count"],
-            posts_data=cr["posts_data"],
-            sentiment_avg=cr["sentiment_avg"],
-            status="success",
-        )
-        snapshot_id = db.insert_snapshot(db_path, snap)
-        logger.debug(f"  {stock_code}: snapshot_id={snapshot_id}")
-
-        # ── Store comments ──
-        comments_list: list[Comment] = []
-        for post in cr["posts_data"]:
-            comments_list.append(Comment(
-                snapshot_id=snapshot_id,
-                post_id=post.get("post_id", ""),
-                comment_count=post.get("comment_count", 0),
-                forward_count=post.get("forward_count", 0),
-                like_count=post.get("like_count", 0),
-            ))
-        if comments_list:
-            n_comments = db.insert_comments(db_path, comments_list)
-            logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
-
-        # ── Store announcements ──
-        anns_list: list[Announcement] = []
-        for ann in cr.get("announcements", []):
-            anns_list.append(Announcement(
-                snapshot_id=snapshot_id,
+            # ── Store snapshot ──
+            snap = CrawlSnapshot(
                 stock_code=stock_code,
-                ann_title=ann.get("title", ""),
-                ann_date=int(time.time()),
-                ann_type=ann.get("notice_type", ""),
-                is_new=0,
-            ))
-        if anns_list:
-            n_anns = db.insert_announcements(db_path, anns_list)
-            logger.debug(f"  {stock_code}: 写入 {n_anns} 条公告")
-
-        # ── Announcement detection ──
-        prev_snap_anns = []
-        if snapshot_id > 1:
-            prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
-            if prev_snap and prev_snap.id is not None:
-                prev_snap_anns = db.get_announcements_by_snapshot(db_path, prev_snap.id)
-        curr_anns = cr.get("announcements", [])
-        ann_alerts = detector.detect_new_announcement(
-            stock_code, curr_anns, prev_snap_anns, db_path
-        )
-        for a in ann_alerts:
-            a.alert_time = now
-
-        # ── Detection ──
-        # Get historical stats
-        hist_stats = db.get_historical_stats(db_path, stock_code, cfg.detector["z_score_window_days"])
-        all_hist = db.get_all_historical_stats(db_path, stock_code)
-
-        # Cold start check
-        cold = detector.is_cold_start(all_hist, cfg.cold_start["days"])
-
-        # Detect post spikes
-        spike_alert = detector.detect_post_spike(
-            cr["posts_count"], hist_stats, cfg.detector["z_score_window_days"]
-        )
-        if spike_alert:
-            spike_alert.stock_code = stock_code
-            spike_alert.alert_time = now
-
-        # Detect sentiment shift (with two-period direct threshold)
-        prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
-        prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
-        sent_alert = detector.detect_sentiment_shift(
-            cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
-            prev_snapshot_sentiment=prev_snap_sentiment,
-        )
-        if sent_alert:
-            sent_alert.stock_code = stock_code
-            sent_alert.alert_time = now
-
-        alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
-
-        # Compute sample std from historical sentiment means
-        sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
-        if len(sentiment_values) >= 2:
-            n = len(sentiment_values)
-            mean_s = sum(sentiment_values) / n
-            variance_s = sum((x - mean_s) ** 2 for x in sentiment_values) / (n - 1)
-            computed_std = variance_s ** 0.5
-        else:
-            computed_std = 0.0
-
-        # ── Store sentiment stat for next run ──
-        # Use max z_score from non-announcement alerts only
-        signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
-        max_z = max((a.z_score for a in signal_alerts), default=0.0)
-        today_start = now // 86400 * 86400
-        stat = SentimentStat(
-            stock_code=stock_code,
-            stat_date=today_start,
-            posts_count=cr["posts_count"],
-            sentiment_mean=cr["sentiment_avg"],
-            sentiment_std=computed_std,
-            z_score=max_z,
-            z_alert=1 if signal_alerts else 0,
-        )
-        db.insert_sentiment_stat(db_path, stat)
-
-        # ── TF-IDF hot words ──
-        posts_texts = [p.get("content", "") or p.get("title", "") for p in cr["posts_data"]]
-        curr_tfidf = {}
-        if posts_texts:
-            hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])
-            hw_alerts = detector.detect_hot_word_emergence(
-                stock_code, posts_texts, hist_events,
-                cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"],
+                crawl_time=cr["crawl_time"],
+                posts_count=cr["posts_count"],
+                posts_data=cr["posts_data"],
+                sentiment_avg=cr["sentiment_avg"],
+                status="success",
             )
-            alerts.extend(hw_alerts)
-
-            # Store hot word events + update hot_word_dict
-            curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
-            # Build historical TF-IDF per word for z_score computation
-            hist_tfidfs: dict[str, list[float]] = {}
-            for he in hist_events:
-                hist_tfidfs.setdefault(he.word, []).append(he.tfidf_score)
-            for word, score in curr_tfidf.items():
-                hist = hist_tfidfs.get(word, [])
-                z = detector.compute_z_score(score, hist) if len(hist) >= 3 else 0.0
-                db.insert_hot_word_event(db_path, HotWordEvent(
-                    stock_code=stock_code,
-                    word=word,
-                    tfidf_score=round(score, 4),
-                    event_time=now,
-                    z_score=round(z, 2) if z else 0.0,
+            snapshot_id = db.insert_snapshot(db_path, snap)
+            logger.debug(f"  {stock_code}: snapshot_id={snapshot_id}")
+    
+            # ── Store comments ──
+            comments_list: list[Comment] = []
+            for post in cr["posts_data"]:
+                comments_list.append(Comment(
+                    snapshot_id=snapshot_id,
+                    post_id=post.get("post_id", ""),
+                    comment_count=post.get("comment_count", 0),
+                    forward_count=post.get("forward_count", 0),
+                    like_count=post.get("like_count", 0),
                 ))
-                db.upsert_hot_word(db_path, word, now)
+            if comments_list:
+                n_comments = db.insert_comments(db_path, comments_list)
+                logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
+    
+            # ── Store announcements ──
+            anns_list: list[Announcement] = []
+            for ann in cr.get("announcements", []):
+                anns_list.append(Announcement(
+                    snapshot_id=snapshot_id,
+                    stock_code=stock_code,
+                    ann_title=ann.get("title", ""),
+                    ann_date=int(time.time()),
+                    ann_type=ann.get("notice_type", ""),
+                    is_new=0,
+                ))
+            if anns_list:
+                n_anns = db.insert_announcements(db_path, anns_list)
+                logger.debug(f"  {stock_code}: 写入 {n_anns} 条公告")
+    
+            # ── Announcement detection ──
+            prev_snap_anns = []
+            if snapshot_id > 1:
+                prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+                if prev_snap and prev_snap.id is not None:
+                    prev_snap_anns = db.get_announcements_by_snapshot(db_path, prev_snap.id)
+            curr_anns = cr.get("announcements", [])
+            ann_alerts = detector.detect_new_announcement(
+                stock_code, curr_anns, prev_snap_anns, db_path
+            )
+            for a in ann_alerts:
+                a.alert_time = now
+    
+            # ── Detection ──
+            # Get historical stats
+            hist_stats = db.get_historical_stats(db_path, stock_code, cfg.detector["z_score_window_days"])
+            all_hist = db.get_all_historical_stats(db_path, stock_code)
+    
+            # Cold start check
+            cold = detector.is_cold_start(all_hist, cfg.cold_start["days"])
+    
+            # Detect post spikes
+            spike_alert = detector.detect_post_spike(
+                cr["posts_count"], hist_stats, cfg.detector["z_score_window_days"]
+            )
+            if spike_alert:
+                spike_alert.stock_code = stock_code
+                spike_alert.alert_time = now
+    
+            # Detect sentiment shift (with two-period direct threshold)
+            prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+            prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
+            sent_alert = detector.detect_sentiment_shift(
+                cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
+                prev_snapshot_sentiment=prev_snap_sentiment,
+            )
+            if sent_alert:
+                sent_alert.stock_code = stock_code
+                sent_alert.alert_time = now
+    
+            alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
+    
+            # Compute sample std from historical sentiment means
+            sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
+            if len(sentiment_values) >= 2:
+                n = len(sentiment_values)
+                mean_s = sum(sentiment_values) / n
+                variance_s = sum((x - mean_s) ** 2 for x in sentiment_values) / (n - 1)
+                computed_std = variance_s ** 0.5
+            else:
+                computed_std = 0.0
+    
+            # ── Store sentiment stat for next run ──
+            # Use max z_score from non-announcement alerts only
+            signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
+            max_z = max((a.z_score for a in signal_alerts), default=0.0)
+            today_start = now // 86400 * 86400
+            stat = SentimentStat(
+                stock_code=stock_code,
+                stat_date=today_start,
+                posts_count=cr["posts_count"],
+                sentiment_mean=cr["sentiment_avg"],
+                sentiment_std=computed_std,
+                z_score=max_z,
+                z_alert=1 if signal_alerts else 0,
+            )
+            db.insert_sentiment_stat(db_path, stat)
+    
+            # ── TF-IDF hot words ──
+            posts_texts = [p.get("content", "") or p.get("title", "") for p in cr["posts_data"]]
+            curr_tfidf = {}
+            if posts_texts:
+                hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])
+                hw_alerts = detector.detect_hot_word_emergence(
+                    stock_code, posts_texts, hist_events,
+                    cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"],
+                )
+                alerts.extend(hw_alerts)
+    
+                # Store hot word events + update hot_word_dict
+                curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
+                # Build historical TF-IDF per word for z_score computation
+                hist_tfidfs: dict[str, list[float]] = {}
+                for he in hist_events:
+                    hist_tfidfs.setdefault(he.word, []).append(he.tfidf_score)
+                for word, score in curr_tfidf.items():
+                    hist = hist_tfidfs.get(word, [])
+                    z = detector.compute_z_score(score, hist) if len(hist) >= 3 else 0.0
+                    db.insert_hot_word_event(db_path, HotWordEvent(
+                        stock_code=stock_code,
+                        word=word,
+                        tfidf_score=round(score, 4),
+                        event_time=now,
+                        z_score=round(z, 2) if z else 0.0,
+                    ))
+                    db.upsert_hot_word(db_path, word, now)
+    
+            # ── Collect supplemental data for push key_data (§2.5)
+            prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
+            prev_posts = hist_stats[0].posts_count if hist_stats else 0
+            hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
+            post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
+    
+            stock_extra[stock_code] = {
+                "stock_name": _get_stock_name(stocks, stock_code),
+                "sentiment_avg": cr["sentiment_avg"],
+                "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
+                "posts_count": cr["posts_count"],
+                "posts_count_delta": cr["posts_count"] - prev_posts,
+                "hot_words": [w for w, _ in hot_words_top],
+                "post_titles": post_titles_top,
+                "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+            }
+    
+            # ── Filter ──
+            alerts = rule_filter.filter_alerts(alerts, cr["posts_data"], cold, cfg.filter)
+    
+            # ── Store alerts (batch insert for performance) ──
+            alert_ids = db.insert_alerts_batch(db_path, alerts)
+            for alert, aid in zip(alerts, alert_ids):
+                alert.id = aid
+                total_alerts += 1
+                all_alerts.append(alert)
+        except Exception as e:
+            detect_errors += 1
+            logger.warning(f"[ERROR] stock={stock_code} processing failed: {e}", exc_info=True)
+            continue
 
-        # ── Collect supplemental data for push key_data (§2.5)
-        prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
-        prev_posts = hist_stats[0].posts_count if hist_stats else 0
-        hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
-        post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
-
-        stock_extra[stock_code] = {
-            "stock_name": _get_stock_name(stocks, stock_code),
-            "sentiment_avg": cr["sentiment_avg"],
-            "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
-            "posts_count": cr["posts_count"],
-            "posts_count_delta": cr["posts_count"] - prev_posts,
-            "hot_words": [w for w, _ in hot_words_top],
-            "post_titles": post_titles_top,
-            "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
-        }
-
-        # ── Filter ──
-        alerts = rule_filter.filter_alerts(alerts, cr["posts_data"], cold, cfg.filter)
-
-        # ── Store alerts (batch insert for performance) ──
-        alert_ids = db.insert_alerts_batch(db_path, alerts)
-        for alert, aid in zip(alerts, alert_ids):
-            alert.id = aid
-            total_alerts += 1
-            all_alerts.append(alert)
 
     # ── Notification ──
     pending_path = cfg.notification.get("pending_path", "/tmp/xueqiu_monitor_pending.json")
@@ -385,6 +391,8 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 pending_messages, pending_path,
                 mode=cfg.notification.get("mode", "auto"),
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+                push_timeout=cfg.notification.get("push_timeout", 30),
+                max_retries=cfg.notification.get("max_retries", 0),
             )
 
     # ── Daily report ──
@@ -443,6 +451,8 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 [health_msg], pending_path,
                 mode=cfg.notification.get("mode", "auto"),
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+                push_timeout=cfg.notification.get("push_timeout", 30),
+                max_retries=cfg.notification.get("max_retries", 0),
             )
             logger.warning(
                 f"爬取健康异常 status={health_status} success_rate={success_rate:.0%} posts_coverage={coverage:.0%} → 已写入待发送消息"
