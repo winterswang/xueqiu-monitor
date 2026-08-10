@@ -197,6 +197,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                             "title": item.get("title", ""),
                             "time": item.get("created_at", ""),
                             "notice_type": item.get("type", ""),
+                            "link": item.get("url", ""),
                         })
                     logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
                 except Exception as e:
@@ -234,6 +235,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                 "title": item.get("title", ""),
                 "time": item.get("time", ""),
                 "notice_type": item.get("notice_type", ""),
+                "link": item.get("link", ""),
             })
 
         if crawl_result is None:
@@ -297,6 +299,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                     "title": title,
                     "time": nt.time or "",
                     "notice_type": nt.notice_type or "",
+                    "link": nt.link or "",
                 })
 
         result["posts_count"] = len(posts)

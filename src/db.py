@@ -98,6 +98,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE user_preference DROP COLUMN cold_start_days")
         logger.info("[migrate] dropped dead column cold_start_days from user_preference")
 
+    # Add ann_link column to announcements (schema added 2026-08-04).
+    # Old databases predate the column; ADD COLUMN is idempotent-guarded by PRAGMA.
+    ann_cols = conn.execute("PRAGMA table_info(announcements)").fetchall()
+    if not any(c[1] == "ann_link" for c in ann_cols):
+        conn.execute(
+            "ALTER TABLE announcements ADD COLUMN ann_link TEXT NOT NULL DEFAULT ''"
+        )
+        log.info("[migrate] added column ann_link to announcements")
+
 
 # ════════════════════════════════════════════════════════
 # crawl_snapshots
@@ -361,8 +370,8 @@ def insert_announcements(db_path: str, anns: list[Announcement]) -> int:
             d = a.to_dict()
             del d["id"]
             cur = conn.execute(
-                """INSERT OR IGNORE INTO announcements (snapshot_id, stock_code, ann_title, ann_date, ann_type, is_new)
-                   VALUES (:snapshot_id, :stock_code, :ann_title, :ann_date, :ann_type, :is_new)""",
+                """INSERT OR IGNORE INTO announcements (snapshot_id, stock_code, ann_title, ann_date, ann_type, ann_link, is_new)
+                   VALUES (:snapshot_id, :stock_code, :ann_title, :ann_date, :ann_type, :ann_link, :is_new)""",
                 d
             )
             if cur.rowcount > 0:
@@ -374,11 +383,11 @@ def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
     """Get announcements for a given snapshot_id (for change detection)."""
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT ann_title, ann_date, ann_type FROM announcements WHERE snapshot_id=?",
+            "SELECT ann_title, ann_date, ann_type, ann_link FROM announcements WHERE snapshot_id=?",
             (snapshot_id,)
         ).fetchall()
         return [
-            {"title": r["ann_title"], "time": str(r["ann_date"]), "notice_type": r["ann_type"]}
+            {"title": r["ann_title"], "time": str(r["ann_date"]), "notice_type": r["ann_type"], "link": r["ann_link"]}
             for r in rows
         ]
 

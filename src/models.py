@@ -288,6 +288,7 @@ class Announcement:
     ann_title: str = ""
     ann_type: str = ""
     is_new: int = 1
+    ann_link: str = ""
     id: int | None = None
 
     def to_dict(self) -> dict:
@@ -303,13 +304,14 @@ class Announcement:
             ann_date=d.get("ann_date", 0),
             ann_type=d.get("ann_type", ""),
             is_new=d.get("is_new", 1),
+            ann_link=d.get("ann_link", ""),
         )
 
     @classmethod
     def from_row(cls, row: tuple | dict) -> Announcement:
         if isinstance(row, dict):
             return cls.from_dict(row)
-        cols = ["id","snapshot_id","stock_code","ann_title","ann_date","ann_type","is_new"]
+        cols = ["id","snapshot_id","stock_code","ann_title","ann_date","ann_type","is_new","ann_link"]
         return cls.from_dict(dict(zip(cols, row)))
 
 

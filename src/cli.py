@@ -187,6 +187,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     ann_title=ann.get("title", ""),
                     ann_date=int(time.time()),
                     ann_type=ann.get("notice_type", ""),
+                    ann_link=ann.get("link", ""),
                     is_new=0,
                 ))
             if anns_list:

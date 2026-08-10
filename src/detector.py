@@ -470,6 +470,7 @@ def detect_new_announcement(
                 "title_hash": title_hash,
                 "time": ann.get("time", ""),
                 "notice_type": ann.get("notice_type", ""),
+                "link": ann.get("link", ""),
                 "prev_count": len(prev_announcements),
                 "new_count": len(curr_announcements),
                 "ann_z_score": round(abs(z_score), 2),
