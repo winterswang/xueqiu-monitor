@@ -191,8 +191,15 @@ class TestCrawlSingleStockRetry:
             return _make_success_result()
 
         monkeypatch.setattr(crawler_mod, "_crawl_with_retry", fake_retry)
-        # Mock opencli to be unavailable → force Playwright path
+        # Mock opencli to be unavailable → force Playwright path.
+        # Must mock is_available itself (not just path) because opencli
+        # is available on the dev machine and would skip _crawl_with_retry.
         monkeypatch.setattr(crawler_mod, "_ensure_xueqiu_analyzer_path", lambda: "/fake")
+
+        from unittest.mock import MagicMock
+        fake_opencli = MagicMock()
+        fake_opencli.is_available = lambda: False
+        monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake_opencli)
 
         result = crawler_mod.crawl_single_stock(
             "9992.HK", timeout=30, db_path=None, max_retries=3
@@ -210,6 +217,11 @@ class TestCrawlSingleStockRetry:
 
         monkeypatch.setattr(crawler_mod, "_crawl_with_retry", fake_retry)
         monkeypatch.setattr(crawler_mod, "_ensure_xueqiu_analyzer_path", lambda: "/fake")
+
+        from unittest.mock import MagicMock
+        fake_opencli = MagicMock()
+        fake_opencli.is_available = lambda: False
+        monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake_opencli)
 
         result = crawler_mod.crawl_single_stock("9992.HK", timeout=30)
 
