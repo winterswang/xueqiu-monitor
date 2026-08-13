@@ -133,6 +133,47 @@ class TestYyyyMmDdHhMmFormat:
         assert _parse_post_time("2022-01-29 10:00", now) > 0
 
 
+class TestIso8601Format:
+    """ISO 8601 format from opencli (since 2026-08-08).
+
+    opencli scrapes xueqiu.com DOM which returns time as
+    '2026-08-12T04:57:37.000Z'. Before this fix, _parse_post_time returned 0.0,
+    causing ALL posts to be marked "时间无法解析" and last_crawl_time to freeze
+    at 8/7 (never updated because all_ts list was empty).
+    """
+
+    def test_iso8601_with_millis_z(self):
+        """The exact format opencli returns."""
+        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
+        ts = _parse_post_time("2026-08-12T04:57:37.000Z", now)
+        expected = datetime(2026, 8, 12, 4, 57, 37).timestamp()
+        assert abs(ts - expected) < 1
+
+    def test_iso8601_without_millis(self):
+        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
+        ts = _parse_post_time("2026-08-12T04:57:37Z", now)
+        expected = datetime(2026, 8, 12, 4, 57, 37).timestamp()
+        assert abs(ts - expected) < 1
+
+    def test_iso8601_does_not_return_zero(self):
+        """The core regression: must NOT return 0.0 for valid ISO 8601."""
+        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
+        assert _parse_post_time("2026-08-12T04:57:37.000Z", now) > 0
+        assert _parse_post_time("2026-08-08T00:00:01.000Z", now) > 0
+
+    def test_iso8601_with_timezone_offset(self):
+        """ISO 8601 with +08:00 timezone offset."""
+        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
+        ts = _parse_post_time("2026-08-12T12:57:37+08:00", now)
+        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
+        assert abs(ts - expected) < 1
+
+    def test_iso8601_invalid_date(self):
+        """Invalid calendar date in ISO format should return 0.0."""
+        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
+        assert _parse_post_time("2026-02-30T04:57:37.000Z", now) == 0.0
+
+
 # ════════════════════════════════════════════════════════
 # Edge cases & unparseable strings
 # ════════════════════════════════════════════════════════
