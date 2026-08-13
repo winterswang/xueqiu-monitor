@@ -697,6 +697,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
       - "MM-DD HH:MM" → this year
       - "MM-DD" → this year 00:00
       - "HH:MM" → today
+      - "YYYY-MM-DDTHH:MM:SS.fffZ" → ISO 8601 (opencli native format, since 2026-08-08)
       - "YYYY-MM-DD" → absolute date (posts from previous years, news)
       - "YYYY-MM-DD HH:MM" → absolute date with time
     """
@@ -767,6 +768,19 @@ def _parse_post_time(time_str: str, now: float) -> float:
             hour=hour, minute=minute, second=0, microsecond=0
         )
         return target.timestamp()
+
+    # ISO 8601: "YYYY-MM-DDTHH:MM:SS.fffZ" (opencli / xueqiu API native format)
+    # Matches: 2026-08-12T04:57:37.000Z, 2026-08-12T04:57:37Z, 2026-08-12T12:57:37+08:00
+    m = re.match(
+        r'(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$',
+        time_str,
+    )
+    if m:
+        y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+        try:
+            return datetime(y, mo, d, h, mi, s).timestamp()
+        except ValueError:
+            return 0.0
 
     # "YYYY-MM-DD" (posts from previous years, news/announcement absolute dates)
     m = re.match(r'(\d{4})-(\d{2})-(\d{2})$', time_str)
