@@ -151,3 +151,52 @@
 | 测试覆盖 | 0% | ⚠️ 无 pytest，需求要求80% |
 | 部署就绪 | 75% | Cron+IM已配, systemd/监控未配 |
 | 综合 | **B+** | 可以投入冷启动运行 |
+---
+
+# Round 2 Review — 2026-08-18（基准 main @ 2578288，PR #28-#38 后）
+
+> 方法：实测复现优先（DB 只读查询 / 边界输入实测 / pytest / 最小复现），3 个并行 review 覆盖 report_generator / crawler+sentiment / P2核销+scripts。5/25 以来 +4400 行全部纳入。
+
+## 修复验证（Round 1 → 现状）
+
+- ISO 8601 时间修复（PR #37）✅ 生效：last_crawl_time 全部更新至 8/17，零帖快照消失
+- 2-J/2-K/2-L/2-N/2-O/2-P/2-S 均已修复（行号证据略，见 git log）
+- 2-M（exc_info 统一）、2-Q（Dockerfile）、2-R（db_path 可写检查）仍开口，均为低价值
+
+## 新发现问题
+
+### P1（7 项）
+
+| # | 问题 | 证据 |
+|---|------|------|
+| N1 | **db.py:108 `log.info` NameError** — legacy DB 迁移分支用 `log` 但模块只有 `logger`；旧库迁移必崩且 ALTER 回滚 → 永久迁移失败循环 | 最小复现：旧 schema init_db → `NameError: name 'log' is not defined` |
+| N2 | **health_check.py 缺 `from __future__ import annotations`** — python3.9 手动/Docker 路径 `Path \| None` TypeError 崩溃（cron 用 3.11 显式路径不受影响） | `python3 scripts/health_check.py` (3.9.6) → TypeError |
+| N3 | **requirements.txt 缺 jieba** — detector.py:148,164 硬依赖，新环境起不来 | 3.9 环境 import 链断实测 |
+| N4 | **filter.py:159 公告告警硬编码永远 P2** — 4635 条公告 100% 静默；CBRS.US 8 条 SCHEDULE 13G 大额持仓披露从未推送 | `SELECT priority FROM change_alert WHERE alert_type='new_announcement'` → 全 P2 |
+| N5 | **health_check 无数据新鲜度语义检查** — last_crawl_time 停更/时间解析失败率均不查，8/8 事故拖 5 天靠肉眼 | grep health_check.py 无 last_crawl/parse |
+| N6 | **export_csv.py 无时间过滤**，docstring 谎称与 report_generator 一致；CSV 知识库混入 6/25 旧帖 | 8/17 CSV 华住帖 time 追溯 6/25 |
+| N7 | **daily_sentiment_report.py（423行）孤儿脚本**：输出目录 data/reports/ 最新 2026-05-31，cron 实际走 report_generator；其 push 用 `lark` binary（系统只有 lark-cli）必失败被吞；main 文件写两遍（L312+L409）；且市场温度计无帖子发布时间过滤（全量 100 帖聚合） | ls data/reports/ + `command -v lark` 为空 |
+
+### P2（按代码洁癖标准）
+
+- 热词存储路径（cli.py:285）无停用词过滤：hot_word_dict top30 全泛词（ai/市场/这个/就是…）；daily_sentiment_report._NOISE_WORDS 仅 15 词打地鼠未复用 detector 67+ 停用表（若 N7 删脚本则此项消解一半）
+- US 公告链接指向通用股页非详情页（可从标题 Accession Number 反解 EDGAR 深链）
+- 反馈闭环死代码：content_weight/user_preference 0 行、feedback.py+decay 全链路无真实消费（待产品决策去留）
+- cli.py `run_pipeline` ~400 行巨型函数，per-stock 处理 170 行应提取 `_process_stock()`
+- cli.py `_build_summary`（L482-503）死代码，无调用
+- get_previous_snapshot SELECT * 且 cli.py:200/227 同参调用两次（MB 级 JSON 拉两次 parse 两次）
+- insert_sentiment_stat 每次 upsert 重复 CREATE UNIQUE INDEX IF NOT EXISTS（L156-159）
+- push_history 先写 status="sent" 再发送，失败不回写（反馈数据失真）
+- init_historical.py:164 硬编码 `/root/code/morning-brief`（历史教训重犯，一次性脚本）
+- export_csv.py:331-336 同日重跑加时间戳改名继续上传（知识库重复条目）；COS 脚本绑定 ~/.hermes 外部路径
+- sentiment.py 429 无重试（只有 max_tokens 溢出重试），批失败→整批静默降级 0.0 分
+- _parse_post_time 仍不识别 `08月15日`、`今天 08:30` 格式（fail-open 保留，污染当天过滤）
+- 测试 fixture 时区 bug：tmp_db 归一 UTC midnight vs 生产查询本地 midnight window → test_returns_has_data_when_yesterday_exists 恒失败（生产本身 OK：生产 stat_date 也是 UTC midnight 且落窗口内——但两侧约定脆弱，靠 8h 恰好兼容）
+
+### 通过项（一句话）
+
+db.py 连接管理（_ClosingConnection/WAL/重试）质量好；notifier 分级推送与 §2.5 一致、无硬编码 secret；crawler retry 语义正确（线性退避）；report_generator 时间过滤+两轮排序+prompt 构造合理，24/25 测试过；crawler 双路径时间映射已一致。
+
+## 结论
+
+Round 1 的 B+ → 当前 **B+（债增）**：三个月 11 个 PR 快速迭代把功能推到位（分组调度/公告链路/日报形态），但衍生脚本与主路径口径漂移、公告分级缺位、健康检查无语义层。建议 v0.7 修复 N1-N7 + 公告分级 + 哨兵，详见 docs/v0.7_design.md。
