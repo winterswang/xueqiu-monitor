@@ -7,7 +7,10 @@ Checks:
   3. Dectect anomalies (zero posts, high failure rate)
 
 Output: JSON to stdout, suitable for cron log monitoring.
+
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -15,7 +18,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 WATCHLIST_PATH = PROJECT_ROOT / "data" / "watchlist.json"
@@ -122,8 +124,123 @@ def check():
     except Exception:
         pass
 
+    # ── 5. Data freshness sentinel (v0.7 F2) — semantic checks ──
+    #    Catches silent degradation (e.g. 8/8 ISO-8601 time-format drift that
+    #    went unnoticed for 5 days): stale last_crawl_time, high post-time parse
+    #    failure rate, and stale-post pileup.
+    db_path = PROJECT_ROOT / "data" / "monitor.db"
+    if db_path.exists():
+        import sqlite3 as _sqlite3
+        import time as _time
+        # Lazy import: crawler pulls xueqiu-analyzer path — keep module load light.
+        sys.path.insert(0, str(PROJECT_ROOT))
+        try:
+            from src.crawler import _parse_post_time
+        except Exception:
+            _parse_post_time = None
+        conn = _sqlite3.connect(str(db_path))
+        try:
+            now = _time.time()
+            # 5a. last_crawl_time freshness: any stock not crawled for 48h → FAIL
+            rows = conn.execute(
+                "SELECT stock_code, last_crawl_time FROM xueqiu_monitor_meta"
+            ).fetchall()
+            if rows:
+                now_48h = now - 48 * 3600
+                stale = [
+                    (sc, lct) for sc, lct in rows
+                    if lct and (now - lct) > 48 * 3600
+                ]
+                fresh = [lct for sc, lct in rows if lct and lct >= now_48h]
+                # FAIL only when the pipeline is broadly stalled: either NO stock
+                # crawled in 48h (the 8/8 accident signature) or a majority stale
+                # (watchlist rotated out en masse). A few legacy rows that were
+                # decommissioned (removed from configs) are expected → WARN, so
+                # normal operation never false-alarms.
+                if not fresh or len(stale) > len(rows) / 2:
+                    results.append({
+                        "check": "crawl_freshness", "status": FAIL,
+                        "detail": f"{len(stale)}/{len(rows)} stocks not crawled in 48h (freshest: {_time.strftime('%m-%d %H:%M', _time.localtime(max(fresh or [0])))})",
+                    })
+                    errors.append("stale_last_crawl_time")
+                elif stale:
+                    worst = max(stale, key=lambda x: x[1])
+                    results.append({
+                        "check": "crawl_freshness", "status": WARN,
+                        "detail": f"{len(stale)}/{len(rows)} stocks not crawled in 48h (legacy: {worst[0]}, last={_time.strftime('%m-%d %H:%M', _time.localtime(worst[1]))})",
+                    })
+                else:
+                    results.append({
+                        "check": "crawl_freshness", "status": OK,
+                        "detail": f"all {len(rows)} stocks crawled within 48h",
+                    })
+            else:
+                results.append({
+                    "check": "crawl_freshness", "status": WARN,
+                    "detail": "xueqiu_monitor_meta empty — no crawl bookkeeping",
+                })
+
+            # 5b/5c. Post-time health on the latest snapshot per stock:
+            #       parse-failure rate > 30% → FAIL (the 8/8 accident signature);
+            #       > 50% posts older than 7 days → WARN (stale pileup).
+            if _parse_post_time is not None:
+                snap_rows = conn.execute(
+                    """SELECT cs.stock_code, cs.posts_data, cs.crawl_time
+                       FROM crawl_snapshots cs
+                       WHERE cs.id IN (
+                           SELECT MAX(id) FROM crawl_snapshots
+                           WHERE status='success' AND posts_data IS NOT NULL
+                           GROUP BY stock_code
+                       )"""
+                ).fetchall()
+                total = fail_parse = old_posts = 0
+                old_cutoff = now - 7 * 86400
+                for _sc, posts_data, _ct in snap_rows:
+                    try:
+                        posts = json.loads(posts_data)
+                    except Exception:
+                        continue
+                    for p in posts:
+                        total += 1
+                        ts = _parse_post_time(p.get("time", "") or "", now)
+                        if ts <= 0:
+                            fail_parse += 1
+                        elif ts < old_cutoff:
+                            old_posts += 1
+                if total:
+                    fail_rate = fail_parse / total
+                    old_ratio = old_posts / total
+                    if fail_rate > 0.30:
+                        results.append({
+                            "check": "time_parse_rate", "status": FAIL,
+                            "detail": f"{fail_parse}/{total} posts time-parse failed ({fail_rate:.0%})",
+                        })
+                        errors.append("high_time_parse_failure")
+                    else:
+                        results.append({
+                            "check": "time_parse_rate", "status": OK,
+                            "detail": f"{fail_parse}/{total} posts time-parse failed ({fail_rate:.0%})",
+                        })
+                    if old_ratio > 0.50:
+                        results.append({
+                            "check": "post_freshness", "status": WARN,
+                            "detail": f"{old_posts}/{total} posts older than 7d ({old_ratio:.0%})",
+                        })
+                    else:
+                        results.append({
+                            "check": "post_freshness", "status": OK,
+                            "detail": f"{old_posts}/{total} posts older than 7d ({old_ratio:.0%})",
+                        })
+                else:
+                    results.append({
+                        "check": "time_parse_rate", "status": WARN,
+                        "detail": "no posts_data to evaluate",
+                    })
+        finally:
+            conn.close()
+
     # ── Output ──
-    status = FAIL if any(e in ["db_missing", "watchlist_missing"] for e in errors) else \
+    status = FAIL if any(e in ["db_missing", "watchlist_missing", "stale_last_crawl_time", "high_time_parse_failure"] for e in errors) else \
              WARN if errors else OK
 
     report = {

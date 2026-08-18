@@ -105,7 +105,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE announcements ADD COLUMN ann_link TEXT NOT NULL DEFAULT ''"
         )
-        log.info("[migrate] added column ann_link to announcements")
+        logger.info("[migrate] added column ann_link to announcements")
 
 
 # ════════════════════════════════════════════════════════

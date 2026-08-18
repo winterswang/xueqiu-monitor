@@ -95,13 +95,16 @@ class TestFetchAllPosts:
 
     def test_normal_posts(self, tmp_db):
         """Normal discussion posts are fetched correctly."""
+        # Use a recent time so the recency filter (default 7d) keeps the post.
+        recent_ts = int(time.time()) - 3600  # 1h ago
+        recent_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(recent_ts))
         posts = [
             {
                 "type": "discussion",
                 "title": "这是一个正常讨论帖子的标题",
                 "content": "这是足够长度的帖子内容，用于测试数据获取逻辑是否正确工作",
                 "author": "用户A",
-                "time": "2026-07-09 10:00",
+                "time": recent_time,
                 "like_count": 10,
                 "comment_count": 5,
                 "forward_count": 2,
@@ -120,6 +123,37 @@ class TestFetchAllPosts:
         assert row["post_type"] == "discussion"
         assert row["like_count"] == 10
         assert row["sentiment_score"] == 0.5
+
+    def test_filters_stale_posts(self, tmp_db):
+        """Posts older than max_age_days are dropped from the CSV feed (R1)."""
+        posts = [
+            {
+                "type": "discussion",
+                "title": "这是一个旧帖标题，长度足够长可以用于测试",
+                "content": "这是30天前的旧帖内容，知识库不应再收录",
+                "author": "用户A",
+                "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(int(time.time()) - 30 * 86400)),
+                "like_count": 10,
+                "comment_count": 5,
+                "forward_count": 2,
+            },
+            {
+                "type": "discussion",
+                "title": "这是新帖标题，长度足够长可以用于测试",
+                "content": "这是今天的帖子内容，应该保留在知识库里",
+                "author": "用户B",
+                "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(int(time.time()) - 3600)),
+                "like_count": 3,
+                "comment_count": 1,
+                "forward_count": 0,
+            },
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = export_csv.fetch_all_posts(
+            str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=10
+        )
+        assert len(result) == 1
+        assert result[0]["author"] == "用户B"  # stale post dropped
 
     def test_filters_reply_posts(self, tmp_db):
         """Reply posts (回复@ prefix) must be filtered out."""

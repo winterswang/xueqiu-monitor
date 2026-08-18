@@ -36,6 +36,13 @@ from typing import Optional
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+# Make src/ importable regardless of CWD (cron runs from PROJECT_DIR, but
+# robustness against direct script invocation is cheap to guarantee).
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from src.report_common import filter_posts_by_recency  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════
@@ -117,11 +124,16 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def fetch_all_posts(
-    db_path: str, stocks_cfg: dict, date_str: str, min_length: int = 30
+    db_path: str, stocks_cfg: dict, date_str: str, min_length: int = 30,
+    max_age_days: int = 7,
 ) -> list[dict]:
     """Fetch all posts (discussion + news + article) for all stocks on a date.
 
-    Applies the same filtering as report_generator:
+    Filtering (shared with report paths via src/report_common.py, v0.7 F3):
+    - Recency: only posts published within ``max_age_days`` (default 7) of the
+      report run are kept — the knowledge-base feed must not accumulate stale
+      month-old posts. Unparseable times are kept (fail-open), matching the
+      pipeline's policy.
     - Skip reply posts (回复@ prefix)
     - Skip posts shorter than min_length chars
     - Content capped to CONTENT_MAX_CHARS
@@ -155,6 +167,8 @@ def fetch_all_posts(
 
             stock_name = stocks_cfg.get(stock_code, {}).get("name", stock_code)
             posts = json.loads(row["posts_data"])
+            # Recency filter first: drop stale posts before per-post work.
+            posts = filter_posts_by_recency(posts, max_age_days=max_age_days)
             for p in posts:
                 # Post-level dedup by post_id (cross-stock + cross-snapshot)
                 post_id = p.get("post_id") or p.get("link") or ""
