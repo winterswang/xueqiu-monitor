@@ -281,10 +281,145 @@ class TestAnalyzeStockNoPosts:
     """Test analyze_stock when no posts available."""
 
     def test_returns_no_data_message(self, tmp_db):
-        """Empty posts → graceful 'no data' message."""
+        """Empty posts → graceful 'no data' message with dual calibers."""
         config = {"llm": {"min_post_length": 30}}
         result = rg.analyze_stock("NOEXIST.US", "不存在", str(tmp_db.path), tmp_db.date_str, config)
         assert "无帖子数据" in result
+        assert "分析帖数: 0" in result
+        assert "快照帖数: 0" in result
+
+
+# ════════════════════════════════════════════════════════
+# v0.7.4 report-credibility tests (P0-1 / P0-2)
+# ════════════════════════════════════════════════════════
+
+
+class TestFetchStockPostsWindow:
+    """max_age_days window semantics (v0.7.4)."""
+
+    def test_default_window_is_today_only(self, tmp_db):
+        """max_age_days=1 must behave exactly like the old single-day filter."""
+        posts = [
+            {"title": "今日新帖足够长度", "content": "这是今天发的帖子内容", "time": "2小时前"},
+            {"title": "历史热门帖足够长度", "content": "这是五月发的旧帖子内容", "time": "05-27 14:30",
+             "like_count": 999},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
+        assert len(result) == 1
+        assert result[0]["title"] == "今日新帖足够长度"
+
+    def test_widened_window_includes_recent_history(self, tmp_db):
+        """max_age_days=8 picks up posts 05-27..08-19 when today is empty (P0-2 pattern)."""
+        posts = [
+            {"title": "三天前的热帖内容足够长", "content": "低流量股票的历史热帖", "time": "3天前",
+             "like_count": 50},
+            {"title": "两个月前的旧帖内容足够长", "content": "窗口外的更早旧帖", "time": "60天前"},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        result = rg.fetch_stock_posts(
+            str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5, max_age_days=8
+        )
+        assert len(result) == 1
+        assert result[0]["title"] == "三天前的热帖内容足够长"
+
+
+class TestAnalyzeStockFallback:
+    """No-today-posts fallback to a 7-day window (P0-2)."""
+
+    def test_fallback_picks_up_recent_posts(self, tmp_db):
+        """Posts only in the past week → analyzed under 近7日 scope, not 'no data'."""
+        posts = [
+            {"title": "五天前的帖子内容足够长", "content": "低流量股票的历史热帖，内容补充到足够通过三十字的最小长度过滤线",
+             "time": "5天前", "like_count": 30},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        config = {"llm": {"min_post_length": 30}}
+        result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
+        assert "无帖子数据" not in result
+        assert "近7日" in result
+        assert "分析帖数: 1" in result
+
+    def test_fallback_not_triggered_when_today_has_posts(self, tmp_db):
+        """Today's posts present → scope stays 今日, old post excluded."""
+        posts = [
+            {"title": "今日新帖足够长度", "content": "今天的内容", "time": "2小时前"},
+            {"title": "五天前的帖子内容足够长", "content": "历史热帖", "time": "5天前"},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        config = {"llm": {"min_post_length": 10}}
+        result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
+        assert "近7日" not in result
+        assert "分析帖数: 1" in result
+
+    def test_snapshot_count_surfaced_in_header(self, tmp_db):
+        """Dual calibers: snapshot size vs filtered count both in header (P0-1)."""
+        posts = [
+            {"title": "今日新帖足够长度", "content": "今天的内容", "time": "2小时前"},
+            {"title": "历史热门帖足够长度", "content": "旧帖子", "time": "05-27 14:30"},
+            {"title": "回复@某人: 哈哈", "content": "回复内容"},
+        ]
+        tmp_db.insert_snapshot("TEST.HK", posts)
+        config = {"llm": {"min_post_length": 5}}
+        result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
+        # Snapshot has 3 posts, only 1 survives filtering
+        assert "快照帖数: 3" in result
+        assert "分析帖数: 1" in result
+        assert "温度计口径" in result
+
+
+class TestNormalizeLlmHeadings:
+    """Heading-level normalization of LLM output (v0.7.4 template rule)."""
+
+    def test_h1_h2_h3_demoted_to_h5(self):
+        """# / ## / ### headlines → ##### so they stay below #### stock headers."""
+        raw = "# 大标题\n内容\n## 中标题\n### 小标题\n#### 已是四级\n"
+        out = rg._normalize_llm_headings(raw)
+        import re as _re
+        # Every heading line must start with exactly 5 #'s
+        levels = [len(m.group(1)) for m in _re.finditer(r"^(#+) ", out, _re.MULTILINE)]
+        assert levels == [5, 5, 5, 5]
+        assert "大标题" in out and "已是四级" in out
+
+    def test_h5_h6_untouched(self):
+        raw = "##### 五级\n###### 六级\n"
+        out = rg._normalize_llm_headings(raw)
+        assert "##### 五级" in out
+        assert "###### 六级" in out
+
+    def test_indented_hash_not_heading(self):
+        """Indented # (list item or code block content) must not be rewritten."""
+        raw = "  # 缩进的井号不是标题\n- 列表 # 带井号\n"
+        out = rg._normalize_llm_headings(raw)
+        assert "  # 缩进的井号不是标题" in out
+
+
+class TestPromptScope:
+    """scope label injection into prompts (v0.7.4)."""
+
+    def test_scope_injected_in_fallback_prompt(self):
+        posts = [{"title": "t", "content": "c", "author": "a",
+                  "like_count": 0, "forward_count": 0, "comment_count": 0,
+                  "link": "", "time": ""}]
+        prompt = rg._build_analysis_prompt(
+            "测试股", "T.US", posts,
+            trend={"has_trend": False, "days": 0}, alerts=[], hot_words=[],
+            scope="近7日",
+        )
+        assert "近7日的雪球讨论" in prompt
+        assert "近7日讨论帖" in prompt
+        assert "近7日核心讨论观点" in prompt
+        # New formatting rules must be present
+        assert "严禁" in prompt
+        assert "4 个 #" in prompt
+
+    def test_default_scope_is_today(self):
+        posts = []
+        prompt = rg._build_analysis_prompt(
+            "测试股", "T.US", posts,
+            trend={"has_trend": False, "days": 0}, alerts=[], hot_words=[],
+        )
+        assert "今日的雪球讨论" in prompt
 
 
 # ════════════════════════════════════════════════════════

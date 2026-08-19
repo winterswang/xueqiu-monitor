@@ -26,7 +26,12 @@
     "600519.SH": {"name": "茅台", "sector": "消费"},
     "9926.HK": {"name": "康方生物", "sector": "医药"},
     "BABA.US": {"name": "阿里巴巴", "sector": "互联网"},
-    "TAL.US": {"name": "好未来", "sector": "教育"}
+    "TAL.US": {"name": "好未来", "sector": "教育"},
+    "SPOT.US": {"name": "Spotify", "sector": "互联网"},
+    "PLTR.US": {"name": "Palantir", "sector": "AI/科技"},
+    "RKLB.US": {"name": "Rocket Lab", "sector": "航天"},
+    "UBER.US": {"name": "Uber", "sector": "出行/酒旅"},
+    "NVO.US": {"name": "诺和诺德", "sector": "医药"}
   },
   "llm": {
     "model": "minimax-m3",

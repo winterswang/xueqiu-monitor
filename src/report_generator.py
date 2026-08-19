@@ -14,6 +14,7 @@ Pipeline:
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,20 +54,46 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def fetch_snapshot_post_count(db_path: str, stock_code: str, date_str: str) -> int:
+    """Latest-snapshot raw post count for a stock on a given date.
+
+    This is the same number the market thermometer shows (snapshot size
+    before any filtering). Surfaced next to the filtered count in
+    per-stock headers so readers can tell the two calibers apart.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT posts_count FROM crawl_snapshots
+               WHERE stock_code=? AND date(crawl_time,'unixepoch','localtime')=?
+               ORDER BY crawl_time DESC LIMIT 1""",
+            (stock_code, date_str),
+        ).fetchone()
+        return int(row["posts_count"]) if row else 0
+    finally:
+        conn.close()
+
+
 def fetch_stock_posts(
-    db_path: str, stock_code: str, date_str: str, min_length: int = 30
+    db_path: str,
+    stock_code: str,
+    date_str: str,
+    min_length: int = 30,
+    max_age_days: int = 1,
 ) -> list[dict]:
-    """Fetch today's posts for a stock, filtered from the latest snapshot.
+    """Fetch recent posts for a stock, filtered from the latest snapshot.
 
     The snapshot from 雪球 is a mixed stream of latest posts + historical
-    hot posts. This function filters to keep only posts authored on
-    ``date_str``, so the LLM analyzes today's discussion instead of
-    rehashing old high-engagement posts.
+    hot posts. This function filters to keep only posts authored within
+    the ``max_age_days``-day window ending at the end of ``date_str``,
+    so the LLM analyzes recent discussion instead of rehashing old
+    high-engagement posts. Default ``max_age_days=1`` means posts
+    authored on ``date_str`` only (the classic daily-report behavior).
 
     Filters out:
     - Reply posts ("回复@" prefix in title)
     - Posts shorter than min_length chars
-    - Posts whose parsed time falls outside ``date_str`` (fail-open:
+    - Posts whose parsed time falls outside the window (fail-open:
       posts with unparseable time are kept)
 
     Sort: newest first (by timestamp), ties broken by engagement desc.
@@ -87,10 +114,13 @@ def fetch_stock_posts(
 
         posts = json.loads(row["posts_data"])
 
-        # Compute the [day_start, day_end) window for date_str (local time)
+        # Compute the [window_start, day_end) window: max_age_days days
+        # back from date_str, inclusive of date_str itself (local time).
         target_date = datetime.strptime(date_str, "%Y-%m-%d")
-        day_start = int(target_date.timestamp())
-        day_end = day_start + 86400
+        day_end = int((target_date + timedelta(days=1)).timestamp())
+        window_start = int(
+            (target_date - timedelta(days=max_age_days - 1)).timestamp()
+        )
 
         # Lazy import to avoid a module-load-time circular dependency
         from .crawler import _parse_post_time
@@ -108,12 +138,12 @@ def fetch_stock_posts(
             full_text = f"{title} {content}".strip()
             if len(full_text) < min_length:
                 continue
-            # Filter out posts not authored on date_str.
+            # Filter out posts authored outside the lookback window.
             # Fail-open: unparseable time (ts == 0) is kept, so missing
             # time data never blanks out a stock's entire feed.
             post_time_str = p.get("time", "")
             post_ts = _parse_post_time(post_time_str, now)
-            if post_ts > 0 and not (day_start <= post_ts < day_end):
+            if post_ts > 0 and not (window_start <= post_ts < day_end):
                 continue
             filtered.append(
                 {
@@ -431,6 +461,7 @@ def _build_analysis_prompt(
     yesterday: Optional[dict] = None,
     streaks: Optional[list] = None,
     announcements: Optional[list[dict]] = None,
+    scope: str = "今日",
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -438,6 +469,9 @@ def _build_analysis_prompt(
         yesterday: Yesterday's sentiment + hot words for delta comparison.
         streaks: Hot words with consecutive-day streak counts, used to
             distinguish persistent narratives from new topics.
+        scope: Time-window label, e.g. "今日" or "近7日" (fallback
+            window). Injected into section titles so the LLM does not
+            claim "today" when analyzing a multi-day window.
     """
     # Format posts
     posts_text = ""
@@ -507,7 +541,7 @@ def _build_analysis_prompt(
     else:
         hot_words_text = ", ".join(hot_words) if hot_words else "无"
 
-    return f"""你是雪球舆情分析师。请分析以下「{stock_name}（{stock_code}）」今日的雪球讨论。
+    return f"""你是雪球舆情分析师。请分析以下「{stock_name}（{stock_code}）」{scope}的雪球讨论。
 
 ## 情感数据
 {trend_text}
@@ -524,7 +558,7 @@ def _build_analysis_prompt(
 ## 今日热词（TF-IDF top，已标注连续天数）
 {hot_words_text}
 
-## 今日讨论帖（共 {len(posts)} 帖，按发帖时间倒序排列）
+## {scope}讨论帖（共 {len(posts)} 帖，按发帖时间倒序排列）
 {posts_text}
 
 ---
@@ -532,7 +566,7 @@ def _build_analysis_prompt(
 请输出结构化分析（Markdown 格式），包含以下五个部分：
 
 ### 讨论焦点
-提炼 3-5 条今日核心讨论观点（每条一句话概括，附代表性帖子编号）
+提炼 3-5 条{scope}核心讨论观点（每条一句话概括，附代表性帖子编号）
 
 ### 多空分歧
 看多 vs 看空的主要论据（如分歧不明显则说明）
@@ -541,12 +575,46 @@ def _build_analysis_prompt(
 帖子中提到的关键风险（如无则标注"暂无明显风险讨论"）
 
 ### 话题连续性
-区分以下两类内容（如全部为新增则说明"今日无持续叙事"）：
-- **📊 持续叙事**：与昨日/近期重复的话题，简要标注已持续天数，重点说**今日有何新进展或新角度**
-- **🆕 今日新增**：昨日未出现的新话题、新事件、新观点
+区分以下两类内容（如全部为新增则说明"{scope}无持续叙事"）：
+- **📊 持续叙事**：与昨日/近期重复的话题，简要标注已持续天数，重点说**{scope}有何新进展或新角度**
+- **🆕 {scope}新增**：昨日未出现的新话题、新事件、新观点
 
 ### 情感解读
-结合情感数据和帖子内容，一句话总结今日市场情绪"""
+结合情感数据和帖子内容，一句话总结{scope}市场情绪
+
+⚠️ 格式要求：
+- 五个小节标题必须用 `#### `（4 个 #）开头，**严禁**输出 `#`/`##`/`###` 级别的大标题
+- 正文中的帖子引用格式统一用 `[编号]`（如 `[3]`），不要加 `#` 或反斜杠"""
+
+
+# Fallback window (days) when a stock has no posts on date_str itself.
+# Low-traffic stocks' snapshots are dominated by historical hot posts;
+# widen the window instead of showing "今日无帖子数据" (P0-2: LKNCY etc.
+# had 47 posts in the snapshot, all authored before the report date).
+FALLBACK_MAX_AGE_DAYS = 7
+
+# LLM output must never introduce headings above the stock-section level
+# (####): the report outline is # title / ## section / ### sector / ####
+# stock. Bigger headings read like a new report and break rendering.
+_MAX_LLM_HEADING_LEVEL = 5
+_HEADING_RE = re.compile(r"^(#{1,6})\s*(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def _normalize_llm_headings(text: str) -> str:
+    """Demote any LLM-generated heading to h5 (stock-subsection level).
+
+    The prompt asks for #### subsections, but models routinely emit # or
+    ## headlines (17 of them in the 2026-08-18 report), which leak into
+    the report and break the document outline. Rule: 1-4 #'s → #####
+    (one level below the #### stock header); 5-6 #'s kept as-is.
+    """
+    def _demote(m: "re.Match[str]") -> str:
+        hashes, heading_text = m.group(1), m.group(2)
+        if len(hashes) < _MAX_LLM_HEADING_LEVEL:
+            return f"{'#' * _MAX_LLM_HEADING_LEVEL} {heading_text}"
+        return m.group(0)
+
+    return _HEADING_RE.sub(_demote, text)
 
 
 def analyze_stock(
@@ -556,13 +624,52 @@ def analyze_stock(
     date_str: str,
     config: dict,
 ) -> str:
-    """Run LLM analysis for a single stock. Returns Markdown section."""
+    """Run LLM analysis for a single stock. Returns Markdown section.
+
+    Post-count calibers surfaced in the section header:
+    - 分析帖数: posts surviving fetch_stock_posts filtering (LLM input)
+    - 快照帖数: raw size of the latest snapshot (what the market
+      thermometer shows) — the two numbers legitimately differ
+      (P0-1: replies/short-posts/non-current posts are filtered out).
+
+    When the day-1 window is empty, retries with a
+    FALLBACK_MAX_AGE_DAYS-day window and labels the section accordingly.
+    """
     min_len = config.get("llm", {}).get("min_post_length", 30)
+    snapshot_count = fetch_snapshot_post_count(db_path, stock_code, date_str)
+
     posts = fetch_stock_posts(db_path, stock_code, date_str, min_length=min_len)
 
+    scope = "今日"
     if not posts:
-        logger.info(f"  {stock_code}: 今日无帖子，跳过")
-        return f"#### {stock_code} {stock_name}\n\n今日无帖子数据。\n"
+        posts = fetch_stock_posts(
+            db_path,
+            stock_code,
+            date_str,
+            min_length=min_len,
+            max_age_days=FALLBACK_MAX_AGE_DAYS,
+        )
+        if posts:
+            scope = f"近{FALLBACK_MAX_AGE_DAYS}日"
+            logger.info(
+                f"  {stock_code}: 当日0帖（快照{snapshot_count}），"
+                f"回退{FALLBACK_MAX_AGE_DAYS}日窗口得{len(posts)}帖"
+            )
+
+    caliber = (
+        f"- 分析帖数: {len(posts)}（{scope}窗口，过滤回复/短帖后） | "
+        f"快照帖数: {snapshot_count}（温度计口径）"
+    )
+
+    if not posts:
+        logger.info(
+            f"  {stock_code}: 当日及近{FALLBACK_MAX_AGE_DAYS}日均无帖，跳过"
+        )
+        return (
+            f"#### {stock_code} {stock_name}\n\n"
+            f"{caliber}\n\n"
+            f"今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
+        )
 
     trend = fetch_sentiment_trend(db_path, stock_code)
     alerts = fetch_stock_alerts(db_path, stock_code, date_str)
@@ -574,10 +681,11 @@ def analyze_stock(
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
         yesterday=yesterday, streaks=streaks, announcements=announcements,
+        scope=scope,
     )
 
     logger.info(
-        f"  {stock_code}: {len(posts)}帖, "
+        f"  {stock_code}: {len(posts)}帖({scope}), "
         f"prompt={len(prompt)}字, 调用 LLM..."
     )
 
@@ -592,16 +700,20 @@ def analyze_stock(
             temperature=0.3,
         )
         elapsed = time.time() - t0
-        text = response.choices[0].message.content or ""
+        text = _normalize_llm_headings(response.choices[0].message.content or "")
         logger.info(f"  {stock_code}: LLM 完成 {elapsed:.1f}s, {len(text)}字")
 
         # Build section header + LLM output
         header = f"#### {stock_code} {stock_name}\n\n"
-        header += f"- 帖子数: {len(posts)} | 情感分: {trend.get('today_mean', 'N/A')} | 趋势: {trend.get('trend', 'N/A')}\n\n"
+        header += f"{caliber}\n"
+        header += f"- 情感分: {trend.get('today_mean', 'N/A')} | 趋势: {trend.get('trend', 'N/A')}\n\n"
         return header + text + "\n"
     except Exception as e:
         logger.error(f"  {stock_code}: LLM 调用失败: {e}")
-        return f"#### {stock_code} {stock_name}\n\nLLM 分析失败: {e}\n"
+        return (
+            f"#### {stock_code} {stock_name}\n\n"
+            f"{caliber}\n\nLLM 分析失败: {e}\n"
+        )
 
 
 # ════════════════════════════════════════════════════════

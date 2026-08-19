@@ -692,7 +692,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
     """Parse xueqiu post time string to Unix timestamp. Returns 0 if unparseable.
 
     Supported formats:
-      - "X分钟前", "X小时前", "X秒前" → relative time
+      - "X分钟前", "X小时前", "X秒前", "X天前" → relative time
       - "昨天 HH:MM" → yesterday
       - "MM-DD HH:MM" → this year
       - "MM-DD" → this year 00:00
@@ -724,6 +724,12 @@ def _parse_post_time(time_str: str, now: float) -> float:
     m = re.match(r'(\d+)\s*秒前', time_str)
     if m:
         return now - int(m.group(1))
+
+    # "X天前" (xueqiu shows this for posts older than ~48h; without this
+    # branch such posts parse to 0 and fail-open into every time window)
+    m = re.match(r'(\d+)\s*天前', time_str)
+    if m:
+        return now - int(m.group(1)) * 86400
 
     now_dt = datetime.fromtimestamp(now)
 
