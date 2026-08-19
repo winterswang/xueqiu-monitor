@@ -259,3 +259,35 @@ class TestTfidfQuality:
         for w in result_words:
             assert "心动公司" not in w
             assert "迈瑞医疗" not in w
+
+
+# ════════════════════════════════════════════════════════
+# v0.7 F4: filter_noise_words (storage-path noise filter)
+# ════════════════════════════════════════════════════════
+
+class TestFilterNoiseWords:
+    """The storage path must apply the same noise filters as the alert path."""
+
+    def test_short_tokens_filtered(self):
+        """ASCII ≤3 chars and Chinese ≤2-char short tokens are dropped."""
+        words = ["ai", "etf", "ipo", "pe", "市场", "这个", "就是"]
+        out = detector.filter_noise_words(words, ["ai 市场 这个 就是 讨论"])
+        assert out == []
+
+    def test_real_signal_words_kept(self):
+        """Meaningful topic words survive."""
+        words = ["碳酸锂", "yoyo", "labubu", "钠电池", "拼多多"]
+        out = detector.filter_noise_words(words, ["碳酸锂 yoyo labubu 钠电池 拼多多"])
+        assert set(out) == {"碳酸锂", "yoyo", "labubu", "钠电池", "拼多多"}
+
+    def test_username_like_filtered(self):
+        """A KOL name appearing mostly in @mentions is dropped."""
+        posts_texts = ["回复 @多伦多的大道信徒: 说得对", "@多伦多的大道信徒 看这里"]
+        out = detector.filter_noise_words(["多伦多的大道信徒", "碳酸锂"], posts_texts)
+        assert out == ["碳酸锂"]
+
+    def test_preserves_order(self):
+        """Filtered output keeps input order."""
+        words = ["碳酸锂", "ai", "yoyo", "etf"]
+        out = detector.filter_noise_words(words, ["碳酸锂 yoyo"])
+        assert out == ["碳酸锂", "yoyo"]

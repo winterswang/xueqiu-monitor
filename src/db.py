@@ -107,6 +107,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         logger.info("[migrate] added column ann_link to announcements")
 
+    # v0.7 F4: purge generic/noise words from hot_word_dict. Before v0.7 the
+    # storage path stored every TF-IDF token without the alert path's stopword
+    # filter, polluting the dict with words like ai/市场/这个/就是. This removes
+    # them once (idempotent — re-running finds nothing to delete). The noise set
+    # reuses detector._CN_STOPWORDS so storage and alert paths stay consistent.
+    try:
+        from . import detector as _detector
+        noise = _detector._CN_STOPWORDS
+        placeholder = ",".join("?" * len(noise))
+        cur = conn.execute(
+            f"DELETE FROM hot_word_dict WHERE word IN ({placeholder})",
+            tuple(noise),
+        )
+        if cur.rowcount:
+            logger.info("[migrate] purged %d noise words from hot_word_dict", cur.rowcount)
+    except Exception as e:  # detector import must never block init_db
+        logger.warning("[migrate] hot_word_dict noise purge skipped: %s", e)
+
 
 # ════════════════════════════════════════════════════════
 # crawl_snapshots

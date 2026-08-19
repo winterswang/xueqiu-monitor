@@ -275,6 +275,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     
                 # Store hot word events + update hot_word_dict
                 curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
+                # v0.7 F4: apply the same noise filters as the alert path so the
+                # storage layer (hot_word_event/hot_word_dict) carries only words
+                # with signal — previously it stored every TF-IDF token, polluting
+                # the table with generic words (ai/市场/这个/就是).
+                signal_words = detector.filter_noise_words(list(curr_tfidf.keys()), posts_texts)
+                curr_tfidf = {w: s for w, s in curr_tfidf.items() if w in signal_words}
                 # Build historical TF-IDF per word for z_score computation
                 hist_tfidfs: dict[str, list[float]] = {}
                 for he in hist_events:

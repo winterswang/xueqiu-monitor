@@ -258,6 +258,27 @@ def _is_username_like(word: str, posts_texts: list[str]) -> bool:
     return (mentions / total) > 0.7
 
 
+def filter_noise_words(words: list[str], posts_texts: list[str]) -> list[str]:
+    """Filter hot words that carry no signal (short tokens / username-like).
+
+    Shared by the alert path (detect_hot_word_emergence) and the storage path
+    (cli.py insert_hot_word_event / hot_word_dict), so hot_word data quality
+    matches alert quality (v0.7 F4). Stopwords are already removed during
+    TF-IDF vectorization via ``_CN_STOPWORDS``.
+
+    Args:
+        words: Raw TF-IDF top words for a stock.
+        posts_texts: Post texts used to detect username-like tokens.
+
+    Returns:
+        Words that survive both filters, in input order.
+    """
+    return [
+        w for w in words
+        if not _is_short_token(w) and not _is_username_like(w, posts_texts)
+    ]
+
+
 def compute_tfidf(
     documents: list[str],
     min_df: int = 2,
