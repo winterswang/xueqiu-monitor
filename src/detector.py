@@ -396,6 +396,79 @@ def _normalize_title(title: str) -> str:
     return t.strip()
 
 
+def _normalize_announcement_time(raw_time: str, now: float) -> str:
+    """Normalize an announcement time string to a stable YYYY-MM-DD identity.
+
+    Announcement `time` arrives from three crawler sources in three formats:
+      - opencli `created_at`:  "2026-08-04T10:00:00" (ISO 8601)
+      - requests API fallback: "2026-08-04" (%Y-%m-%d)
+      - DOM supplement:        "3小时前" / "昨天" / "HH:MM" (relative)
+
+    A raw-string dedup identity would change whenever the active crawler path
+    changes, so the same announcement could be re-alerted within the 7-day
+    window. Normalizing to a day-granularity date makes the identity stable
+    across sources (and matches the existing 7-day window granularity).
+
+    Returns the raw string unchanged (trimmed) when it cannot be mapped to a
+    date, so behavior degrades to the previous title+raw-time identity.
+    """
+    import datetime as _dt
+
+    if not raw_time or not isinstance(raw_time, str):
+        return raw_time or ""
+    t = raw_time.strip()
+    if not t:
+        return ""
+
+    # ISO 8601 (opencli): "2026-08-04T10:00:00[.fff][Z|±HH:MM]" → date only.
+    m = re.match(
+        r"(\d{4})-(\d{2})-(\d{2})T",
+        t,
+    )
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    # Absolute date (API fallback): "2026-08-04".
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", t)
+    if m:
+        return t
+
+    now_dt = _dt.datetime.fromtimestamp(now)
+
+    # Relative "X天前" (DOM supplement).
+    m = re.match(r"^(\d+)\s*天前$", t)
+    if m:
+        d = now_dt - _dt.timedelta(days=int(m.group(1)))
+        return d.strftime("%Y-%m-%d")
+
+    # "昨天[ HH:MM]" (DOM supplement).
+    if t.startswith("昨天"):
+        d = now_dt - _dt.timedelta(days=1)
+        return d.strftime("%Y-%m-%d")
+
+    # "X小时前" / "X分钟前" / "X秒前": map to today (day granularity).
+    if re.match(r"^\d+\s*(小时前|分钟前|秒前)$", t):
+        return now_dt.strftime("%Y-%m-%d")
+
+    # "HH:MM" (DOM supplement, no date): map to today.
+    if re.match(r"^\d{1,2}:\d{2}$", t):
+        return now_dt.strftime("%Y-%m-%d")
+
+    # "MM-DD" or "MM-DD HH:MM" (DOM supplement, current year assumed).
+    m = re.match(r"^(\d{2})-(\d{2})(?:\s+\d{1,2}:\d{2})?$", t)
+    if m:
+        year = now_dt.year
+        try:
+            d = now_dt.replace(year=year, month=int(m.group(1)), day=int(m.group(2)))
+        except ValueError:
+            return t
+        if d.timestamp() > now:
+            d = d.replace(year=year - 1)
+        return d.strftime("%Y-%m-%d")
+
+    return t
+
+
 def detect_new_announcement(
     stock_code: str,
     curr_announcements: list[dict],
@@ -454,11 +527,14 @@ def detect_new_announcement(
         if not norm or len(norm) < 4:
             continue
 
-        # Stage 0: within-batch dedup (same title+time seen earlier this loop).
-        # Key includes ann time so that legitimately distinct announcements
-        # sharing a generic title (e.g. "财报披露" on different dates) survive.
-        ann_time = ann.get("time", "")
-        dedup_key = f"{title}|{ann_time}"
+        # Stage 0: within-batch dedup (same title+normalized-date seen earlier).
+        # Key includes a normalized announcement date so that legitimately
+        # distinct announcements sharing a generic title (e.g. "财报披露" on
+        # different dates) survive, while the same announcement coming from
+        # different crawler paths (ISO vs %Y-%m-%d vs relative) still collapses.
+        ann_time_raw = ann.get("time", "")
+        ann_date = _normalize_announcement_time(ann_time_raw, now_ts)
+        dedup_key = f"{title}|{ann_date}"
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
@@ -492,7 +568,8 @@ def detect_new_announcement(
             detail={
                 "title": title,
                 "dedup_hash": dedup_hash,
-                "time": ann.get("time", ""),
+                "time": ann_time_raw,
+                "ann_date": ann_date,
                 "notice_type": ann.get("notice_type", ""),
                 "link": ann.get("link", ""),
                 "prev_count": len(prev_announcements),

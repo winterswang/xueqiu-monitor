@@ -227,3 +227,40 @@ class TestAnnouncementDedupPersistence:
             assert "dedup_hash" in ddl
             assert "title_hash" not in ddl
             conn.close()
+
+
+class TestAnnouncementTimeNormalization:
+    """v0.8.2: normalize announcement time to a stable YYYY-MM-DD identity
+    across the three crawler sources (opencli ISO, API %Y-%m-%d, DOM relative).
+    """
+
+    def test_iso8601_normalizes_to_date(self):
+        from src.detector import _normalize_announcement_time as f
+        assert f("2026-08-04T10:00:00", 1786982400.0) == "2026-08-04"
+        assert f("2026-08-04T10:00:00.000Z", 1786982400.0) == "2026-08-04"
+        assert f("2026-08-04T10:00:00+08:00", 1786982400.0) == "2026-08-04"
+
+    def test_api_date_unchanged(self):
+        from src.detector import _normalize_announcement_time as f
+        assert f("2026-08-04", 1786982400.0) == "2026-08-04"
+
+    def test_relative_days_ago(self):
+        from src.detector import _normalize_announcement_time as f
+        # now = 2026-08-18 00:00 local (1786982400)
+        assert f("3天前", 1786982400.0) == "2026-08-15"
+        assert f("昨天 19:45", 1786982400.0) == "2026-08-17"
+        assert f("昨天", 1786982400.0) == "2026-08-17"
+        assert f("3小时前", 1786982400.0) == "2026-08-18"
+        assert f("5分钟前", 1786982400.0) == "2026-08-18"
+        assert f("10:30", 1786982400.0) == "2026-08-18"
+
+    def test_mmdd_maps_to_date(self):
+        from src.detector import _normalize_announcement_time as f
+        assert f("06-30 19:45", 1786982400.0) == "2026-06-30"
+        assert f("06-30", 1786982400.0) == "2026-06-30"
+
+    def test_unparseable_falls_back_to_raw(self):
+        from src.detector import _normalize_announcement_time as f
+        assert f("", 1786982400.0) == ""
+        assert f("   ", 1786982400.0) == ""
+        assert f("刚刚", 1786982400.0) == "刚刚"
