@@ -462,8 +462,11 @@ def detect_new_announcement(
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
-        # title_hash (title-only) stays consistent with db.py Stage 2 lookup
-        title_hash = hashlib.md5(title.encode()).hexdigest()
+        # dedup_hash (title+time) is the announcement identity used by both the
+        # permanent UNIQUE index and the 7-day window. A title-only hash would
+        # permanently swallow generic titles ("财报披露") that legitimately
+        # recur on different dates (v0.8.1 fix).
+        dedup_hash = hashlib.md5(dedup_key.encode()).hexdigest()
 
         # Stage 1: cross-check against previous snapshot
         if norm in prev_titles:
@@ -472,7 +475,7 @@ def detect_new_announcement(
         # Stage 2: DB-level dedup (7-day window)
         if db_path:
             from . import db
-            recent = db.get_recent_announcement_alerts(db_path, stock_code, title, days=7)
+            recent = db.get_recent_announcement_alerts(db_path, stock_code, dedup_hash, days=7)
             if recent:
                 logger.debug(
                     f"  {stock_code}: skip dup announcement \"{title[:40]}...\" "
@@ -488,7 +491,7 @@ def detect_new_announcement(
             magnitude=float(len(curr_announcements)),  # total new announcements today
             detail={
                 "title": title,
-                "title_hash": title_hash,
+                "dedup_hash": dedup_hash,
                 "time": ann.get("time", ""),
                 "notice_type": ann.get("notice_type", ""),
                 "link": ann.get("link", ""),

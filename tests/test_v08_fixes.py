@@ -151,14 +151,14 @@ class TestKolWhitelist:
 # ════════════════════════════════════════════════════════
 
 class TestAlertDedup:
-    def _ann(self, stock_code, title_hash, alert_time=None):
+    def _ann(self, stock_code, dedup_hash, alert_time=None):
         return ChangeAlert(
             stock_code=stock_code,
             alert_type="new_announcement",
             alert_time=alert_time or int(time.time()),
             z_score=0.0,
             magnitude=0.0,
-            detail={"title_hash": title_hash},
+            detail={"dedup_hash": dedup_hash},
             priority="P2",
         )
 
