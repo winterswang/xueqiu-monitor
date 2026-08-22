@@ -68,15 +68,26 @@ CSV_HEADERS = [
 # IMA API
 IMA_BASE_URL = "https://ima.qq.com"
 IMA_WIKI_PATH = "/openapi/wiki/v1"
-COS_UPLOAD_SCRIPT = (
-    Path.home()
-    / ".hermes"
-    / "skills"
-    / "ima"
-    / "knowledge-base"
-    / "scripts"
-    / "cos-upload.cjs"
-)
+
+# 2026-08-22 (v0.8 环境修复): cos-upload.cjs 硬编码 ~/.hermes/skills/ima 在本机不存在,
+# 导致 export_csv 上传失败. 改为环境自动适配:
+#   1. IMA_COS_SCRIPT 环境变量最高优先 (显式指定)
+#   2. 常见 IMA skill 安装位置候选 (my-agent-skills / openclaw workspace / .hermes / home)
+#   3. 都找不到时回退到第一个候选 (日志会报错, 便于人工指定)
+_COS_SCRIPT_CANDIDATES = [
+    # IMA skill 权威仓 (morning-brief 也用它)
+    PROJECT_DIR.parent / "my-agent-skills" / "ima" / "knowledge-base" / "scripts" / "cos-upload.cjs",
+    # 运行时 workspace
+    Path.home() / ".openclaw" / "workspace" / "skills" / "ima" / "knowledge-base" / "scripts" / "cos-upload.cjs",
+    # 旧/其他 hermes 安装
+    Path.home() / ".hermes" / "skills" / "ima" / "knowledge-base" / "scripts" / "cos-upload.cjs",
+    # 项目内 vendor
+    PROJECT_DIR / "ima" / "knowledge-base" / "scripts" / "cos-upload.cjs",
+]
+if os.environ.get("IMA_COS_SCRIPT"):
+    COS_UPLOAD_SCRIPT = Path(os.environ["IMA_COS_SCRIPT"])
+else:
+    COS_UPLOAD_SCRIPT = next((p for p in _COS_SCRIPT_CANDIDATES if p.exists()), _COS_SCRIPT_CANDIDATES[0])
 
 # Content cap (same as report_generator.fetch_stock_posts)
 CONTENT_MAX_CHARS = 2000
