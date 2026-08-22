@@ -112,6 +112,32 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # filter, polluting the dict with words like ai/市场/这个/就是. This removes
     # them once (idempotent — re-running finds nothing to delete). The noise set
     # reuses detector._CN_STOPWORDS so storage and alert paths stay consistent.
+    # v0.8.1: announcement dedup identity changed from title-only
+    # (title_hash) to title+time (dedup_hash). Old databases carry the
+    # over-broad title-only unique index, which permanently swallows
+    # generic titles ("财报披露") that recur on different dates. Drop it
+    # and rebuild on the new identity so legacy DBs are healed in place.
+    # Idempotent: guarded by PRAGMA index_list.
+    idxs = conn.execute("PRAGMA index_list(change_alert)").fetchall()
+    if any(i[1] == "uq_change_alert_announcement" for i in idxs):
+        # Expression indexes hide the expression in PRAGMA index_info, so read
+        # the DDL from sqlite_master to tell old (title_hash) from new
+        # (dedup_hash).
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND name='uq_change_alert_announcement'"
+        ).fetchone()
+        ddl = (row[0] if row and row[0] else "") or ""
+        if "title_hash" in ddl:
+            conn.execute("DROP INDEX uq_change_alert_announcement")
+            conn.execute(
+                "CREATE UNIQUE INDEX uq_change_alert_announcement "
+                "ON change_alert(stock_code, json_extract(detail, '$.dedup_hash'))"
+            )
+            logger.info(
+                "[migrate] rebuilt uq_change_alert_announcement on dedup_hash"
+            )
+
     try:
         from . import detector as _detector
         noise = _detector._CN_STOPWORDS
@@ -413,15 +439,13 @@ def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
 
 
 def get_recent_announcement_alerts(
-    db_path: str, stock_code: str, title: str, days: int = 7
+    db_path: str, stock_code: str, dedup_hash: str, days: int = 7
 ) -> list[dict]:
     """Check if an announcement was already alerted within N days.
 
-    Returns existing alerts matching stock_code + announcement title hash.
-    Used for deduplication in detect_new_announcement.
+    Returns existing alerts matching stock_code + announcement dedup hash
+    (title+time identity). Used for deduplication in detect_new_announcement.
     """
-    import hashlib
-    title_hash = hashlib.md5(title.encode()).hexdigest()
     cutoff = int(time.time()) - days * 86400
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -436,7 +460,7 @@ def get_recent_announcement_alerts(
                 detail = json.loads(r["detail"]) if r["detail"] else {}
             except (json.JSONDecodeError, TypeError):
                 detail = {}
-            if detail.get("title_hash") == title_hash:
+            if detail.get("dedup_hash") == dedup_hash:
                 matches.append({"id": r["id"], "title": detail.get("title", "")})
         return matches
 

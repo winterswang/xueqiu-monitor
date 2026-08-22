@@ -43,11 +43,13 @@ CREATE TABLE IF NOT EXISTS change_alert (
     filter_reason TEXT DEFAULT NULL
 );
 
--- Dedup: announcements are keyed by stock+title_hash (detail JSON); other
--- alert types by stock+type+alert_time. Prevents the same alert from being
--- inserted on every crawl (observed: 1416 duplicate announcement keys).
+-- Dedup: announcements are keyed by stock+dedup_hash (title+time identity in
+-- detail JSON); other alert types by stock+type+alert_time. Prevents the same
+-- alert from being inserted on every crawl (observed: 1416 duplicate
+-- announcement keys) without permanently swallowing generic titles that recur
+-- on different dates (v0.8.1).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_announcement
-    ON change_alert(stock_code, json_extract(detail, '$.title_hash'));
+    ON change_alert(stock_code, json_extract(detail, '$.dedup_hash'));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_signal
     ON change_alert(stock_code, alert_type, alert_time)
     WHERE alert_type != 'new_announcement';
