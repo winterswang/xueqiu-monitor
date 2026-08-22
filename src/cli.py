@@ -410,7 +410,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             posts_data_map[cr["stock_code"]] = cr["posts_data"]
 
     report = notifier.generate_daily_report(all_alerts, posts_data_map)
-    report_path = Path(db_path).parent / "daily_reports" / f"{time.strftime('%Y-%m-%d')}.md"
+    report_path = Path(db_path).parent / "daily_reports" / f"{time.strftime('%Y-%m-%d')}-alerts.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report)
     logger.info(f"日报已保存: {report_path}")

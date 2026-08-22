@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS change_alert (
     filter_reason TEXT DEFAULT NULL
 );
 
+-- Dedup: announcements are keyed by stock+title_hash (detail JSON); other
+-- alert types by stock+type+alert_time. Prevents the same alert from being
+-- inserted on every crawl (observed: 1416 duplicate announcement keys).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_announcement
+    ON change_alert(stock_code, json_extract(detail, '$.title_hash'));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_signal
+    ON change_alert(stock_code, alert_type, alert_time)
+    WHERE alert_type != 'new_announcement';
+
 -- 4. hot_word_dict — 热词词典
 CREATE TABLE IF NOT EXISTS hot_word_dict (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,

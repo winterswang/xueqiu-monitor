@@ -84,19 +84,19 @@ class TestFetchStockPosts:
         # Both kept because time can't be parsed (fail-open)
         assert len(result) == 2
 
-    def test_sorted_newest_first(self, tmp_db):
-        """Posts with known time sort newest first."""
+    def test_sorted_engagement_first(self, tmp_db):
+        """Posts sort by engagement desc first (v0.7.5), not time."""
         posts = [
-            {"title": "较早的今日帖", "content": "内容内容内容内容", "time": "3小时前",
+            {"title": "较早的高互动帖", "content": "内容内容内容内容", "time": "3小时前",
              "like_count": 100},
-            {"title": "最新的今日帖", "content": "内容内容内容内容", "time": "5分钟前",
+            {"title": "最新的零互动帖", "content": "内容内容内容内容", "time": "5分钟前",
              "like_count": 0},
         ]
         tmp_db.insert_snapshot("TEST.HK", posts)
         result = rg.fetch_stock_posts(str(tmp_db.path), "TEST.HK", tmp_db.date_str, min_length=5)
-        # Newest (5分钟前) first despite lower engagement
-        assert result[0]["title"] == "最新的今日帖"
-        assert result[1]["title"] == "较早的今日帖"
+        # High-engagement post first, even though older (note lever 2).
+        assert result[0]["title"] == "较早的高互动帖"
+        assert result[1]["title"] == "最新的零互动帖"
 
     def test_internal_ts_key_stripped(self, tmp_db):
         """Internal _ts sort key must not leak into returned dicts."""
@@ -160,8 +160,8 @@ class TestBuildPrompt:
                  "avg_std": 0.02, "trend": "上升", "days": 7}
         prompt = rg._build_analysis_prompt("测试股", "T.US", posts, trend, [], [])
         assert "3小时前" in prompt
-        # Posts sorted by time, not engagement
-        assert "按发帖时间倒序" in prompt
+        # Posts sorted by engagement (v0.7.5), prompt says so
+        assert "按互动量排序" in prompt
 
     def test_prompt_with_no_trend(self):
         """Prompt handles missing trend gracefully."""

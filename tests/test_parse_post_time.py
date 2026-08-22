@@ -143,16 +143,16 @@ class TestIso8601Format:
     """
 
     def test_iso8601_with_millis_z(self):
-        """The exact format opencli returns."""
+        """The exact format opencli returns. Z = UTC, converted to Beijing (+8)."""
         now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
         ts = _parse_post_time("2026-08-12T04:57:37.000Z", now)
-        expected = datetime(2026, 8, 12, 4, 57, 37).timestamp()
+        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
         assert abs(ts - expected) < 1
 
     def test_iso8601_without_millis(self):
         now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
         ts = _parse_post_time("2026-08-12T04:57:37Z", now)
-        expected = datetime(2026, 8, 12, 4, 57, 37).timestamp()
+        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
         assert abs(ts - expected) < 1
 
     def test_iso8601_does_not_return_zero(self):
