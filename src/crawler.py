@@ -187,6 +187,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                             "sentiment_score": 0.0,
                             "comment_count": item.get("replies", 0) or 0,
                             "like_count": item.get("likes", 0) or 0,
+                            "forward_count": item.get("retweets", 0) or 0,
                         })
                     logger.info(f"  opencli: {len(_opencli_posts)} 条讨论")
                 except Exception as e:
@@ -702,7 +703,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
       - "YYYY-MM-DD HH:MM" → absolute date with time
     """
     import re
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     if not time_str or not isinstance(time_str, str):
         return 0.0
@@ -778,13 +779,21 @@ def _parse_post_time(time_str: str, now: float) -> float:
     # ISO 8601: "YYYY-MM-DDTHH:MM:SS.fffZ" (opencli / xueqiu API native format)
     # Matches: 2026-08-12T04:57:37.000Z, 2026-08-12T04:57:37Z, 2026-08-12T12:57:37+08:00
     m = re.match(
-        r'(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$',
+        r'(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$',
         time_str,
     )
     if m:
-        y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+        # The naive form (no zone suffix) is treated as Beijing time (UTC+8),
+        # which is the local timezone the reports run in. Explicit zones
+        # (Z / +08:00 / -05:00 ...) are converted to Beijing time so the
+        # "today window" filtering lines up with the other time formats.
         try:
-            return datetime(y, mo, d, h, mi, s).timestamp()
+            if m.group(7) is None:
+                y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+                return datetime(y, mo, d, h, mi, s).timestamp()
+            dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+            beijing = dt.astimezone(timezone(timedelta(hours=8)))
+            return beijing.replace(tzinfo=None).timestamp()
         except ValueError:
             return 0.0
 
