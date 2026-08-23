@@ -44,14 +44,17 @@ CREATE TABLE IF NOT EXISTS change_alert (
 );
 
 -- Dedup: announcements are keyed by stock+dedup_hash (title+time identity in
--- detail JSON); other alert types by stock+type+alert_time. Prevents the same
--- alert from being inserted on every crawl (observed: 1416 duplicate
--- announcement keys) without permanently swallowing generic titles that recur
--- on different dates (v0.8.1).
+-- detail JSON); other alert types by stock+type+alert_time, plus the hot-word
+-- identity (detail.word) because detect_hot_word_emergence emits one alert per
+-- word all sharing the same time.time() stamp — a word-blind index both fails
+-- to build on legacy DBs (26 groups of distinct-word same-second rows) and
+-- silently swallows every word after the first via INSERT OR IGNORE (v0.8.2).
+-- COALESCE keeps NULL (non-hot-word types) collapsing to '' so those types
+-- still dedup on (stock, type, time) alone.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_announcement
     ON change_alert(stock_code, json_extract(detail, '$.dedup_hash'));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_change_alert_signal
-    ON change_alert(stock_code, alert_type, alert_time)
+    ON change_alert(stock_code, alert_type, COALESCE(json_extract(detail, '$.word'), ''), alert_time)
     WHERE alert_type != 'new_announcement';
 
 -- 4. hot_word_dict — 热词词典

@@ -138,6 +138,28 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "[migrate] rebuilt uq_change_alert_announcement on dedup_hash"
             )
 
+    # v0.8.2: the original v0.8 signal index ignored detail.word, so it could
+    # neither build on legacy DBs (distinct-word hot_word_surge alerts share
+    # the same second) nor keep the 2nd+ word of a run. If the word-blind
+    # variant somehow exists, rebuild it on the word-aware identity.
+    if any(i[1] == "uq_change_alert_signal" for i in idxs):
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND name='uq_change_alert_signal'"
+        ).fetchone()
+        ddl = (row[0] if row and row[0] else "") or ""
+        if "detail" not in ddl:
+            conn.execute("DROP INDEX uq_change_alert_signal")
+            conn.execute(
+                "CREATE UNIQUE INDEX uq_change_alert_signal "
+                "ON change_alert(stock_code, alert_type, "
+                "COALESCE(json_extract(detail, '$.word'), ''), alert_time) "
+                "WHERE alert_type != 'new_announcement'"
+            )
+            logger.info(
+                "[migrate] rebuilt uq_change_alert_signal on word-aware identity"
+            )
+
     try:
         from . import detector as _detector
         noise = _detector._CN_STOPWORDS

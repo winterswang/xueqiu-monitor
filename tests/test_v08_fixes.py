@@ -201,6 +201,23 @@ class TestAlertDedup:
         b = dbmod.insert_alert(str(tmp_db.path), mk(ts - 600))
         assert (a, b) == (1, 2)
 
+    def test_signal_different_word_same_time_allowed(self, tmp_db):
+        """v0.8.2 regression: detect_hot_word_emergence emits one alert per word,
+        all sharing the same time.time() stamp. The word-blind v0.8 index would
+        silently swallow every word after the first via INSERT OR IGNORE; the
+        word-aware identity (detail.word in the key) must keep them all."""
+        from src import db as dbmod
+        ts = int(time.time())
+        def mk(word):
+            return ChangeAlert(stock_code="300750.SZ", alert_type="hot_word_surge",
+                               alert_time=ts, z_score=3.0, magnitude=0.5,
+                               detail={"word": word}, priority="P1")
+        ids = [dbmod.insert_alert(str(tmp_db.path), mk(w)) for w in ("回购", "中报", "储能")]
+        assert all(i > 0 for i in ids), ids
+        rows = tmp_db.conn.execute(
+            "SELECT COUNT(*) c FROM change_alert").fetchone()["c"]
+        assert rows == 3
+
     def test_batch_insert_dedups(self, tmp_db):
         from src import db as dbmod
         ts = int(time.time())
