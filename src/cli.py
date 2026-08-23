@@ -24,7 +24,6 @@ from . import crawler
 from . import detector
 from . import filter as rule_filter
 from . import notifier
-from . import feedback as fbloop
 from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordEvent, PushHistory, Comment, Announcement,
@@ -93,11 +92,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     # Init DB
     db.init_db(db_path)
     logger = logging.getLogger(__name__)
-
-    # Decay stale weights before each run
-    _phase("pipeline.weight_decay")
-    fbloop.decay_stale_weights(db_path, cfg.feedback)
-    _phase("pipeline.weight_decay", start=False)
 
     pipeline_start = time.time()
     errors: list[str] = []

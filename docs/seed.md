@@ -29,7 +29,7 @@ morning-brief 看量价（技术面），xueqiu-monitor 看舆情（情绪面）
 - sentiment_stats: 按日聚合的情感统计（Z-score 异常标记）
 - change_alert: 异常变化检测告警
 - hot_word_dict + hot_word_event: 热词词典 + 涌现事件
-- push_history + user_preference + content_weight: 推送闭环
+- push_history: 推送记录
 
 ### 变化检测方法
 Z-score: Z=(x-μ)/σ, 阈值 2.0 = 95% 置信；情感偏移 > 0.2；热词 TF-IDF 时间序列
@@ -39,7 +39,7 @@ Phase 1（数据积累+规则）: 爬取→存储→Z-score检测→规则过滤
 Phase 2（LLM 精通知）: LLM 内容质量评估、情感深度分析、重要性评估、智能摘要。
 
 ### 成功标准
-爬取成功率 ≥98%、60只全量 ≤30分钟、变化检测召回率 ≥85%、精确率 ≥70%、有效推送率 ≥50%
+爬取成功率 ≥98%、60只全量 ≤30分钟、变化检测召回率 ≥85%、精确率 ≥70%
 
 ### 技术约束
 Python 3.11+、SQLite 单机部署、Cron 调度、结构化 JSON 日志、飞书推送、PEP 8 + 测试覆盖率 ≥80%

@@ -16,7 +16,7 @@ from typing import Any
 from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordDict, HotWordEvent, PushHistory,
-    Comment, Announcement, ContentWeight, UserPreference,
+    Comment, Announcement,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,14 +90,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     Safe to run on every init_db(): each step inspects current state first.
     """
-    # Drop dead column: cold_start_days was never read at runtime (the cold-start
-    # window is always sourced from global config), so it accumulated as a legacy
-    # NOT NULL DEFAULT 28 column. Remove it from pre-existing databases.
-    cols = conn.execute("PRAGMA table_info(user_preference)").fetchall()
-    if any(c[1] == "cold_start_days" for c in cols):
-        conn.execute("ALTER TABLE user_preference DROP COLUMN cold_start_days")
-        logger.info("[migrate] dropped dead column cold_start_days from user_preference")
-
     # Add ann_link column to announcements (schema added 2026-08-04).
     # Old databases predate the column; ADD COLUMN is idempotent-guarded by PRAGMA.
     ann_cols = conn.execute("PRAGMA table_info(announcements)").fetchall()
@@ -159,6 +151,21 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             logger.info(
                 "[migrate] rebuilt uq_change_alert_signal on word-aware identity"
             )
+
+    # Drop feedback-loop tables (v0.7.3): content_weight / user_preference held
+    # 0 rows for 3 months — feedback.py and its decay path were removed with no
+    # remaining consumers. Idempotent: guarded by sqlite_master existence check.
+    dead_tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name IN ('content_weight', 'user_preference')"
+    ).fetchall()
+    if dead_tables:
+        conn.execute("DROP TABLE IF EXISTS content_weight")
+        conn.execute("DROP TABLE IF EXISTS user_preference")
+        logger.info(
+            "[migrate] dropped feedback-loop tables: %s",
+            ", ".join(sorted(r[0] for r in dead_tables)),
+        )
 
     try:
         from . import detector as _detector
@@ -505,80 +512,6 @@ def get_historical_new_announcement_counts(
             (stock_code, cutoff)
         ).fetchall()
         return [float(r["cnt"]) for r in rows]
-
-
-# ════════════════════════════════════════════════════════
-# content_weight
-# ════════════════════════════════════════════════════════
-
-def get_weight(db_path: str, source: str, keyword: str) -> ContentWeight | None:
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM content_weight WHERE source=? AND keyword=?",
-            (source, keyword)
-        ).fetchone()
-        return ContentWeight.from_row(row) if row else None
-
-
-def upsert_weight(db_path: str, source: str, keyword: str, delta: float,
-                  preference_delta: float = 0.0) -> float:
-    """Adjust weight by delta (and optional preference_level).
-    Uses ON CONFLICT to avoid TOCTOU race.
-    Returns new weight.
-    """
-    now = int(time.time())
-    with _connect(db_path) as conn:
-        cur = conn.execute(
-            """INSERT INTO content_weight (source, keyword, weight, preference_level, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(source, keyword) DO UPDATE SET
-               weight = MAX(0.0, content_weight.weight + ?),
-               preference_level = MAX(0.0, MIN(2.0, content_weight.preference_level + ?)),
-               updated_at = ?
-               RETURNING weight""",
-            (source, keyword, max(0.0, 1.0 + delta), max(0.0, 1.0 + preference_delta), now,
-             delta, preference_delta, now)
-        )
-        row = cur.fetchone()
-        return float(row["weight"]) if row else max(0.0, 1.0 + delta)
-
-
-def decay_stale_weights(db_path: str, days: int = 7, decay: float = 0.05, floor: float = 0.3) -> int:
-    """Decay weights that haven't been updated in N days. Returns count of decayed rows."""
-    cutoff = int(time.time()) - days * 86400
-    with _connect(db_path) as conn:
-        cur = conn.execute(
-            "UPDATE content_weight SET weight = MAX(?, weight - ?), updated_at = ? WHERE updated_at < ? AND weight > ?",
-            (floor, decay, int(time.time()), cutoff, floor)
-        )
-        return cur.rowcount
-
-
-# ════════════════════════════════════════════════════════
-# user_preference
-# ════════════════════════════════════════════════════════
-
-def get_user_preference(db_path: str, user_id: str) -> UserPreference | None:
-    with _connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT * FROM user_preference WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        return UserPreference.from_row(row) if row else None
-
-
-def upsert_user_preference(db_path: str, pref: UserPreference) -> None:
-    d = pref.to_dict()
-    d["updated_at"] = int(time.time())
-    with _connect(db_path) as conn:
-        conn.execute(
-            """INSERT INTO user_preference (user_id, p0_threshold, p1_threshold, notify_immediate, notify_digest, updated_at)
-               VALUES (:user_id, :p0_threshold, :p1_threshold, :notify_immediate, :notify_digest, :updated_at)
-               ON CONFLICT(user_id) DO UPDATE SET
-               p0_threshold=:p0_threshold, p1_threshold=:p1_threshold,
-               notify_immediate=:notify_immediate, notify_digest=:notify_digest, updated_at=:updated_at""",
-            d
-        )
 
 
 # ════════════════════════════════════════════════════════

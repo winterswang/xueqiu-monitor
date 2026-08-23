@@ -66,13 +66,6 @@ DEFAULT_CONFIG = {
         "days": 7,
         "min_data_points": 7,      # minimum data points before Z-score is meaningful
     },
-    "feedback": {
-        "useful_delta": 0.1,
-        "useless_delta": -0.1,
-        "decay_days": 7,
-        "decay_rate": 0.05,
-        "weight_floor": 0.3,
-    },
     "schedule": {
         "interval_hours": 4,
     },
@@ -89,7 +82,6 @@ class Config:
     filter: dict = field(default_factory=lambda: DEFAULT_CONFIG["filter"].copy())
     notification: dict = field(default_factory=lambda: DEFAULT_CONFIG["notification"].copy())
     cold_start: dict = field(default_factory=lambda: DEFAULT_CONFIG["cold_start"].copy())
-    feedback: dict = field(default_factory=lambda: DEFAULT_CONFIG["feedback"].copy())
     schedule: dict = field(default_factory=lambda: DEFAULT_CONFIG["schedule"].copy())
 
     @classmethod

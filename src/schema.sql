@@ -1,6 +1,6 @@
 -- =============================================================================
 -- xueqiu-monitor: SQLite 数据库 DDL
--- 10 张核心表 + 索引
+-- 8 张核心表 + 索引
 -- 时间戳: INTEGER (unix), 情感值/Z-score: REAL
 -- =============================================================================
 
@@ -112,28 +112,7 @@ CREATE TABLE IF NOT EXISTS announcements (
     FOREIGN KEY (snapshot_id) REFERENCES crawl_snapshots(id)
 );
 
--- 9. content_weight — 内容权重（反馈闭环）
-CREATE TABLE IF NOT EXISTS content_weight (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    source           TEXT    NOT NULL,                      -- stock_code/author_id
-    keyword          TEXT    NOT NULL,
-    weight           REAL    NOT NULL DEFAULT 1.0,
-    preference_level REAL    NOT NULL DEFAULT 1.0,          -- 0.0 ~ 2.0
-    updated_at       INTEGER NOT NULL
-);
-
--- 10. user_preference — 用户偏好
-CREATE TABLE IF NOT EXISTS user_preference (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id          TEXT    NOT NULL,
-    p0_threshold     REAL    NOT NULL DEFAULT 3.0,
-    p1_threshold     REAL    NOT NULL DEFAULT 2.0,
-    notify_immediate INTEGER NOT NULL DEFAULT 1,       -- P0即时推
-    notify_digest    INTEGER NOT NULL DEFAULT 1,       -- P1汇总推
-    updated_at       INTEGER NOT NULL
-);
-
--- 11. xueqiu_monitor_meta — 增量爬取元数据
+-- 9. xueqiu_monitor_meta — 增量爬取元数据
 CREATE TABLE IF NOT EXISTS xueqiu_monitor_meta (
     stock_code      TEXT UNIQUE NOT NULL,
     last_crawl_time REAL    NOT NULL DEFAULT 0.0,
@@ -169,9 +148,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id);
 
 CREATE INDEX IF NOT EXISTS idx_ann_snapshot ON announcements(snapshot_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title   ON announcements(stock_code, ann_title);
-
-CREATE INDEX IF NOT EXISTS idx_cw_source  ON content_weight(source);
-CREATE INDEX IF NOT EXISTS idx_cw_keyword ON content_weight(keyword);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_cw_unique ON content_weight(source, keyword);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_up_user_id ON user_preference(user_id);

@@ -51,14 +51,13 @@ cron (07:00)
 | CLI 入口 | `src/cli.py` | 命令行入口，编排完整 pipeline | config/db/crawler/detector/filter/notifier | `run_pipeline()` 主函数 |
 | 配置管理 | `src/config.py` | 从 JSON + .env 加载配置 | python-dotenv | 支持环境变量覆盖 |
 | 爬虫模块 | `src/crawler.py` | 调用 xueqiu-analyzer，处理 watchlist，增量爬取 | xueqiu-analyzer, Playwright | 支持超时保护 + 回查兜底 |
-| 数据存储 | `src/db.py` | SQLite CRUD，10 张核心表 | sqlite3 | WAL 模式，busy_timeout=3000 |
-| 数据模型 | `src/models.py` | 10 个 dataclass，from_dict/to_dict/from_row | 无 | 免 ORM |
+| 数据存储 | `src/db.py` | SQLite CRUD，8 张核心表 | sqlite3 | WAL 模式，busy_timeout=3000 |
+| 数据模型 | `src/models.py` | 8 个 dataclass，from_dict/to_dict/from_row | 无 | 免 ORM |
 | 变化检测 | `src/detector.py` | Z-score + TF-IDF 热词 + 公告检测 | numpy, scikit-learn | 14天滚动窗口 |
 | 规则过滤 | `src/filter.py` | 广告/重复/短帖过滤，优先级分级 | 无 | per-type 抑制策略 |
 | 通知模块 | `src/notifier.py` | 消息格式化，双模式推送(lark CLI / 文件) | lark CLI | auto 模式自动检测 |
-| 反馈闭环 | `src/feedback.py` | 用户反馈权重调整 + 权重衰减 | db | 增减权重、7天衰减 |
 | 情感分析 | `src/sentiment.py` | MiniMax LLM 批量情感分析 | anthropic SDK | 讨论分批≤80条 |
-| 数据库 Schema | `src/schema.sql` | DDL — 10 表 + 索引 | 无 | PRAGMA WAL + foreign_keys |
+| 数据库 Schema | `src/schema.sql` | DDL — 8 表 + 索引 | 无 | PRAGMA WAL + foreign_keys |
 
 ### 数据流
 
@@ -119,7 +118,7 @@ cron (07:00)
 | F-015 | 爬取成功率告警 | P2 | 已发布 | winterswang | 2026-05-30 | v0.1 | cli.py | <98% |
 | F-016 | 结构化日志 + 阶段计时 | P2 | 已发布 | winterswang | 2026-05-30 | v0.1 | cli.py | [PHASE] / [SUMMARY] |
 | F-017 | 健康检查脚本 | P2 | 已发布 | winterswang | 2026-06-01 | v0.1 | health_check.py | |
-| F-018 | 用户反馈闭环 | P0 | 已发布 | winterswang | 2026-05-25 | v0.1 | feedback.py | |
+| F-018 | 用户反馈闭环 | P0 | 已移除（v0.7.3 死代码清理） | winterswang | 2026-05-25 | v0.1 | feedback.py | 3个月0反馈 |
 | F-019 | 自选股情绪日报 | P1 | 已发布 | winterswang | 2026-06-02 | v0.1 | daily_sentiment_report.py | 64只全景看板 |
 
 ---

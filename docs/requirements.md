@@ -118,43 +118,13 @@
   - 不生成自然语言摘要，所有内容为结构化数据拼接
   - Phase 2 升级为 LLM 智能摘要
 
-### 2.6 用户反馈闭环模块
-
-- **用户故事**：作为投资者，我需要能够标记收到的推送有用/无用，系统据此调整权重。
-- **验收标准**：
-  - [ ] **给定** 推送历史记录 **当** 用户标记某推送为"有用" **则** 在 content_weight 表中增加该来源/关键词权重 +0.1
-  - [ ] **给定** 推送历史记录 **当** 用户标记某推送为"无用" **则** 在 content_weight 表中减少该来源/关键词权重 -0.1
-  - [ ] **给定** 权重调整 **当** 某来源权重 < 0.3（持续无用） **则** 自动降低该来源优先级
-  - [ ] **给定** 某来源 7 天内无正向反馈 **当** 每日权重衰减检查 **则** 该来源权重 -0.05（最低到 0.3）
-- **输入/输出**：
-  - 输入：用户反馈（push_id + verdict: useful/useless）
-  - 输出：content_weight 表更新
-- **优先级**：P0（核心MVP，Phase 1 必须交付）
-- **权重调整规则**：
-
-| 操作 | 权重变化 | 说明 |
-|------|----------|------|
-| 标记"有用" | +0.1 | 单次即时调整 |
-| 标记"无用" | -0.1 | 单次即时调整 |
-| 7 天无正向反馈 | -0.05/天 | 每日衰减 |
-| 权重 < 0.3 | 自动降级 | 该来源下次检测自动降为 P2 |
-
-- **每日权重衰减检查触发时机**：
-  - 每次调度开始前（cron trigger 时）执行权重衰减清理任务
-  - 具体逻辑：查询 content_weight 表中所有来源，筛选出 updated_at 距今超过 7 天且期间无正向反馈（verdict='useful'）的记录，将权重 -0.05
-  - 权重最低降至 0.3，低于此阈值该来源在下一检测周期自动降为 P2
-  - 衰减任务执行后更新 updated_at 字段，下次调度重新检查
-
-### 2.7 模块依赖关系
+### 2.6 模块依赖关系
 
 ```
 2.1 爬虫调度 ──→ 2.2 数据存储 ──→ 2.3 变化检测 ──→ 2.4 规则筛选 ──→ 2.5 分级通知
-                                                                              ↑
-                                                                        2.6 反馈闭环
 ```
 
 - 2.1 是入口，依赖 xueqiu-analyzer 爬虫
-- 2.6 反馈闭环依赖 2.5 的推送历史
 
 ---
 
@@ -273,7 +243,7 @@ mypy>=1.5.0
 │         ▼              ▼                               │
 │   ┌──────────┐    ┌──────────┐                         │
 │   │ notifier │───→│ pusher   │───→ 飞书 Webhook        │
-│   │ (分级)   │    │ (反馈)   │◄── content_weight       │
+│   │ (分级)   │    │ (推送)   │                         │
 │   └──────────┘    └──────────┘                         │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -283,7 +253,6 @@ mypy>=1.5.0
 1. **不自己实现爬虫**：调用 xueqiu-analyzer 的 Playwright 爬虫，保持一致性
 2. **SQLite 选型**：数据量可控（60 只股票 × 每日 N 次 × 100 条帖子 ≈ 万级/天），SQLite 足够
 3. **规则优先 Phase 2 LLM**：冷启动期先积累数据 + 规则验证有效性，再引入 LLM 提升精确率
-4. **反馈闭环轻量实现**：content_weight 表记录权重调整，不做实时模型训练
 
 ### 4.4 模块接口契约
 
@@ -579,46 +548,7 @@ def generate_daily_report(alerts: list[dict]) -> str:
     ...
 ```
 
-#### 4.4.6 用户反馈闭环模块接口
-
-```python
-# 模块：feedback_loop
-
-def record_feedback(push_id: int, verdict: str) -> bool:
-    """
-    记录用户反馈并调整权重
-    
-    参数：
-        push_id (int): 推送历史记录 ID
-        verdict (str): "useful" | "useless"
-    
-    返回：
-        bool: 是否成功
-    """
-    ...
-
-def adjust_weight(source: str, keyword: str, verdict: str) -> float:
-    """
-    调整 content_weight 表中的权重
-    
-    权重调整规则：
-    - 有用 (useful): +0.1
-    - 无用 (useless): -0.1
-    - 每日衰减：若某来源 7 天内无正向反馈，每日 -0.05（最低到 0.3）
-    - 权重 <0.3 时自动降低该来源优先级
-    
-    参数：
-        source (str): 来源（如 stock_code 或 author_id）
-        keyword (str): 关键词
-        verdict (str): "useful" | "useless"
-    
-    返回：
-        float: 调整后的权重值
-    """
-    ...
-```
-
-#### 4.4.7 模块间数据传递 JSON Schema（摘要）
+#### 4.4.6 模块间数据传递 JSON Schema（摘要）
 
 ```json
 {
@@ -765,26 +695,7 @@ def adjust_weight(source: str, keyword: str, verdict: str) -> float:
 | ann_type | TEXT | 是 | 公告类型（年报/季报/重大事项等） |
 | is_new | INTEGER | 是 | 是否新发布（0/1） |
 
-**content_weight**（内容权重，用户反馈闭环）
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| id | INTEGER | 是 | 主键自增 |
-| source | TEXT | 是 | 来源（stock_code/author_id） |
-| keyword | TEXT | 是 | 关键词 |
-| weight | REAL | 是 | 权重值（默认 1.0） |
-| updated_at | DATETIME | 是 | 更新时间 |
-| preference_level | REAL | 否 | 用户偏好程度（0.0-2.0，默认 1.0，标记有用+0.1，无用-0.1） |
-
-**user_preference**（用户偏好配置）
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| id | INTEGER | 是 | 主键自增 |
-| user_id | TEXT | 是 | 用户标识 |
-| p0_threshold | REAL | 否 | P0 触发阈值（默认 Z>3.0） |
-| p1_threshold | REAL | 否 | P1 触发阈值（默认 2.0<Z≤3.0） |
-| notify_immediate | INTEGER | 否 | P0 是否即时推（默认 1） |
-| notify_digest | INTEGER | 否 | P1 是否汇总推（默认 1） |
-| updated_at | DATETIME | 是 | 更新时间 |
+**已移除表（v0.7.3）**：`content_weight` / `user_preference`——反馈闭环死代码清理（3 个月 0 反馈数据，全链路无真实消费），含幂等 DROP migration。
 
 ### 5.2 实体关系
 
@@ -792,7 +703,6 @@ def adjust_weight(source: str, keyword: str, verdict: str) -> float:
 crawl_snapshots (N) ──→ stock_code ←── (N) sentiment_stats
 crawl_snapshots (1) ──→ alert_type ←── (N) change_alert
 change_alert (1) ──→ push_id ←── (N) push_history
-push_history (N) ──→ source ←── (N) content_weight
 hot_word_dict (1) ──→ word ←── (N) hot_word_event
 ```
 
@@ -805,14 +715,13 @@ hot_word_dict (1) ──→ word ←── (N) hot_word_event
 | 模块 | 交付内容 |
 |------|----------|
 | 2.1 爬虫调度 | 调用 xueqiu-analyzer 爬虫，支持 60 只股票批量调度 |
-| 2.2 数据存储 | SQLite 10 张核心表（crawl_snapshots/sentiment_stats/change_alert/hot_word_dict/hot_word_event/push_history/comments/announcements/content_weight/user_preference） |
+| 2.2 数据存储 | SQLite 8 张核心表（crawl_snapshots/sentiment_stats/change_alert/hot_word_dict/hot_word_event/push_history/comments/announcements） |
 | 2.3 变化检测 | Z-score 检测（阈值 2.0）+ 情感偏移 + 热词 TF-IDF + 帖子数异常 + 新公告检测 |
 | 2.4 规则筛选 | 广告过滤 + 去重 + 短帖过滤 + P0/P1/P2 分级 + 冷启动静默 |
 | 2.5 分级通知 | 飞书 Webhook 推送 + P0 即时推 + P1 汇总推 + 每日早报 |
-| 2.6 用户反馈闭环 | 推送有用/无用标记 + content_weight 权重调整 + user_preference 配置 |
 | 3.x 非功能 | 98% 成功率 + 120 分钟全量 + JSON 日志 + PEP 8 + 80% 测试覆盖 |
 
-> 注：数据模型共 10 张表，详见 5.1 章节定义。种子想法中"12 张表"计数方式包含帖子原始数据的 JSON 嵌套结构，不单独建表。
+> 注：数据模型共 8 张表，详见 5.1 章节定义。种子想法中"12 张表"计数方式包含帖子原始数据的 JSON 嵌套结构，不单独建表。反馈闭环表（content_weight/user_preference）已于 v0.7.3 移除。
 
 ### 6.2 明确不做（范围边界）
 
@@ -832,7 +741,6 @@ hot_word_dict (1) ──→ word ←── (N) hot_word_event
 | LLM 内容质量评估 | P1 | Phase 1 数据积累 3-4 周后 |
 | LLM 情感深度分析 | P1 | OpenAI/Claude API 接入 |
 | LLM 智能摘要 | P1 | LLM 评估稳定后 |
-| 用户偏好学习 | P2 | content_weight 数据充分后 |
 | Web UI（配置 + 查看） | P2 | Phase 1 稳定运行后 |
 
 ---
@@ -847,7 +755,6 @@ hot_word_dict (1) ──→ word ←── (N) hot_word_event
 | **冷启动期** | Phase 1 前 3-4 周，基线数据不足，系统仅记录不推送，用于积累 μ 和 σ |
 | **变化检测召回率** | 系统检测到的真实变化数 / 实际上发生的真实变化数，≥85% |
 | **变化检测精确率** | 系统检测到的变化中，真正有价值的比例，≥70% |
-| **有效推送率** | 用户标记"有用"的推送数 / 总推送数，≥50% |
 | **P0/P1/P2 分级** | 推送优先级：P0 重大利空/利好即时推，P1 明显变化汇总推，P2 日常波动静默 |
 | **xueqiu-analyzer** | 依赖的爬虫项目，提供 Playwright 实现的雪球帖子爬取能力 |
 | **飞书 Webhook** | 飞书机器人的消息推送接口，通过 HTTP POST 发送卡片消息 |

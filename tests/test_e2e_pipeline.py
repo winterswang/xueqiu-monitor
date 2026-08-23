@@ -165,8 +165,6 @@ def temp_db(tmp_path):
             "p1_z_threshold": 2.0,
         },
         "notification": {"webhook_url": "", "push_timeout": 5, "max_retries": 2},
-        "feedback": {"useful_delta": 0.1, "useless_delta": -0.1, "decay_days": 7,
-                     "decay_rate": 0.05, "weight_floor": 0.3},
         "schedule": {"interval_hours": 4},
         "crawler": {
             "timeout_seconds": 30, "max_retries": 2, "concurrency": 1,
@@ -442,33 +440,3 @@ class TestPipelineE2E:
         assert scores[2] == 0.5, f"分红→positive: {scores[2]}"
         print(f"✅ news keyword sentiment: {scores}")
 
-    def test_db_upsert_and_decay(self, temp_db):
-        """Content weight upsert + decay."""
-        from src import db
-        db_path = temp_db.db_path
-        db.init_db(db_path)
-
-        w = db.upsert_weight(db_path, "SH600519", "业绩", 0.5)
-        assert w == 1.5
-        w2 = db.upsert_weight(db_path, "SH600519", "业绩", -0.2)
-        assert w2 == 1.3
-
-        # Decay: set updated_at far in past
-        import time
-        past = int(time.time()) - 10 * 86400  # 10 days ago
-        from src.models import ContentWeight
-        # Direct SQL to set old timestamp
-        from src.db import _connect
-        with _connect(db_path) as conn:
-            conn.execute(
-                "UPDATE content_weight SET updated_at=? WHERE source='SH600519' AND keyword='业绩'",
-                (past,)
-            )
-
-        count = db.decay_stale_weights(db_path, days=7, decay=0.05, floor=0.3)
-        assert count >= 1, f"Expected decay count >= 1, got {count}"
-
-        cw = db.get_weight(db_path, "SH600519", "业绩")
-        assert cw is not None
-        assert cw.weight > 0.3, f"Weight should be above floor, got {cw.weight}"
-        print(f"✅ upsert + decay: weight={cw.weight}")

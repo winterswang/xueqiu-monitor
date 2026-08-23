@@ -75,7 +75,7 @@ cron/timer
     └──────────┘
 ```
 
-**10 张核心表**：`crawl_snapshots` / `sentiment_stats` / `change_alert` / `hot_word_dict` / `hot_word_event` / `push_history` / `comments` / `announcements` / `content_weight` / `user_preference`
+**8 张核心表**：`crawl_snapshots` / `sentiment_stats` / `change_alert` / `hot_word_dict` / `hot_word_event` / `push_history` / `comments` / `announcements`
 
 ## 快速开始
 

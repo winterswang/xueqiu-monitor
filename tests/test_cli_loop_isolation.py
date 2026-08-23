@@ -44,8 +44,6 @@ def temp_config(tmp_path):
             "p1_z_threshold": 2.0,
         },
         "notification": {"webhook_url": "", "push_timeout": 5, "max_retries": 2},
-        "feedback": {"useful_delta": 0.1, "useless_delta": -0.1, "decay_days": 7,
-                     "decay_rate": 0.05, "weight_floor": 0.3},
         "schedule": {"interval_hours": 4},
         "crawler": {
             "timeout_seconds": 30, "max_retries": 2, "concurrency": 1,
