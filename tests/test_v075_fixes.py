@@ -1,5 +1,5 @@
 """v0.7.5 fixes: thermometer latest-snapshot, interaction-weighted sentiment,
-engagement-first post sort, post index table. Independent of the legacy
+engagement-first post sort. Independent of the legacy
 test_report_generator.py assertions on old sort order."""
 
 import json
@@ -99,20 +99,6 @@ class TestThermometerLatestSnapshot:
         assert row, "TEST.HK missing from thermometer"
         assert row[0]["posts"] == 5
         assert row[0]["sentiment"] == 0.3
-
-
-class TestPostIndexSection:
-    """[n] -> link index table (note: solve unable-to-trace)."""
-
-    def test_index_lists_posts_with_links(self, tmp_db):
-        posts = [
-            {"title": "indexed post", "content": "content content content", "time": "1小时前", "link": "https://xueqiu.com/1"},
-        ]
-        insert_snapshot(tmp_db, "TEST.HK", posts)
-        cfg = {"llm": {"min_post_length": 5}}
-        md = rg._build_post_index_section(str(tmp_db.path), tmp_db.date_str, {"TEST.HK": {"name": "测试"}}, cfg)
-        assert "https://xueqiu.com/1" in md
-        assert "[1]" in md
 
 
 def insert_snapshot(tmp_db, stock_code, posts):

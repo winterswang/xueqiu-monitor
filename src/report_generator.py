@@ -948,10 +948,6 @@ def generate_daily_report(
     logger.info("[3/3] 生成热词云...")
     hot_words_md = _build_hot_words_section(db_path, date_str, stocks_cfg)
 
-    # ── Section 4: Post index table ([n] -> link) ──
-    logger.info("[4/4] 生成帖子索引表...")
-    index_md = _build_post_index_section(db_path, date_str, stocks_cfg, cfg)
-
     # ── Assemble full report ──
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     report = f"""# 📊 自选股舆情日报
@@ -974,10 +970,6 @@ def generate_daily_report(
 
 ---
 
-{index_md}
-
----
-
 *本报告由 xueqiu-monitor 自动生成，数据来源：雪球。LLM 分析模型：MiniMax-M3（经火山方舟 coding plan）。*
 """
 
@@ -989,50 +981,6 @@ def generate_daily_report(
     logger.info(f"日报已保存: {output_path}")
 
     return report
-
-
-def _build_post_index_section(
-    db_path: str, date_str: str, stocks_cfg: dict, config: dict,
-) -> str:
-    """Build the [n] -> link index table for all analyzed posts.
-
-    Uses the same filtering pipeline as analyze_stock (same window,
-    same min_length, same engagement-first sort) so the numbers here
-    line up 1:1 with the [n] references in the LLM sections. Solves
-    the "不可溯源" problem from the density-review note.
-    """
-    min_len = config.get("llm", {}).get("min_post_length", 30)
-    lines = ["## 四、帖子索引表\n"]
-    lines.append("> 每个参考编号对应一条帖子（按互动量排序），点击链接可以追溯原帖。")
-
-    for code, info in stocks_cfg.items():
-        posts = fetch_stock_posts(db_path, code, date_str, min_length=min_len)
-        if not posts:
-            posts = fetch_stock_posts(
-                db_path, code, date_str, min_length=min_len,
-                max_age_days=FALLBACK_MAX_AGE_DAYS,
-            )
-        if not posts:
-            continue
-        name = info.get("name", code)
-        lines.append(f"### {code} {name}")
-        lines.append("")
-        for i, p in enumerate(posts, 1):
-            link = (p.get("link") or "").strip()
-            title = (p.get("title") or "").strip() or "(无标题)"
-            if len(title) > 50:
-                title = title[:50] + "..."
-            if link:
-                lines.append(f"- [{i}] [{title}]({link})")
-            else:
-                lines.append(f"- [{i}] {title}")
-            if i >= 100:
-                break
-        lines.append("")
-    if len(lines) <= 2:
-        return "## 四、帖子索引表\n\n当日无可索引帖子。\n"
-    return "\n".join(lines) + "\n"
-
 
 
 def _build_hot_words_section(
