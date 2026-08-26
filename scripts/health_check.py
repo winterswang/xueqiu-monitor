@@ -38,6 +38,25 @@ def _get_latest_log() -> Path | None:
     return None
 
 
+def _load_monitor_whitelist() -> set[str] | None:
+    """Union of crawler.whitelist across all group configs (etc/config*.json).
+
+    This is the set of stocks the pipeline is *supposed* to crawl. meta rows
+    for decommissioned stocks are leftovers, not health signals. Returns None
+    when no config file is readable, so the caller falls back to a full-table
+    scan (missing-config environments still get checked)."""
+    union: set[str] = set()
+    found = False
+    for cfg_path in sorted((PROJECT_ROOT / "etc").glob("config*.json")):
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        found = True
+        union.update(cfg.get("crawler", {}).get("whitelist", []) or [])
+    return union if found else None
+
+
 def _get_latest_cron_log() -> Path | None:
     log = LOG_DIR / "cron.log"
     return log if log.exists() else None
@@ -142,9 +161,16 @@ def check():
         try:
             now = _time.time()
             # 5a. last_crawl_time freshness: any stock not crawled for 48h → FAIL
+            #     Scope = monitor whitelist union (what the pipeline is supposed
+            #     to crawl), NOT the full meta table — rows for decommissioned
+            #     stocks are leftover bookkeeping, not health signals. Falls
+            #     back to the full table only when no config is readable.
             rows = conn.execute(
                 "SELECT stock_code, last_crawl_time FROM xueqiu_monitor_meta"
             ).fetchall()
+            whitelist = _load_monitor_whitelist()
+            if whitelist is not None:
+                rows = [r for r in rows if r[0] in whitelist]
             if rows:
                 now_48h = now - 48 * 3600
                 stale = [
@@ -154,9 +180,9 @@ def check():
                 fresh = [lct for sc, lct in rows if lct and lct >= now_48h]
                 # FAIL only when the pipeline is broadly stalled: either NO stock
                 # crawled in 48h (the 8/8 accident signature) or a majority stale
-                # (watchlist rotated out en masse). A few legacy rows that were
-                # decommissioned (removed from configs) are expected → WARN, so
-                # normal operation never false-alarms.
+                # (whitelist rotated out en masse). A few stale in-whitelist
+                # stocks (e.g. one group's cron failing while others run)
+                # → WARN, so normal operation never false-alarms.
                 if not fresh or len(stale) > len(rows) / 2:
                     results.append({
                         "check": "crawl_freshness", "status": FAIL,
@@ -167,12 +193,12 @@ def check():
                     worst = max(stale, key=lambda x: x[1])
                     results.append({
                         "check": "crawl_freshness", "status": WARN,
-                        "detail": f"{len(stale)}/{len(rows)} stocks not crawled in 48h (legacy: {worst[0]}, last={_time.strftime('%m-%d %H:%M', _time.localtime(worst[1]))})",
+                        "detail": f"{len(stale)}/{len(rows)} whitelist stocks not crawled in 48h (stalest: {worst[0]}, last={_time.strftime('%m-%d %H:%M', _time.localtime(worst[1]))})",
                     })
                 else:
                     results.append({
                         "check": "crawl_freshness", "status": OK,
-                        "detail": f"all {len(rows)} stocks crawled within 48h",
+                        "detail": f"all {len(rows)} whitelisted stocks crawled within 48h",
                     })
             else:
                 results.append({
