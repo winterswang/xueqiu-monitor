@@ -314,6 +314,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # ── Store alerts (batch insert for performance) ──
             alert_ids = db.insert_alerts_batch(db_path, alerts)
             for alert, aid in zip(alerts, alert_ids):
+                if not aid:
+                    # INSERT OR IGNORE dedup-hit: alert already recorded (and pushed)
+                    # by an earlier run. Keep it out of all_alerts, otherwise
+                    # insert_push(alert_id=0) violates the FK on push_history.alert_id.
+                    continue
                 alert.id = aid
                 total_alerts += 1
                 all_alerts.append(alert)
