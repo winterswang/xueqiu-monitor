@@ -2,36 +2,170 @@
   "db_path": "data/monitor.db",
   "report_output_dir": "data/daily_reports",
   "stocks": {
-    "PDD.US": {"name": "拼多多", "sector": "消费"},
-    "9992.HK": {"name": "泡泡玛特", "sector": "消费"},
-    "300750.SZ": {"name": "宁德时代", "sector": "新能源"},
-    "700.HK": {"name": "腾讯", "sector": "互联网/游戏"},
-    "2400.HK": {"name": "心动公司", "sector": "互联网/游戏"},
-    "NVDA.US": {"name": "英伟达", "sector": "AI/科技"},
-    "TSM.US": {"name": "台积电", "sector": "AI/科技"},
-    "APP.US": {"name": "AppLovin", "sector": "AI/科技"},
-    "CBRS.US": {"name": "Cerebras", "sector": "AI/科技"},
-    "TCOM.US": {"name": "携程", "sector": "出行/酒旅"},
-    "1179.HK": {"name": "华住", "sector": "出行/酒旅"},
-    "ABNB.US": {"name": "Airbnb", "sector": "出行/酒旅"},
-    "SPCX.US": {"name": "SpaceX概念", "sector": "航天"},
-    "300760.SZ": {"name": "迈瑞医疗", "sector": "医疗器械"},
-    "2899.HK": {"name": "紫金矿业", "sector": "矿业"},
-    "LKNCY.US": {"name": "瑞幸咖啡", "sector": "消费"},
-    "DUOL.US": {"name": "Duolingo", "sector": "教育/科技"},
-    "CRCL.US": {"name": "Circle", "sector": "金融科技"},
-    "883.HK": {"name": "中海油", "sector": "能源"},
-    "3690.HK": {"name": "美团", "sector": "互联网"},
-    "600519.SH": {"name": "茅台", "sector": "消费"},
-    "9926.HK": {"name": "康方生物", "sector": "医药"},
-    "BABA.US": {"name": "阿里巴巴", "sector": "互联网"},
-    "META.US": {"name": "Meta", "sector": "互联网"},
-    "GOOGL.US": {"name": "谷歌", "sector": "互联网"},
-    "TSLA.US": {"name": "特斯拉", "sector": "汽车"},
-    "PLTR.US": {"name": "Palantir", "sector": "AI/科技"},
-    "RKLB.US": {"name": "Rocket Lab", "sector": "航天"},
-    "UBER.US": {"name": "Uber", "sector": "出行/酒旅"},
-    "NVO.US": {"name": "诺和诺德", "sector": "医药"}
+    "PDD.US": {
+      "name": "拼多多",
+      "sector": "消费"
+    },
+    "9992.HK": {
+      "name": "泡泡玛特",
+      "sector": "消费"
+    },
+    "300750.SZ": {
+      "name": "宁德时代",
+      "sector": "新能源"
+    },
+    "700.HK": {
+      "name": "腾讯",
+      "sector": "互联网/游戏"
+    },
+    "2400.HK": {
+      "name": "心动公司",
+      "sector": "互联网/游戏"
+    },
+    "NVDA.US": {
+      "name": "英伟达",
+      "sector": "AI/科技"
+    },
+    "TSM.US": {
+      "name": "台积电",
+      "sector": "AI/科技"
+    },
+    "1179.HK": {
+      "name": "华住",
+      "sector": "出行/酒旅"
+    },
+    "SPCX.US": {
+      "name": "SpaceX概念",
+      "sector": "航天"
+    },
+    "300760.SZ": {
+      "name": "迈瑞医疗",
+      "sector": "医疗器械"
+    },
+    "2899.HK": {
+      "name": "紫金矿业",
+      "sector": "矿业"
+    },
+    "CRCL.US": {
+      "name": "Circle",
+      "sector": "金融科技"
+    },
+    "883.HK": {
+      "name": "中海油",
+      "sector": "能源"
+    },
+    "3690.HK": {
+      "name": "美团",
+      "sector": "互联网"
+    },
+    "600519.SH": {
+      "name": "茅台",
+      "sector": "消费"
+    },
+    "9926.HK": {
+      "name": "康方生物",
+      "sector": "医药"
+    },
+    "BABA.US": {
+      "name": "阿里巴巴",
+      "sector": "互联网"
+    },
+    "GOOGL.US": {
+      "name": "谷歌",
+      "sector": "互联网"
+    },
+    "TSLA.US": {
+      "name": "特斯拉",
+      "sector": "汽车"
+    },
+    "PLTR.US": {
+      "name": "Palantir",
+      "sector": "AI/科技"
+    },
+    "UBER.US": {
+      "name": "Uber",
+      "sector": "出行/酒旅"
+    },
+    "981.HK": {
+      "name": "中芯国际",
+      "sector": "半导体"
+    },
+    "688775.SH": {
+      "name": "影石创新",
+      "sector": "AI/科技"
+    },
+    "688521.SH": {
+      "name": "芯原股份",
+      "sector": "半导体"
+    },
+    "300.HK": {
+      "name": "美的集团",
+      "sector": "家电/消费"
+    },
+    "1880.HK": {
+      "name": "中国中免",
+      "sector": "消费"
+    },
+    "1364.HK": {
+      "name": "古茗",
+      "sector": "消费"
+    },
+    "2513.HK": {
+      "name": "智谱",
+      "sector": "AI/科技"
+    },
+    "002241.SZ": {
+      "name": "歌尔股份",
+      "sector": "科技制造"
+    },
+    "325.HK": {
+      "name": "布鲁可",
+      "sector": "消费"
+    },
+    "6078.HK": {
+      "name": "海吉亚医疗",
+      "sector": "医疗"
+    },
+    "000933.SZ": {
+      "name": "神火股份",
+      "sector": "周期/资源"
+    },
+    "1030.HK": {
+      "name": "新城发展",
+      "sector": "地产"
+    },
+    "1138.HK": {
+      "name": "中远海能",
+      "sector": "周期/运输"
+    },
+    "1698.HK": {
+      "name": "腾讯音乐",
+      "sector": "互联网/文娱"
+    },
+    "002003.SZ": {
+      "name": "伟星股份",
+      "sector": "制造"
+    },
+    "SKHY.US": {
+      "name": "SK海力士",
+      "sector": "半导体"
+    },
+    "2076.HK": {
+      "name": "BOSS直聘",
+      "sector": "互联网"
+    },
+    "2423.HK": {
+      "name": "贝壳",
+      "sector": "互联网/地产"
+    },
+    "001232.SZ": {
+      "name": "嘉立创",
+      "sector": "科技制造"
+    },
+    "300866.SZ": {
+      "name": "安克创新",
+      "sector": "消费/科技"
+    }
   },
   "llm": {
     "model": "minimax-m3",

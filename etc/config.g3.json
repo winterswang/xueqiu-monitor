@@ -6,11 +6,14 @@
     "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
-      "APP.US",
-      "300760.SZ",
+      "SPCX.US",
+      "CRCL.US",
       "2899.HK",
-      "CBRS.US",
-      "883.HK"
+      "883.HK",
+      "325.HK",
+      "6078.HK",
+      "000933.SZ",
+      "300760.SZ"
     ]
   },
   "detector": {

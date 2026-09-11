@@ -7,10 +7,10 @@
     "concurrency": 1,
     "whitelist": [
       "PDD.US",
-      "300750.SZ",
       "9992.HK",
-      "LKNCY.US",
-      "DUOL.US"
+      "300750.SZ",
+      "981.HK",
+      "688775.SH"
     ]
   },
   "detector": {

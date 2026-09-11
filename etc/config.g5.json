@@ -6,12 +6,13 @@
     "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
-      "PLTR.US",
       "UBER.US",
-      "SPOT.US",
-      "RKLB.US",
-      "NVO.US",
-      "TSLA.US"
+      "SKHY.US",
+      "2076.HK",
+      "2423.HK",
+      "001232.SZ",
+      "300866.SZ",
+      "600519.SH"
     ]
   },
   "detector": {

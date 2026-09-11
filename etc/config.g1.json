@@ -6,11 +6,13 @@
     "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
-      "700.HK",
-      "2400.HK",
       "NVDA.US",
       "TSM.US",
-      "ASML.US"
+      "700.HK",
+      "2400.HK",
+      "688521.SH",
+      "300.HK",
+      "1880.HK"
     ]
   },
   "detector": {

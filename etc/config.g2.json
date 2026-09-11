@@ -6,12 +6,13 @@
     "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
-      "TCOM.US",
-      "1179.HK",
-      "SPCX.US",
-      "ABNB.US",
-      "CRCL.US",
-      "META.US"
+      "GOOGL.US",
+      "BABA.US",
+      "3690.HK",
+      "9926.HK",
+      "1364.HK",
+      "2513.HK",
+      "002241.SZ"
     ]
   },
   "detector": {

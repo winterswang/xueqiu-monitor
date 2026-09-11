@@ -6,12 +6,13 @@
     "max_retries": 2,
     "concurrency": 1,
     "whitelist": [
-      "3690.HK",
-      "600519.SH",
-      "9926.HK",
-      "BABA.US",
-      "TAL.US",
-      "GOOGL.US"
+      "TSLA.US",
+      "PLTR.US",
+      "1179.HK",
+      "1030.HK",
+      "1138.HK",
+      "1698.HK",
+      "002003.SZ"
     ]
   },
   "detector": {
