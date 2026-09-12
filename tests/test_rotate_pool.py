@@ -246,6 +246,29 @@ class TestPlanApply:
         assert "A.US" in live.report_stocks  # untouched
         assert not (repo / "data").exists()  # no ledger writes
 
+    def test_write_configs_preserves_trailing_newline_convention(self, repo, tmp_path):
+        """S1 regression: rewritten configs must match the template file's
+        trailing-newline convention byte for byte (no stray '\\ No newline'
+        hunks on the first real --apply)."""
+        live = rp.load_configs(repo)
+        spec = {
+            "effective_date": "2026-09-20",
+            "config_version": "vtest",
+            "reason": "x",
+            "changes": [
+                {"action": "add", "stock_code": "E.HK", "group": "g1",
+                 "name": "E公司", "sector": "消费"},
+            ],
+        }
+        rotated = rp.apply_spec_to_configs(live, spec)
+        virtual = tmp_path / "sim"
+        (virtual / "etc").mkdir(parents=True)
+        rp.write_configs(virtual, rotated, repo)
+        for fname in [*rp.GROUP_CONFIGS.values(), rp.REPORT_CONFIG]:
+            src_raw = (repo / "etc" / fname).read_text()
+            out_raw = (virtual / "etc" / fname).read_text()
+            assert src_raw.endswith("\n") == out_raw.endswith("\n"), fname
+
     def test_real_repo_check_green(self):
         """Smoke: the real repo passes --check end-to-end (CI-safe skip)."""
         real = SCRIPTS_DIR.parent

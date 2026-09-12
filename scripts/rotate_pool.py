@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -282,20 +282,32 @@ def apply_spec_to_configs(rc: RepoConfigs, spec: dict) -> RepoConfigs:
     return RepoConfigs(groups=groups, report_stocks=stocks)
 
 
+def _dump_preserving_trailing_newline(template_path: Path, data: dict, out_path: Path) -> None:
+    """Serialize data, matching the template file's trailing-newline convention.
+
+    Existing etc/ configs lack a trailing newline; rewriting with one would
+    add a stray '\\ No newline' diff hunk to every config on the first --apply.
+    Match whatever the template (pre-rotation) file does, byte for byte.
+    """
+    template_raw = template_path.read_text()
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    if template_raw.endswith("\n"):
+        text += "\n"
+    out_path.write_text(text)
+
+
 def write_configs(root: Path, rc: RepoConfigs, template_root: Path) -> None:
     """Materialize a RepoConfigs into root/etc/, preserving all non-pool keys
     from the template configs (template_root holds the pre-rotation files)."""
     for gname, fname in GROUP_CONFIGS.items():
         data = json.loads((template_root / "etc" / fname).read_text())
         data.setdefault("crawler", {})["whitelist"] = rc.groups[gname]
-        (root / "etc" / fname).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-        )
+        _dump_preserving_trailing_newline(
+            template_root / "etc" / fname, data, root / "etc" / fname)
     data = json.loads((template_root / "etc" / REPORT_CONFIG).read_text())
     data["stocks"] = rc.report_stocks
-    (root / "etc" / REPORT_CONFIG).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    )
+    _dump_preserving_trailing_newline(
+        template_root / "etc" / REPORT_CONFIG, data, root / "etc" / REPORT_CONFIG)
 
 
 def ledger_rows(spec: dict) -> list[dict]:
@@ -414,11 +426,9 @@ def plan_mode(args: argparse.Namespace) -> int:
 
 
 def _default_mb_db(root: Path) -> Path:
-    env = subprocess.run(
-        ["printenv", "MORNING_BRIEF_DB"], capture_output=True, text=True
-    )
-    if env.returncode == 0 and env.stdout.strip():
-        return Path(env.stdout.strip())
+    env = os.environ.get("MORNING_BRIEF_DB", "").strip()
+    if env:
+        return Path(env)
     return root.parent / "morning-brief" / "data" / "morning-brief.db"
 
 

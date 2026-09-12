@@ -13,6 +13,7 @@ out of coverage; exits 0 either way (sync itself succeeded — the drift is
 the rotation tool's check #5 domain, this is the runtime early-warning).
 """
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -80,7 +81,6 @@ def check_pool_coverage() -> tuple[bool, str]:
     report as (True, note) — this is an early-warning, not a hard gate.
     """
     try:
-        import os
         mb_db = Path(os.environ.get("MORNING_BRIEF_DB", str(MB_DB_DEFAULT)))
         pool: set[str] = set()
         for cfg_path in sorted((PROJECT_ROOT / "etc").glob("config*.json")):
