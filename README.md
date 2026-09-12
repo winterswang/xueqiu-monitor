@@ -148,3 +148,25 @@ python -m pytest tests/ -v --cov=src
 | 调度 | 独立 cron | 独立 cron |
 
 两套系统互补运行，不做合并。
+
+### 爬取真源（source of truth）与池一致性
+
+xueqiu-monitor 的爬取不是以自己的 `etc/config*.json` whitelist 为起点，而是
+**继承 morning-brief 的自选股池**（`morning-brief/data/morning-brief.db` 的
+`watchlist.is_active=1` 集合），config whitelist 只决定「哪几只进本组」。
+三层加载链（`crawler.py` 实测）：
+
+1. `morning-brief` DB active 集（真源，最高优先）
+2. `data/watchlist.json`（fallback，每日 12:00 由 `scripts/sync_watchlist.py` 从 Longbridge 拉取）
+3. `etc/config.json` whitelist（兜底）
+
+因此「监控池 = 爬取并集」这条等式隐含依赖 morning-brief 池的同步。三道防线：
+
+| 防线 | 机制 | 触发时机 |
+|------|------|----------|
+| 事前 | `scripts/rotate_pool.py --check` 第 5 项校验池 ⊆ morning-brief active 集 | 轮换时手动跑 |
+| 事中 | `scripts/sync_watchlist.py` 末尾 `check_pool_coverage()` 覆盖告警（`[POOL_COVERAGE_ALERT]`） | 每日 12:00 同步后 |
+| 事后 | `rotate_pool.py --check` 全套校验可随时复查 | 任意时刻 |
+
+池变更（轮换）必须走 `scripts/rotate_pool.py --plan spec.json --apply` + 台账
+`pool_history`（见 `docs/v0.9-requirements.md` T1/T2），不允许手工改 config 后不校验。
