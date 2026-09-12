@@ -11,11 +11,10 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
 
 from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
-    HotWordDict, HotWordEvent, PushHistory,
+    HotWordEvent, PushHistory,
     Comment, Announcement,
 )
 
@@ -65,7 +64,7 @@ def _connect(db_path: str) -> _ClosingConnection:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             return _ClosingConnection(conn)
-        except sqlite3.OperationalError as e:
+        except sqlite3.OperationalError:
             if attempt < 2:
                 time.sleep(1)
                 continue
@@ -155,15 +154,19 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Drop feedback-loop tables (v0.7.3): content_weight / user_preference held
     # 0 rows for 3 months — feedback.py and its decay path were removed with no
     # remaining consumers. Idempotent: guarded by sqlite_master existence check.
+    # v0.9 T3: xueqiu_monitor_meta_backup_0825 joins the dead-table list —
+    # 8/25 手工备份残留（4 行，与活表同构），src/scripts/etc 零引用，git 历史可追溯。
     dead_tables = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name IN ('content_weight', 'user_preference')"
+        "AND name IN ('content_weight', 'user_preference', "
+        "'xueqiu_monitor_meta_backup_0825')"
     ).fetchall()
     if dead_tables:
         conn.execute("DROP TABLE IF EXISTS content_weight")
         conn.execute("DROP TABLE IF EXISTS user_preference")
+        conn.execute("DROP TABLE IF EXISTS xueqiu_monitor_meta_backup_0825")
         logger.info(
-            "[migrate] dropped feedback-loop tables: %s",
+            "[migrate] dropped dead tables: %s",
             ", ".join(sorted(r[0] for r in dead_tables)),
         )
 

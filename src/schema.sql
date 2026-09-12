@@ -119,6 +119,22 @@ CREATE TABLE IF NOT EXISTS xueqiu_monitor_meta (
     last_post_time  REAL    NOT NULL DEFAULT 0.0
 );
 
+-- 10. pool_history — 股票池轮换台账（v0.9 T1）
+-- 每行一次 add/remove；按 effective_date 顺序重放，最后状态 = 现 report 池。
+-- 回填由 scripts/backfill_pool_history.py 从 git 历史自动推导，不手工维护。
+CREATE TABLE IF NOT EXISTS pool_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code      TEXT    NOT NULL,
+    action          TEXT    NOT NULL CHECK(action IN ('add','remove')),
+    effective_date  TEXT    NOT NULL,               -- YYYY-MM-DD
+    reason          TEXT,
+    avg_daily_posts REAL,                           -- 轮换时声量快照（14d 日均帖，出池复盘用）
+    config_version  TEXT,                           -- 引入/移除该股的 config 版本
+    UNIQUE(stock_code, effective_date, action)      -- 幂等：同股同日同动作只记一次
+);
+CREATE INDEX IF NOT EXISTS idx_pool_history_code ON pool_history(stock_code);
+CREATE INDEX IF NOT EXISTS idx_pool_history_date ON pool_history(effective_date);
+
 -- =============================================================================
 -- 索引
 -- =============================================================================
