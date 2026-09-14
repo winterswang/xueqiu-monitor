@@ -90,7 +90,9 @@ else:
     COS_UPLOAD_SCRIPT = next((p for p in _COS_SCRIPT_CANDIDATES if p.exists()), _COS_SCRIPT_CANDIDATES[0])
 
 # Content cap (same as report_generator.fetch_stock_posts)
-CONTENT_MAX_CHARS = 2000
+# 2026-09-14 修: 原为 2000, 而数据库侧已放宽到 8000 —— 导出这一层
+# 又把全文修复吃掉了(实测 9/13 有 170 条正文 >2000 字, 共丢 40 万字符)。
+CONTENT_MAX_CHARS = 8000
 
 
 # ════════════════════════════════════════════════════════
@@ -165,13 +167,14 @@ def fetch_all_posts(
             (date_str,),
         ).fetchall()
 
-        seen_stocks = set()
         for row in rows:
             stock_code = row["stock_code"]
-            # Only take the latest snapshot per stock
-            if stock_code in seen_stocks:
-                continue
-            seen_stocks.add(stock_code)
+            # 2026-09-14 修: 当日**全部快照取并集**, 不再只取最新那一个。
+            # 原实现 `seen_stocks` 跳过非最新快照, 而 crawl_single_stock 会把每个
+            # 快照裁成"仅比上次水位更新的帖子" —— 两者叠加, 当天第一次抓到的帖子
+            # 在第二次抓取后就从任何被导出的快照里消失了。
+            # 实测 9/13: 8 只股票当天被抓 2-3 次, 197 条已入库帖子没进 CSV。
+            # 帖级去重由下面的 seen_post_ids 负责, 这里无需按股票去重。
 
             if not row["posts_data"]:
                 continue

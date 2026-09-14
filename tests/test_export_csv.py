@@ -209,7 +209,14 @@ class TestFetchAllPosts:
         assert codes == {"TEST.HK", "DEMO.US"}
 
     def test_takes_latest_snapshot_only(self, tmp_db):
-        """When multiple snapshots exist for same stock, only latest is used."""
+        """Same stock crawled twice a day → union of both snapshots.
+
+        2026-09-14 contract change: crawl_single_stock trims each snapshot to
+        "posts newer than the last watermark", so later snapshots only carry
+        incremental posts. Taking just the latest snapshot would silently
+        drop everything captured earlier the same day (9/13 live data: 197
+        posts missed). Post-level dedup by post_id handles real duplicates.
+        """
         posts_old = [{"type": "discussion", "title": "旧帖标题标题标题标题",
                       "content": "旧帖内容内容内容内容内容"}]
         posts_new = [{"type": "discussion", "title": "新帖标题标题标题标题",
@@ -220,8 +227,22 @@ class TestFetchAllPosts:
         result = export_csv.fetch_all_posts(
             str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
         )
+        titles = {r["title"] for r in result}
+        assert titles == {"旧帖标题标题标题标题", "新帖标题标题标题标题"}
+
+    def test_same_post_across_snapshots_deduped(self, tmp_db):
+        """Same post_id re-captured in a later snapshot → only first kept."""
+        shared = {"type": "discussion",
+                  "post_id": "https://xueqiu.com/999/111",
+                  "title": "重复抓到的帖子标题标题标题",
+                  "content": "内容内容内容内容内容内容内容"}
+        tmp_db.insert_snapshot("TEST.HK", [shared])
+        time.sleep(0.01)
+        tmp_db.insert_snapshot("TEST.HK", [shared])
+        result = export_csv.fetch_all_posts(
+            str(tmp_db.path), STOCKS_CFG, tmp_db.date_str, min_length=5
+        )
         assert len(result) == 1
-        assert "新帖" in result[0]["title"]
 
     def test_content_capped(self, tmp_db):
         """Content longer than CONTENT_MAX_CHARS is truncated."""
