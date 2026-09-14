@@ -151,6 +151,23 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 "[migrate] rebuilt uq_change_alert_signal on word-aware identity"
             )
 
+    # 2026-09-14: announcement dedup identity changed from (stock_code,
+    # ann_title) to (stock_code, ann_title, ann_date). The old title-only
+    # unique index let each stock keep ONE row per title forever — recurring
+    # announcements (月度经营数据 / 回购进展) were silently dropped by
+    # INSERT OR IGNORE, so the announcement signal was effectively dead.
+    # Legacy DBs still carry idx_ann_title; drop it so the schema's
+    # idx_ann_title_date governs. Idempotent: guarded by PRAGMA index_list.
+    # (Safe ordering: schema.sql runs first and creates the new index; old
+    # rows satisfy the stricter old constraint, so the new one always builds.)
+    idxs_ann = conn.execute("PRAGMA index_list(announcements)").fetchall()
+    if any(i[1] == "idx_ann_title" for i in idxs_ann):
+        conn.execute("DROP INDEX idx_ann_title")
+        logger.info(
+            "[migrate] dropped legacy title-only idx_ann_title; "
+            "announcement dedup identity is now (stock_code, ann_title, ann_date)"
+        )
+
     # Drop feedback-loop tables (v0.7.3): content_weight / user_preference held
     # 0 rows for 3 months — feedback.py and its decay path were removed with no
     # remaining consumers. Idempotent: guarded by sqlite_master existence check.
@@ -531,25 +548,42 @@ def get_last_crawl_time(db_path: str, stock_code: str) -> float:
         return float(row["last_post_time"]) if row else 0.0
 
 
-def get_existing_post_ids(db_path: str, stock_code: str, window_days: int = 30) -> set:
-    """返回该股票最近 window_days 天内已存储的 post_id 集合，用于过滤去重。
+def get_existing_post_ids(db_path: str, stock_code: str, window_days: int = 90) -> set:
+    """返回该股票已存储的 post_id 集合（近 window_days 天），用于增量去重。
 
-    comments 表通过 snapshot_id → crawl_snapshots 间接关联 stock_code，
-    因此用 JOIN 查询而非直接 comments.stock_code（该列不存在）。
+    2026-09-14 修: 改为从**权威存储** crawl_snapshots.posts_data 直接抽取。
+    原实现从 comments 表反推, 有两个致命性质:
+      1. comments.post_id 是全库唯一索引(不带 stock_code), 配合 INSERT OR IGNORE,
+         一条帖子的 comments 行只在**第一次**插入时生成, 其 snapshot_id 被永久
+         冻结 —— 之后再入库不会刷新归属;
+      2. 查询又按 crawl_time > cutoff 过滤, 于是"归属快照超过窗口期"的老帖
+         永远查不到 → 每次运行都被当成"上次没爬到"重新救回、重复入库。
+    实测后果: 8/20 以来 36332 条帖子中有 3968 条(10.9%)是重复; LKNCY.US 90%、
+    SPOT.US 88%、DUOL.US 86% —— posts_count 虚高, Z-score 与情绪统计失真,
+    重复内容还会随 CSV 进入知识库。
+
+    窗口从 30 天放宽到 90 天: 安静股票的老帖会长期停留在最新 feed 里,
+    窗口太窄就会周期性重复入库。
     """
     cutoff = int(time.time()) - window_days * 86400
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """SELECT c.post_id FROM comments c
-               JOIN crawl_snapshots cs ON c.snapshot_id = cs.id
+            """SELECT DISTINCT json_extract(p.value, '$.post_id')
+               FROM crawl_snapshots cs, json_each(cs.posts_data) p
                WHERE cs.stock_code = ? AND cs.crawl_time > ?""",
             (stock_code, cutoff)
         ).fetchall()
-        return {r[0] for r in rows}
+        return {r[0] for r in rows if r[0]}
 
 
 def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float) -> None:
-    """记录本次爬取时间和帖子最新时间"""
+    """记录本次爬取时间和帖子最新时间。
+
+    2026-09-14 修: last_post_time 只许前进不许后退。
+    原实现直接 `last_post_time = excluded.last_post_time`，而"本次抓到的最大帖子
+    时间"只在**本次抓到的帖子**里取——若这一批的最新帖比上次更早(同一天短时间
+    内重复抓取时很常见)，水位会**倒退**，下一轮把已处理过的时间区间又当成新帖。
+    """
     now = time.time()
     with _connect(db_path) as conn:
         conn.execute(
@@ -557,6 +591,6 @@ def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float)
                VALUES (?, ?, ?)
                ON CONFLICT(stock_code) DO UPDATE SET
                last_crawl_time=excluded.last_crawl_time,
-               last_post_time=excluded.last_post_time""",
+               last_post_time=MAX(xueqiu_monitor_meta.last_post_time, excluded.last_post_time)""",
             (stock_code, now, last_post_time)
         )

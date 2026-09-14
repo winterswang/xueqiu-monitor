@@ -180,7 +180,11 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                             "type": "discussion",
                             "post_id": item.get("url", "") or item.get("id", ""),
                             "title": (item.get("text", "") or "")[:100],
-                            "content": (item.get("text", "") or "")[:500],
+                            # opencli adapter now returns full text (was card
+                            # summary ~230 chars). Keep posts up to 8000 chars
+                            # in DB; export_csv.py applies its own
+                            # CONTENT_MAX_CHARS cap when writing CSV.
+                            "content": (item.get("text", "") or "")[:8000],
                             "link": item.get("url", ""),
                             "author": item.get("author", ""),
                             "time": item.get("created_at", ""),
@@ -774,7 +778,11 @@ def _parse_post_time(time_str: str, now: float) -> float:
         target = now_dt.replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
-        return target.timestamp()
+        # 2026-09-14 修: 未来钳制。"MM-DD HH:MM" 分支本来就有这个保护, "HH:MM"
+        # 没有 —— 一个标注为今天、但时刻晚于抓取时刻的帖子, 会把增量水位
+        # (last_post_time)写到未来, 之后该窗口内的帖子全被判成旧帖而跳过。
+        ts = target.timestamp()
+        return min(ts, now)
 
     # ISO 8601: "YYYY-MM-DDTHH:MM:SS.fffZ" (opencli / xueqiu API native format)
     # Matches: 2026-08-12T04:57:37.000Z, 2026-08-12T04:57:37Z, 2026-08-12T12:57:37+08:00
@@ -789,11 +797,16 @@ def _parse_post_time(time_str: str, now: float) -> float:
         # "today window" filtering lines up with the other time formats.
         try:
             if m.group(7) is None:
+                # 无时区后缀 → 按北京时间解释, 但必须转成**绝对时刻**。
+                # 2026-09-14 修: 原来是无 tzinfo 的 naive datetime 直接 .timestamp(),
+                # 等于"把北京墙上时间当本地时间" —— 宿主 TZ=UTC 时整体偏 +8 小时
+                # (帖子时间变成未来 → 增量水位跳到未来 → 后续帖子全被判为旧帖)。
                 y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
-                return datetime(y, mo, d, h, mi, s).timestamp()
+                return datetime(y, mo, d, h, mi, s,
+                                tzinfo=timezone(timedelta(hours=8))).timestamp()
+            # 带 Z / ±HH:MM 后缀 → 本身就是绝对时刻, 直接取, 不经本地时区
             dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-            beijing = dt.astimezone(timezone(timedelta(hours=8)))
-            return beijing.replace(tzinfo=None).timestamp()
+            return dt.timestamp()
         except ValueError:
             return 0.0
 

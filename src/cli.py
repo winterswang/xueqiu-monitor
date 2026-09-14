@@ -173,13 +173,18 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
     
             # ── Store announcements ──
+            # ann_date 必须用**公告自身的发布时间**, 不是抓取时刻(2026-09-14 修)。
+            # 原来写 time.time(), 于是"这条公告是哪天发的"这个信息彻底丢失:
+            # 下游按日期筛"今日新公告"时, 只能拿到"今天第一次见到的标题",
+            # 而重复公告又因唯一索引永远进不来 —— 公告信号实际是断的。
             anns_list: list[Announcement] = []
             for ann in cr.get("announcements", []):
+                real_ts = crawler._parse_post_time(ann.get("time") or "", time.time())
                 anns_list.append(Announcement(
                     snapshot_id=snapshot_id,
                     stock_code=stock_code,
                     ann_title=ann.get("title", ""),
-                    ann_date=int(time.time()),
+                    ann_date=int(real_ts) if real_ts else int(time.time()),
                     ann_type=ann.get("notice_type", ""),
                     ann_link=ann.get("link", ""),
                     is_new=0,

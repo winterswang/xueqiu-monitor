@@ -163,4 +163,8 @@ CREATE INDEX IF NOT EXISTS idx_comments_snap  ON comments(snapshot_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_post  ON comments(post_id);
 
 CREATE INDEX IF NOT EXISTS idx_ann_snapshot ON announcements(snapshot_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title   ON announcements(stock_code, ann_title);
+-- 2026-09-14 修: 唯一键加上 ann_date。原来只有 (stock_code, ann_title),
+-- 导致每只股票的每个公告标题**一辈子只能存一行**: 同一家公司反复发的同类公告
+-- (如"月度经营数据""股份回购进展")全部被 INSERT OR IGNORE 丢弃 ——
+-- 实测 9/13 每只股票抓到 50 条公告、当天新增 0 行, 公告信号实际是断的。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title_date ON announcements(stock_code, ann_title, ann_date);
