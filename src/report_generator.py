@@ -272,6 +272,46 @@ def fetch_stock_alerts(
         conn.close()
 
 
+_ALERT_LABELS = {
+    "post_spike": "讨论量激增",
+    "hot_word_surge": "热词飙升",
+    "sentiment_shift": "情感突变",
+    "new_announcement": "新公告",
+}
+
+
+def _alert_summary(alert: dict) -> str:
+    """告警 detail → 一句可读摘要 (逐股 prompt 与今日要点候选共用).
+
+    2026-09-20 修: 此前只渲染裸英文类型名 + z 值 (like "hot_word_surge
+    z=20.62"), 信息量为零 —— 要点节 LLM 只能写出"关键词热度异常飙升, 需
+    排查潜在催化"这种没内容的句子 (实测 9/19 日报首条)。现在把 detail 里的
+    关键事实带出来: 哪个热词飙升 / 多少帖 vs 均值 / 情感从多少变到多少。
+    """
+    d = alert.get("detail") or {}
+    t = alert.get("type") or ""
+
+    def num(v, fmt: str = "{:.2f}") -> str:
+        return fmt.format(v) if isinstance(v, (int, float)) else "?"
+
+    if t == "hot_word_surge" and d.get("word"):
+        return (
+            f"热词「{d['word']}」飙升 (TF-IDF {num(d.get('curr_tfidf'), '{:.1f}')}"
+            f" vs 14日均值 {num(d.get('hist_mean'), '{:.1f}')})"
+        )
+    if t == "post_spike":
+        return (
+            f"讨论量激增 ({d.get('curr_count')} 帖 vs 历史均值 "
+            f"{num(d.get('historical_mean'), '{:.1f}')})"
+        )
+    if t == "sentiment_shift":
+        return (
+            f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
+            f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
+        )
+    return d.get("title") or _ALERT_LABELS.get(t, t)
+
+
 def fetch_stock_announcements(
     db_path: str, stock_code: str, date_str: str, limit: int = 10
 ) -> list[dict]:
@@ -654,7 +694,8 @@ def _build_analysis_prompt(
     # Format alerts
     if alerts:
         alert_text = "\n".join(
-            f"- {a['type']} z={a['z_score']} (P{a['priority']})" for a in alerts
+            f"- {_alert_summary(a)} z={a['z_score']} (P{a['priority']})"
+            for a in alerts
         )
     else:
         alert_text = "无显著异常信号"
@@ -1077,6 +1118,16 @@ def write_summary(output_dir: Path, date_str: str, data: dict) -> None:
     )
 
 
+def _as_block(section: str) -> str:
+    """小节结尾补足空行 (LLM 输出常不留尾空行).
+
+    组装用 "".join(sections), 缺空行时下一节的 #### 标题会紧贴上一节的
+    最后一行 —— CommonMark 允许标题打断段落, 但 IMA/微信类渲染器不一定,
+    2026-09-20 日报实测有 33 处这种粘连。
+    """
+    return section.rstrip() + "\n\n"
+
+
 def _sentiment_delta(today_weighted: float, prev: Optional[dict], code: str) -> Optional[float]:
     """今日加权 vs 昨日加权 (v2 summary 基准). 无昨日数据返回 None."""
     if not prev:
@@ -1206,9 +1257,9 @@ def _build_highlights_section(
 
     candidates: list[str] = []
     for a in fetch_day_alerts(db_path, date_str):
-        title = a["detail"].get("title") or a["type"]
         candidates.append(
-            f"- [告警P{a['priority'][1]}] {_name(a['stock_code'])}: {title} (z={a['z_score']})"
+            f"- [告警P{a['priority'][1]}] {_name(a['stock_code'])}: "
+            f"{_alert_summary(a)} (z={a['z_score']})"
         )
     conn = _connect(db_path)
     try:
@@ -1590,10 +1641,10 @@ def generate_daily_report(
     n_deep, n_std, n_flat = len(deep_codes), len(std_codes), len(flat_rows) + len(flat_full)
     stock_md = ["## 三、个股深读\n"]
     for c in deep_codes + std_codes:
-        stock_md.append(results[c]["section"])
+        stock_md.append(_as_block(results[c]["section"]))
     if flat_full:
         stock_md.append("\n### 其他今日有增量的股票\n")
-        stock_md.extend(flat_full)
+        stock_md.extend(_as_block(sec) for sec in flat_full)
     if flat_rows:
         stock_md.append("\n### 平稳股（无新增量，仅读数）\n")
         stock_md.extend(flat_rows)

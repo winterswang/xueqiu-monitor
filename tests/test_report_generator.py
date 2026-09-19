@@ -144,7 +144,23 @@ class TestBuildPrompt:
         assert "TEST.US" in prompt
         assert "0.1" in prompt
         assert "上升" in prompt
-        assert "hot_word_surge" in prompt
+        # 2026-09-20: 告警渲染成人话 (热词飙升 + 具体词), 不再输出裸英文类型名
+        assert "热词飙升" in prompt
+
+    def test_prompt_alert_carries_hot_word(self):
+        """热词告警必须把具体词带进 prompt (否则 LLM 只能写空话)."""
+        posts = [{"title": "测试帖子", "content": "内容", "author": "A",
+                  "like_count": 0, "forward_count": 0, "comment_count": 0,
+                  "link": "", "time": ""}]
+        trend = {"has_trend": True, "today_mean": 0.1, "avg_mean": 0.05,
+                 "avg_std": 0.02, "trend": "上升", "days": 7}
+        alerts = [{"type": "hot_word_surge", "priority": "P1", "z_score": 4.5,
+                   "detail": {"word": "gemini", "curr_tfidf": 2.6,
+                              "hist_mean": 1.1}}]
+        prompt = rg._build_analysis_prompt(
+            "测试股", "TEST.US", posts, trend, alerts, ["财报"]
+        )
+        assert "gemini" in prompt
         assert "财报" in prompt
         assert "今日新增" in prompt  # v2 deep 档五段
         assert "多空交锋" in prompt
@@ -699,3 +715,39 @@ class TestTakeawayExtraction:
         import re as _re
         m = _re.search(r"最有价值观点[^\n]*\n+\s*`?⭐\s*([^\n`]{8,200})`?", text)
         assert m is None
+
+
+class TestAlertSummary:
+    """告警 detail → 人话摘要 (2026-09-20: 此前只有裸英文类型名)."""
+
+    def test_hot_word_surge_names_the_word(self):
+        out = rg._alert_summary({
+            "type": "hot_word_surge",
+            "detail": {"word": "gemini", "curr_tfidf": 2.6657, "hist_mean": 1.1009},
+        })
+        assert "gemini" in out and "2.7" in out and "1.1" in out
+
+    def test_post_spike_carries_counts(self):
+        out = rg._alert_summary({
+            "type": "post_spike",
+            "detail": {"curr_count": 31, "historical_mean": 4.9},
+        })
+        assert "31" in out and "4.9" in out
+
+    def test_sentiment_shift_carries_both_sides(self):
+        out = rg._alert_summary({
+            "type": "sentiment_shift",
+            "detail": {"curr_sentiment": -0.35, "prev_snapshot_sentiment": 0.4},
+        })
+        assert "-0.35" in out and "+0.40" in out
+
+    def test_announcement_uses_title(self):
+        out = rg._alert_summary({
+            "type": "new_announcement", "detail": {"title": "完成配售新H股"},
+        })
+        assert out == "完成配售新H股"
+
+    def test_missing_detail_degrades_gracefully(self):
+        assert rg._alert_summary({"type": "post_spike", "detail": {}}) != ""
+        assert rg._alert_summary({"type": "unknown_kind", "detail": {}}) == "unknown_kind"
+
