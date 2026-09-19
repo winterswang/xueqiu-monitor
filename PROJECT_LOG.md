@@ -293,3 +293,28 @@ cron (07:00)
   与停写 posts_data 留双写观察期后
 - Phase 5 工程卫生: 截断参数收敛 config(content_caps/max_posts_by_tier),
   concurrency 3→5, requirements 补 openai
+
+### v2 详情层成本优化 (2026-09-20, 承接用户"少花 reader 的钱"诉求)
+- 通道全本地化, 智谱 reader 从主通道降为兜底 (当日实测: news 56 条
+  零 API 调用, 公告 PDF 全本地解析):
+  - 公告 PDF (A股巨潮/港股雪球托管) → urllib 直下 + pymupdf 本地解析,
+    零 API 成本; 此前"巨潮乱码"证实是 reader 服务端解析问题, 本地不存在;
+    中期/年度报告自动跳过封面+目录页 (否则 8000 字上限被目录吃光)
+  - news 网页 → opencli 本地浏览器 (selector 精确容器优先, 实测 8 篇
+    并行 17s, 取到的正文比 reader 全页输出干净); 按线程分配独立会话,
+    并发抓取不再互相顶掉 tab
+  - 美股公告 → SEC EDGAR 公开 API 直连 (curl 子进程: Python urllib 到
+    sec.gov 的 TLS 在本机不稳; UA 需带真实邮箱, 否则 403), 仅
+    6-K/8-K/10-K/10-Q/20-F/40-F 拉全文, 顺带剥 inline-XBRL 机器事实块
+  - 原文彻底拿不到时才付费搜标题拿"新闻解读" (降级产物标注来源)
+- 修复当日复盘发现的三处缺陷:
+  - 公告任务 SQL 漏选 stock_code → IndexError, 整轮详情补全失败
+  - classify_announcement 只认中文关键词, 美股 6-K/20-F 全被归为 other,
+    SEC EDGAR 通道实际收不到任务
+  - 时效闸只认新浪 URL 日期形态, 东财「相关推荐」的几个月前旧闻
+    (/a/YYYYMMDD...html, 实测最旧 159 天) 全部漏网; 补东财/同花顺形态后
+    当日详情任务 111 → 56 条
+- 质量闸: 404/跳转占位页 (新浪 404 会 5 秒后跳首页, 首页 body 是 2 万字
+  菜单堆) 与 Chrome 连接错误页一律弃用; 单条抓取异常不再拖垮整批
+- 观测: 详情抓取日志现在带通道名 (cache / pdf_local / opencli / reader),
+  grep "[detail] reader" 即可核对当日付费调用数

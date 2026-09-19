@@ -1358,10 +1358,11 @@ def enrich_details(
 ) -> tuple[dict[str, dict[str, str]], int, int]:
     """详情补全 (v2 Phase 2): news 全文 + 高权重公告详情, 供 LLM 深度分析。
 
-    - news: 当日并集 → filter_news_posts 三道闸(时效/噪音/限量) → 智谱 reader
-      抓全文 (detail_fetch_log 当日缓存, 失败标记防重试)
-    - 公告: classify_announcement=='high' 且有 http 链接 → reader 抓详情
-      (巨潮乱码自动降级标题搜索), 结果持久化到 announcements.ann_detail
+    - news: 当日并集 → filter_news_posts 三道闸(时效/噪音/限量) → opencli
+      本地浏览器抓全文 (零 API 成本; 详见 detail_fetcher 模块注释),
+      detail_fetch_log 当日缓存, 失败标记防重试
+    - 公告: classify_announcement=='high' 且有 http 链接 → 本地 PDF 解析 /
+      SEC EDGAR / 均失败则标题搜索, 结果持久化到 announcements.ann_detail
     - 并发 detail.concurrency (默认 5); 单条失败不阻塞 —— 全程 try 守护,
       enrich 失败绝不影响日报生成。
 
@@ -1393,7 +1394,7 @@ def enrich_details(
     conn = _connect(db_path)
     try:
         ann_rows = conn.execute(
-            """SELECT a.id, a.ann_title, a.ann_link, a.ann_detail
+            """SELECT a.id, a.ann_title, a.ann_link, a.ann_detail, a.stock_code
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
                WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
@@ -1401,15 +1402,16 @@ def enrich_details(
         ).fetchall()
     finally:
         conn.close()
-    ann_tasks: list[tuple[int, str, str]] = []  # (ann_id, title, link)
+    ann_tasks: list[tuple[int, str, str, str]] = []  # (ann_id, title, link, code)
     for r in ann_rows:
         title, link = r["ann_title"], (r["ann_link"] or "").strip()
         if r["ann_detail"]:
             continue  # 已有详情(当日已抓或历史)
         if detail_fetcher.classify_announcement(title) != "high":
             continue
+        # 美股列表页链接 (xueqiu.com/S/) 也接受 —— EDGAR 分支按 title 定位
         if link.startswith("http"):
-            ann_tasks.append((r["id"], title, link))
+            ann_tasks.append((r["id"], title, link, r["stock_code"]))
 
     logger.info(
         f"  详情任务: news {len(news_tasks)} 条 + 高权重公告 {len(ann_tasks)} 条"
@@ -1417,12 +1419,22 @@ def enrich_details(
 
     def _fetch_news(task: tuple[str, str]) -> tuple[str, str, str]:
         code, link = task
-        d = detail_fetcher.fetch_detail_cached(db_path, link)
+        try:
+            d = detail_fetcher.fetch_detail_cached(db_path, link)
+        except Exception as e:  # 单条失败不拖垮其余任务 (pool.map 会整体抛出)
+            logger.warning(f"[detail] news 抓取异常 {link[:60]}: {e}")
+            return code, link, ""
         return code, link, d["content"] if d["status"] == "ok" else ""
 
-    def _fetch_ann(task: tuple[int, str, str]) -> tuple[int, str]:
-        ann_id, title, link = task
-        return ann_id, detail_fetcher.fetch_announcement_detail(db_path, link, title)
+    def _fetch_ann(task: tuple[int, str, str, str]) -> tuple[int, str]:
+        ann_id, title, link, code = task
+        try:
+            return ann_id, detail_fetcher.fetch_announcement_detail(
+                db_path, link, title, stock_code=code
+            )
+        except Exception as e:
+            logger.warning(f"[detail] 公告抓取异常 {link[:60]}: {e}")
+            return ann_id, ""
 
     news_details: dict[str, dict[str, str]] = {}
     n_news = n_ann = 0
