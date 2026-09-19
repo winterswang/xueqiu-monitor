@@ -98,6 +98,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         logger.info("[migrate] added column ann_link to announcements")
 
+    # v2 Phase 2 (2026-09-20): ann_detail stores announcement full-text /
+    # search-fallback context fetched by detail_fetcher; detail_fetch_log
+    # caches per-link fetch results (status incl. failure marks).
+    if not any(c[1] == "ann_detail" for c in ann_cols):
+        conn.execute(
+            "ALTER TABLE announcements ADD COLUMN ann_detail TEXT NOT NULL DEFAULT ''"
+        )
+        logger.info("[migrate] added column ann_detail to announcements")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS detail_fetch_log (
+            link       TEXT PRIMARY KEY,
+            status     TEXT    NOT NULL,
+            title      TEXT    NOT NULL DEFAULT '',
+            content    TEXT    NOT NULL DEFAULT '',
+            fetched_at INTEGER NOT NULL
+        )"""
+    )
+
     # v0.7 F4: purge generic/noise words from hot_word_dict. Before v0.7 the
     # storage path stored every TF-IDF token without the alert path's stopword
     # filter, polluting the dict with words like ai/市场/这个/就是. This removes
@@ -593,6 +611,49 @@ def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
             {"title": r["ann_title"], "time": str(r["ann_date"]), "notice_type": r["ann_type"], "link": r["ann_link"]}
             for r in rows
         ]
+
+
+def set_ann_detail(db_path: str, ann_id: int, detail: str) -> None:
+    """Persist fetched announcement detail (v2 Phase 2). Idempotent overwrite."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE announcements SET ann_detail=? WHERE id=?", (detail, ann_id)
+        )
+
+
+# ════════════════════════════════════════════════════════
+# detail_fetch_log (v2 Phase 2)
+# ════════════════════════════════════════════════════════
+
+def get_detail_fetch(db_path: str, link: str) -> dict | None:
+    """当日有效的详情抓取缓存; 跨日返回 None (公告解读允许次日更新)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status, title, content, fetched_at FROM detail_fetch_log WHERE link=?",
+            (link,)
+        ).fetchone()
+        if not row:
+            return None
+        if int(row["fetched_at"]) < time.time() - 86400:
+            return None
+        return {
+            "status": row["status"], "title": row["title"], "content": row["content"]
+        }
+
+
+def insert_detail_fetch(
+    db_path: str, link: str, status: str, title: str, content: str
+) -> None:
+    """Upsert a fetch-log row (failure marks included — no same-day retry)."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO detail_fetch_log (link, status, title, content, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(link) DO UPDATE SET
+                 status=excluded.status, title=excluded.title,
+                 content=excluded.content, fetched_at=excluded.fetched_at""",
+            (link, status, title, content, int(time.time()))
+        )
 
 
 def get_recent_announcement_alerts(

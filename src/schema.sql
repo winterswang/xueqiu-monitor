@@ -109,7 +109,19 @@ CREATE TABLE IF NOT EXISTS announcements (
     ann_type    TEXT    NOT NULL DEFAULT '',
     ann_link    TEXT    NOT NULL DEFAULT '',
     is_new      INTEGER NOT NULL DEFAULT 1,
+    ann_detail  TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (snapshot_id) REFERENCES crawl_snapshots(id)
+);
+
+-- 11. detail_fetch_log — 详情抓取缓存 (v2 Phase 2, 2026-09-20)
+-- news/公告正文按 link 幂等缓存, status 含失败标记 (error/garbled) 防当日反复重试;
+-- 当日缓存次日过期 (get 侧按 fetched_at 过滤), 跨日公告解读允许更新。
+CREATE TABLE IF NOT EXISTS detail_fetch_log (
+    link       TEXT PRIMARY KEY,
+    status     TEXT    NOT NULL,
+    title      TEXT    NOT NULL DEFAULT '',
+    content    TEXT    NOT NULL DEFAULT '',
+    fetched_at INTEGER NOT NULL
 );
 
 -- 9. xueqiu_monitor_meta — 增量爬取元数据

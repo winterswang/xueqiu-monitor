@@ -275,7 +275,7 @@ def fetch_stock_announcements(
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            """SELECT a.ann_title, a.ann_type, a.ann_link, s.crawl_time
+            """SELECT a.id, a.ann_title, a.ann_type, a.ann_link, a.ann_detail, s.crawl_time
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
                WHERE a.stock_code=?
@@ -285,9 +285,11 @@ def fetch_stock_announcements(
         ).fetchall()
         return [
             {
+                "id": r["id"],
                 "title": r["ann_title"],
                 "notice_type": r["ann_type"],
                 "link": r["ann_link"],
+                "detail": r["ann_detail"] or "",
                 "time": str(r["crawl_time"]),
             }
             for r in rows
@@ -551,6 +553,7 @@ def _build_analysis_prompt(
     streaks: Optional[list] = None,
     announcements: Optional[list[dict]] = None,
     scope: str = "今日",
+    news_details: Optional[dict[str, str]] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -561,7 +564,12 @@ def _build_analysis_prompt(
         scope: Time-window label, e.g. "今日" or "近7日" (fallback
             window). Injected into section titles so the LLM does not
             claim "today" when analyzing a multi-day window.
+        news_details: {link: full_text} for news posts enriched by
+            enrich_details (v2 Phase 2) — replaces the ~110-char sina
+            snippet with the article body so the LLM reasons over the
+            actual content instead of a headline.
     """
+    news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
     kol_names = _load_kol_whitelist()
     posts_text = ""
@@ -572,9 +580,14 @@ def _build_analysis_prompt(
         author = p.get("author", "") or ""
         kol_tag = " ⭐KOL" if author in kol_names else ""
         time_str = p.get("time", "") or "时间未知"
+        body = p["content"]
+        # news 详情注入: 有全文的 news 用全文替换摘要 (v2 Phase 2)
+        detail = news_details.get(p.get("link") or "")
+        if detail:
+            body = f"【全文】{detail[:5000]}"
         posts_text += (
             f"\n---\n[{i}] {author}{kol_tag} | 🕐{time_str} | ({engagement})\n"
-            f"{p['title']}\n{p['content']}\n"
+            f"{p['title']}\n{body}\n"
         )
         if i >= 100:  # safety cap
             posts_text += f"\n...（共 {len(posts)} 帖，已截取前 100 帖）\n"
@@ -615,13 +628,23 @@ def _build_analysis_prompt(
     else:
         alert_text = "无显著异常信号"
 
-    # Format announcements (official filings with detail-page URLs)
+    # Format announcements (official filings with detail-page URLs).
+    # v2 Phase 2: 高权重公告排前; 有详情(ann_detail)的附正文/解读,
+    # 例行披露(翌日披露/督导等)只留标题 —— LLM 素材信源分级。
     if announcements:
+        from .detail_fetcher import classify_announcement
+
+        def _ann_rank(a: dict) -> int:
+            return 0 if classify_announcement(a.get("title", "")) == "high" else 1
+
         ann_parts = []
-        for a in announcements:
+        for a in sorted(announcements, key=_ann_rank):
             link = a.get("link", "")
             link_md = f" [🔗]({link})" if link else ""
-            ann_parts.append(f"- {a['title']}{link_md}")
+            line = f"- {a['title']}{link_md}"
+            if a.get("detail"):
+                line += f"\n  详情: {a['detail'][:5000]}"
+            ann_parts.append(line)
         ann_text = "\n".join(ann_parts)
     else:
         ann_text = "今日无新公告"
@@ -718,14 +741,17 @@ def analyze_stock(
     db_path: str,
     date_str: str,
     config: dict,
+    news_details: Optional[dict[str, str]] = None,
 ) -> str:
     """Run LLM analysis for a single stock. Returns Markdown section.
 
     Post-count calibers surfaced in the section header:
     - 分析帖数: posts surviving fetch_stock_posts filtering (LLM input)
-    - 快照帖数: raw size of the latest snapshot (what the market
-      thermometer shows) — the two numbers legitimately differ
-      (P0-1: replies/short-posts/non-current posts are filtered out).
+    - 当日帖数: day-union dedup count (thermometer caliber) — the two
+      legitimately differ (replies/short-posts filtered out).
+
+    news_details (v2 Phase 2): {link: full_text} enriched news bodies;
+    announcements with fetched detail are pulled via fetch_stock_announcements.
 
     When the day-1 window is empty, retries with a
     FALLBACK_MAX_AGE_DAYS-day window and labels the section accordingly.
@@ -776,7 +802,7 @@ def analyze_stock(
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
         yesterday=yesterday, streaks=streaks, announcements=announcements,
-        scope=scope,
+        scope=scope, news_details=news_details,
     )
 
     logger.info(
@@ -873,6 +899,93 @@ def _group_by_sector(stocks_cfg: dict) -> dict:
     return sectors
 
 
+def enrich_details(
+    db_path: str, date_str: str, config: dict
+) -> tuple[dict[str, dict[str, str]], int, int]:
+    """详情补全 (v2 Phase 2): news 全文 + 高权重公告详情, 供 LLM 深度分析。
+
+    - news: 当日并集 → filter_news_posts 三道闸(时效/噪音/限量) → 智谱 reader
+      抓全文 (detail_fetch_log 当日缓存, 失败标记防重试)
+    - 公告: classify_announcement=='high' 且有 http 链接 → reader 抓详情
+      (巨潮乱码自动降级标题搜索), 结果持久化到 announcements.ann_detail
+    - 并发 detail.concurrency (默认 5); 单条失败不阻塞 —— 全程 try 守护,
+      enrich 失败绝不影响日报生成。
+
+    Returns: ({stock_code: {link: full_text}}, n_news, n_ann)
+    """
+    from . import detail_fetcher
+
+    detail_cfg = config.get("detail", {})
+    concurrency = int(detail_cfg.get("concurrency", 5))
+    news_limit = int(detail_cfg.get("news_per_stock", 5))
+    # 确保迁移到位 (ann_detail 列 / detail_fetch_log 表; 幂等)
+    db.init_db(db_path)
+    union = db.fetch_day_posts_union(db_path, date_str)
+
+    # ── news 任务收集 (过滤闸后) ──
+    news_tasks: list[tuple[str, str]] = []  # (stock_code, link)
+    for code, posts in union.items():
+        news_posts = [p for p in posts if (p.get("type") or "") == "news"]
+        if not news_posts:
+            continue
+        for p in detail_fetcher.filter_news_posts(
+            news_posts, date_str, per_stock_limit=news_limit
+        ):
+            link = (p.get("link") or "").strip()
+            if link.startswith("http"):
+                news_tasks.append((code, link))
+
+    # ── 公告任务收集 (高权重 + 无详情 + 有链接) ──
+    conn = _connect(db_path)
+    try:
+        ann_rows = conn.execute(
+            """SELECT a.id, a.ann_title, a.ann_link, a.ann_detail
+               FROM announcements a
+               JOIN crawl_snapshots s ON a.snapshot_id = s.id
+               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+            (date_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+    ann_tasks: list[tuple[int, str, str]] = []  # (ann_id, title, link)
+    for r in ann_rows:
+        title, link = r["ann_title"], (r["ann_link"] or "").strip()
+        if r["ann_detail"]:
+            continue  # 已有详情(当日已抓或历史)
+        if detail_fetcher.classify_announcement(title) != "high":
+            continue
+        if link.startswith("http"):
+            ann_tasks.append((r["id"], title, link))
+
+    logger.info(
+        f"  详情任务: news {len(news_tasks)} 条 + 高权重公告 {len(ann_tasks)} 条"
+    )
+
+    def _fetch_news(task: tuple[str, str]) -> tuple[str, str, str]:
+        code, link = task
+        d = detail_fetcher.fetch_detail_cached(db_path, link)
+        return code, link, d["content"] if d["status"] == "ok" else ""
+
+    def _fetch_ann(task: tuple[int, str, str]) -> tuple[int, str]:
+        ann_id, title, link = task
+        return ann_id, detail_fetcher.fetch_announcement_detail(db_path, link, title)
+
+    news_details: dict[str, dict[str, str]] = {}
+    n_news = n_ann = 0
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        for code, link, content in pool.map(_fetch_news, news_tasks):
+            if content:
+                news_details.setdefault(code, {})[link] = content
+                n_news += 1
+        for ann_id, detail in pool.map(_fetch_ann, ann_tasks):
+            if detail:
+                db.set_ann_detail(db_path, ann_id, detail)
+                n_ann += 1
+
+    logger.info(f"  详情补全完成: news 全文 {n_news} 条, 公告详情 {n_ann} 条")
+    return news_details, n_news, n_ann
+
+
 def generate_daily_report(
     config_path: str = "etc/config.report.json",
     date_str: Optional[str] = None,
@@ -898,6 +1011,16 @@ def generate_daily_report(
     thermometer = fetch_market_thermometer(db_path, date_str)
     thermo_md = _build_thermometer_section(thermometer, stocks_cfg)
 
+    # ── Section 1.5: Detail enrichment (v2 Phase 2, 2026-09-20) ──
+    # news 全文 + 高权重公告详情; 失败不阻塞日报 (只影响素材深度)
+    news_details: dict[str, dict[str, str]] = {}
+    if cfg.get("detail", {}).get("enabled", True):
+        logger.info("[1.5/3] 详情补全 (news 全文 + 高权重公告详情)...")
+        try:
+            news_details, _, _ = enrich_details(db_path, date_str, cfg)
+        except Exception as e:
+            logger.error(f"详情补全失败(不阻塞日报): {e}")
+
     # ── Section 2: Per-stock analysis (LLM) ──
     logger.info("[2/3] 逐股票 LLM 分析...")
     sectors = _group_by_sector(stocks_cfg)
@@ -915,6 +1038,7 @@ def generate_daily_report(
                 db_path,
                 date_str,
                 cfg,
+                news_details.get(code),
             )
             futures[future] = code
 

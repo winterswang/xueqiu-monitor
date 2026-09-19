@@ -333,9 +333,13 @@ class TestPipelineE2E:
         try:
             summary = cli.run_pipeline(config_path, dry_run=True)
             print(f"\nCold start summary: {json.dumps(summary, ensure_ascii=False)}")
-            # With cold_start=28 and no historical data, all alerts should be P2
+            # With cold_start=28 and no historical data, all statistical
+            # alerts should be P2. Exception (v2 Phase 2, 2026-09-20):
+            # high-value announcements (年度报告 in the fixture) are
+            # deterministic facts, not statistical inferences — they stay
+            # P1 through cold start instead of being suppressed.
             assert summary["p0"] == 0
-            assert summary["p1"] == 0
+            assert summary["p1"] == 1
         finally:
             os.unlink(config_path)
 
