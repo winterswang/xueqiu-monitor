@@ -94,6 +94,7 @@ def fetch_stock_posts(
     date_str: str,
     min_length: int = 30,
     max_age_days: int = 1,
+    content_caps: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """Fetch recent posts for a stock, filtered from the day-union of snapshots.
 
@@ -116,7 +117,14 @@ def fetch_stock_posts(
 
     Sort: newest first (by timestamp), ties broken by engagement desc.
     Posts with unknown time sort last, ordered by engagement.
+
+    content_caps: 按帖类型的正文截断上限 (v2 Phase 5 从硬编码 2000 收敛);
+    默认 {"discussion": 3000, "article": 3000, "news": 5000} —— news
+    详情注入后信息密度高, 配额更大。
     """
+    caps = {"discussion": 3000, "article": 3000, "news": 5000}
+    if content_caps:
+        caps.update(content_caps)
     union = db.fetch_day_posts_union(db_path, date_str, stock_code)
     posts = union.get(stock_code)
     if not posts:
@@ -158,7 +166,8 @@ def fetch_stock_posts(
         filtered.append(
             {
                 "title": title,
-                "content": content[:2000],  # cap per-post length
+                # v2 Phase 5: 分类型截断 (discussion 3000 / news 详情 5000)
+                "content": content[: caps.get(p.get("type") or "discussion", 3000)],
                 "author": p.get("author", ""),
                 "like_count": p.get("like_count", 0),
                 "forward_count": p.get("forward_count", 0),
@@ -555,6 +564,7 @@ def _build_analysis_prompt(
     scope: str = "今日",
     news_details: Optional[dict[str, str]] = None,
     tier: str = "deep",
+    max_posts: Optional[int] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -575,6 +585,9 @@ def _build_analysis_prompt(
     news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
     kol_names = _load_kol_whitelist()
+    # v2 Phase 5: 帖上限按档位 (deep 100 / std+flat 40); 调用方可覆盖
+    if max_posts is None:
+        max_posts = 100 if tier == TIER_DEEP else 40
     posts_text = ""
     for i, p in enumerate(posts, 1):
         engagement = (
@@ -592,8 +605,8 @@ def _build_analysis_prompt(
             f"\n---\n[{i}] {author}{kol_tag} | 🕐{time_str} | ({engagement})\n"
             f"{p['title']}\n{body}\n"
         )
-        if i >= 100:  # safety cap
-            posts_text += f"\n...（共 {len(posts)} 帖，已截取前 100 帖）\n"
+        if i >= max_posts:  # safety cap, tier-scaled (v2 Phase 5)
+            posts_text += f"\n...（共 {len(posts)} 帖，已截取前 {max_posts} 帖）\n"
             break
 
     # Format trend
@@ -791,9 +804,13 @@ def analyze_stock(
     FALLBACK_MAX_AGE_DAYS-day window and labels the section accordingly.
     """
     min_len = config.get("llm", {}).get("min_post_length", 30)
+    content_caps = config.get("llm", {}).get("content_caps")
     day_count = fetch_day_post_count(db_path, stock_code, date_str)
 
-    posts = fetch_stock_posts(db_path, stock_code, date_str, min_length=min_len)
+    posts = fetch_stock_posts(
+        db_path, stock_code, date_str, min_length=min_len,
+        content_caps=content_caps,
+    )
 
     scope = "今日"
     if not posts:
@@ -844,6 +861,9 @@ def analyze_stock(
         stock_name, stock_code, posts, trend, alerts, hot_words,
         yesterday=yesterday, streaks=streaks, announcements=announcements,
         scope=scope, news_details=news_details, tier=tier,
+        max_posts=(
+            config.get("llm", {}).get("max_posts_by_tier", {}).get(tier)
+        ),
     )
 
     logger.info(

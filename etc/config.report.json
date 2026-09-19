@@ -169,15 +169,29 @@
   },
   "llm": {
     "model": "minimax-m3",
-    "concurrency": 3,
+    "concurrency": 5,
     "max_posts_per_stock": 0,
     "min_post_length": 30,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "content_caps": {
+      "discussion": 3000,
+      "article": 3000,
+      "news": 5000
+    },
+    "max_posts_by_tier": {
+      "deep": 100,
+      "std": 40,
+      "flat": 40
+    }
   },
   "detail": {
     "enabled": true,
     "concurrency": 5,
     "news_per_stock": 5
+  },
+  "tier": {
+    "deep_engagement": 100,
+    "std_min_posts": 3
   },
   "ima": {
     "folder_name": "自选股舆情日报",
