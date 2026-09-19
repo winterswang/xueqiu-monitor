@@ -127,8 +127,11 @@ python -m src.cli -c etc/config.json -v
 # 仅爬取不推送
 python -m src.cli -c etc/config.json --dry-run
 
-# 仅生成日报（从已有数据）
-python -m src.cli -c etc/config.json --report
+# 仅生成日报（v2，从已有数据；写入 data/daily_reports/YYYY-MM-DD-sentiment.md）
+python -m src.report_generator etc/config.report.json
+
+# 推送日报到 IMA 笔记（日报生成为独立步骤，需显式调用）
+python scripts/publish_ima.py --report data/daily_reports/$(date +%F)-sentiment.md
 
 # 单独爬取一支股票
 python -c "from src.crawler import crawl_single_stock; r = crawl_single_stock('600519.SH', timeout=1200); print(r['posts_count'])"
