@@ -377,6 +377,25 @@ def _analyze_group(
 # News keyword matching
 # ════════════════════════════════════════════════════════
 
+def score_news_post(title: str, content: str = "") -> float:
+    """Keyword-based news sentiment for a single headline (0 LLM cost).
+
+    Public wrapper over the same _BULLISH_PAT/_BEARISH_PAT logic used by
+    _analyze_news, so out-of-band news merges (cli.py opencli news merge)
+    get identical scoring to the in-pipeline path. 2026-09-20: previously
+    the merge path hardcoded sentiment_score=0.0, silently diluting the
+    thermometer's weighted average.
+    """
+    text = (title or "") + " " + (content or "")[:100]
+    bull = bool(_BULLISH_PAT.search(text))
+    bear = bool(_BEARISH_PAT.search(text))
+    if bull and not bear:
+        return 0.5
+    if bear and not bull:
+        return -0.5
+    return 0.0  # mixed or no signal → neutral
+
+
 def _analyze_news(
     posts: list[dict],
     idxs: list[int],
