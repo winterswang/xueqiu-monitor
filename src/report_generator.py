@@ -22,6 +22,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from . import db
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,24 +77,15 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def fetch_snapshot_post_count(db_path: str, stock_code: str, date_str: str) -> int:
-    """Latest-snapshot raw post count for a stock on a given date.
+def fetch_day_post_count(db_path: str, stock_code: str, date_str: str) -> int:
+    """Deduplicated day-union post count for a stock (thermometer caliber).
 
-    This is the same number the market thermometer shows (snapshot size
-    before any filtering). Surfaced next to the filtered count in
-    per-stock headers so readers can tell the two calibers apart.
+    2026-09-20 修: 此前取当日最新快照的 posts_count, 增量爬取语义下一天多轮
+    爬取时早间帖子不在最新快照里, 计数失真且可能被 100/次 的抓取上限截断
+    出假象。改为当日全部快照并集去重后的真实帖数, 与温度计口径一致。
     """
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            """SELECT posts_count FROM crawl_snapshots
-               WHERE stock_code=? AND date(crawl_time,'unixepoch','localtime')=?
-               ORDER BY crawl_time DESC LIMIT 1""",
-            (stock_code, date_str),
-        ).fetchone()
-        return int(row["posts_count"]) if row else 0
-    finally:
-        conn.close()
+    union = db.fetch_day_posts_union(db_path, date_str, stock_code)
+    return len(union.get(stock_code, []))
 
 
 def fetch_stock_posts(
@@ -102,7 +95,7 @@ def fetch_stock_posts(
     min_length: int = 30,
     max_age_days: int = 1,
 ) -> list[dict]:
-    """Fetch recent posts for a stock, filtered from the latest snapshot.
+    """Fetch recent posts for a stock, filtered from the day-union of snapshots.
 
     The snapshot from 雪球 is a mixed stream of latest posts + historical
     hot posts. This function filters to keep only posts authored within
@@ -110,6 +103,10 @@ def fetch_stock_posts(
     so the LLM analyzes recent discussion instead of rehashing old
     high-engagement posts. Default ``max_age_days=1`` means posts
     authored on ``date_str`` only (the classic daily-report behavior).
+
+    2026-09-20 修: 数据源从"当日最新一个快照"改为"当日全部快照并集(去重)"
+    —— 增量爬取下每个快照只含水位后的新帖, 只读最新快照会丢当天早间的帖子
+    (export_csv 2026-09-14 修过同款, 实测 9/13 单日丢 197 帖)。
 
     Filters out:
     - Reply posts ("回复@" prefix in title)
@@ -120,84 +117,72 @@ def fetch_stock_posts(
     Sort: newest first (by timestamp), ties broken by engagement desc.
     Posts with unknown time sort last, ordered by engagement.
     """
-    conn = _connect(db_path)
-    try:
-        # Get the latest snapshot for this stock on this date
-        row = conn.execute(
-            """SELECT posts_data FROM crawl_snapshots
-               WHERE stock_code=? AND date(crawl_time,'unixepoch','localtime')=?
-               ORDER BY crawl_time DESC LIMIT 1""",
-            (stock_code, date_str),
-        ).fetchone()
+    union = db.fetch_day_posts_union(db_path, date_str, stock_code)
+    posts = union.get(stock_code)
+    if not posts:
+        return []
 
-        if not row or not row["posts_data"]:
-            return []
+    # Compute the [window_start, day_end) window: max_age_days days
+    # back from date_str, inclusive of date_str itself (local time).
+    target_date = datetime.strptime(date_str, "%Y-%m-%d")
+    day_end = int((target_date + timedelta(days=1)).timestamp())
+    window_start = int(
+        (target_date - timedelta(days=max_age_days - 1)).timestamp()
+    )
 
-        posts = json.loads(row["posts_data"])
+    # Lazy import to avoid a module-load-time circular dependency
+    from .crawler import _parse_post_time
 
-        # Compute the [window_start, day_end) window: max_age_days days
-        # back from date_str, inclusive of date_str itself (local time).
-        target_date = datetime.strptime(date_str, "%Y-%m-%d")
-        day_end = int((target_date + timedelta(days=1)).timestamp())
-        window_start = int(
-            (target_date - timedelta(days=max_age_days - 1)).timestamp()
+    now = time.time()
+
+    filtered = []
+    for p in posts:
+        title = (p.get("title") or "")[:200]
+        content = p.get("content") or ""
+        # Skip reply posts (both "回复@" and "回复 @" prefixes appear in
+        # xueqiu data; the spaced form is the common one and was leaking
+        # into the report as top engagement items)
+        if title.startswith("回复@") or title.startswith("回复 @"):
+            continue
+        # Skip very short posts
+        full_text = f"{title} {content}".strip()
+        if len(full_text) < min_length:
+            continue
+        # Filter out posts authored outside the lookback window.
+        # Fail-open: unparseable time (ts == 0) is kept, so missing
+        # time data never blanks out a stock's entire feed.
+        post_time_str = p.get("time", "")
+        post_ts = _parse_post_time(post_time_str, now)
+        if post_ts > 0 and not (window_start <= post_ts < day_end):
+            continue
+        filtered.append(
+            {
+                "title": title,
+                "content": content[:2000],  # cap per-post length
+                "author": p.get("author", ""),
+                "like_count": p.get("like_count", 0),
+                "forward_count": p.get("forward_count", 0),
+                "comment_count": p.get("comment_count", 0),
+                "link": p.get("link", ""),
+                "time": post_time_str,
+                "_ts": post_ts,  # internal sort key, stripped before return
+            }
         )
-
-        # Lazy import to avoid a module-load-time circular dependency
-        from .crawler import _parse_post_time
-
-        now = time.time()
-
-        filtered = []
-        for p in posts:
-            title = (p.get("title") or "")[:200]
-            content = p.get("content") or ""
-            # Skip reply posts (both "回复@" and "回复 @" prefixes appear in
-            # xueqiu data; the spaced form is the common one and was leaking
-            # into the report as top engagement items)
-            if title.startswith("回复@") or title.startswith("回复 @"):
-                continue
-            # Skip very short posts
-            full_text = f"{title} {content}".strip()
-            if len(full_text) < min_length:
-                continue
-            # Filter out posts authored outside the lookback window.
-            # Fail-open: unparseable time (ts == 0) is kept, so missing
-            # time data never blanks out a stock's entire feed.
-            post_time_str = p.get("time", "")
-            post_ts = _parse_post_time(post_time_str, now)
-            if post_ts > 0 and not (window_start <= post_ts < day_end):
-                continue
-            filtered.append(
-                {
-                    "title": title,
-                    "content": content[:2000],  # cap per-post length
-                    "author": p.get("author", ""),
-                    "like_count": p.get("like_count", 0),
-                    "forward_count": p.get("forward_count", 0),
-                    "comment_count": p.get("comment_count", 0),
-                    "link": p.get("link", ""),
-                    "time": post_time_str,
-                    "_ts": post_ts,  # internal sort key, stripped before return
-                }
-            )
-        # Sort: engagement desc first (primary), timestamp desc second.
-        # This makes high-interaction posts land first in the LLM input,
-        # instead of burying them behind a wall of zero-engagement posts
-        # (v0.7.5, note lever 2 - the "dan bin" miss was caused by reading
-        # posts in pure time order). Unknown-time posts (ts=0) sink to the end.
-        filtered.sort(key=lambda p: p["_ts"], reverse=True)
-        filtered.sort(
-            key=lambda p: p["like_count"]
-            + p["forward_count"]
-            + p["comment_count"],
-            reverse=True,
-        )
-        for p in filtered:
-            p.pop("_ts", None)
-        return filtered
-    finally:
-        conn.close()
+    # Sort: engagement desc first (primary), timestamp desc second.
+    # This makes high-interaction posts land first in the LLM input,
+    # instead of burying them behind a wall of zero-engagement posts
+    # (v0.7.5, note lever 2 - the "dan bin" miss was caused by reading
+    # posts in pure time order). Unknown-time posts (ts=0) sink to the end.
+    filtered.sort(key=lambda p: p["_ts"], reverse=True)
+    filtered.sort(
+        key=lambda p: p["like_count"]
+        + p["forward_count"]
+        + p["comment_count"],
+        reverse=True,
+    )
+    for p in filtered:
+        p.pop("_ts", None)
+    return filtered
 
 
 def fetch_sentiment_trend(
@@ -434,48 +419,66 @@ def fetch_yesterday_summary(
 def fetch_market_thermometer(db_path: str, date_str: str) -> list[dict]:
     """Fetch sentiment overview for all stocks on a given date.
 
-    Uses the LATEST crawl snapshot per stock (P0-fix: the previous
-    GROUP BY picked an arbitrary snapshot when a stock was crawled
-    multiple times in one day, making thermometer numbers unstable
-    - e.g. PDD 2026-06-08 showed 0 posts while the latest snapshot
-    had 97).
+    2026-09-20 修: 改用当日全部快照并集(db.fetch_day_posts_union), 情感与
+    帖数均按并集重算 —— 此前只取当日 MAX(id) 快照, 增量爬取语义下一天多轮
+    爬取时早间帖子丢失, 温度计读数只反映最后一次爬取批次(且受 100/次抓取
+    上限截断)。单快照日数值与旧实现一致(并集=该快照)。
 
     Returns one dict per stock:
-      stock_code, posts (snapshot raw count), sentiment (equal-weight
+      stock_code, posts (day-union dedup count), sentiment (equal-weight
       avg), sentiment_weighted (interaction-weighted avg, see
       _weighted_sentiment), weighted_diff (weighted - equal).
     """
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            """SELECT s.stock_code, s.posts_count, s.sentiment_avg, s.posts_data
-               FROM crawl_snapshots s
-               WHERE s.id IN (
-                   SELECT MAX(id) FROM crawl_snapshots
-                   WHERE date(crawl_time,'unixepoch','localtime')=?
-                   GROUP BY stock_code
-               )
-               ORDER BY s.sentiment_avg DESC""",
-            (date_str,),
-        ).fetchall()
-        result = []
-        for r in rows:
-            equal = float(r["sentiment_avg"] or 0.0)
-            weighted, posts_used = _weighted_sentiment(r["posts_data"])
-            if weighted is None:
-                # No usable per-post data -> fall back to snapshot average
-                weighted = equal
-            result.append({
-                "stock_code": r["stock_code"],
-                "posts": r["posts_count"],
-                "sentiment": round(equal, 3),
-                "sentiment_weighted": round(weighted, 3),
-                "weighted_diff": round(weighted - equal, 3),
-                "posts_used": posts_used,
-            })
-        return result
-    finally:
-        conn.close()
+    union = db.fetch_day_posts_union(db_path, date_str)
+    result = []
+    for code, posts in union.items():
+        equal, weighted, used = _sentiment_aggregates(posts)
+        if weighted is None:
+            # No usable per-post data -> fall back to equal weight
+            weighted = equal if equal is not None else 0.0
+        if equal is None:
+            equal = 0.0
+        result.append({
+            "stock_code": code,
+            "posts": len(posts),
+            "sentiment": round(equal, 3),
+            "sentiment_weighted": round(weighted, 3),
+            "weighted_diff": round(weighted - equal, 3),
+            "posts_used": used,
+        })
+    result.sort(key=lambda x: x["sentiment"], reverse=True)
+    return result
+
+
+def _sentiment_aggregates(posts: list[dict]) -> tuple[float | None, float | None, int]:
+    """Equal-weight & interaction-weighted sentiment over a post list.
+
+    Weight = like_count + comment_count + forward_count + 1 (Laplace
+    floor so zero-engagement posts still count once). Posts without a
+    usable sentiment_score are skipped. Returns (equal, weighted, used);
+    equal/weighted are None when no post has a score.
+    """
+    if not posts:
+        return None, None, 0
+    scores: list[tuple[float, float]] = []  # (score, weight)
+    for p in posts:
+        s = p.get("sentiment_score")
+        if s is None:
+            continue
+        try:
+            s = float(s)
+        except (TypeError, ValueError):
+            continue
+        w = float(p.get("like_count", 0) or 0) + float(
+            p.get("comment_count", 0) or 0
+        ) + float(p.get("forward_count", 0) or 0) + 1.0
+        scores.append((s, w))
+    if not scores:
+        return None, None, 0
+    total_w = sum(w for _, w in scores)
+    equal = sum(s for s, _ in scores) / len(scores)
+    weighted = sum(s * w for s, w in scores) / total_w if total_w > 0 else None
+    return equal, weighted, len(scores)
 
 
 def _weighted_sentiment(posts_data: str | None) -> tuple[float | None, int]:
@@ -728,7 +731,7 @@ def analyze_stock(
     FALLBACK_MAX_AGE_DAYS-day window and labels the section accordingly.
     """
     min_len = config.get("llm", {}).get("min_post_length", 30)
-    snapshot_count = fetch_snapshot_post_count(db_path, stock_code, date_str)
+    day_count = fetch_day_post_count(db_path, stock_code, date_str)
 
     posts = fetch_stock_posts(db_path, stock_code, date_str, min_length=min_len)
 
@@ -744,13 +747,13 @@ def analyze_stock(
         if posts:
             scope = f"近{FALLBACK_MAX_AGE_DAYS}日"
             logger.info(
-                f"  {stock_code}: 当日0帖（快照{snapshot_count}），"
+                f"  {stock_code}: 当日0帖（并集{day_count}），"
                 f"回退{FALLBACK_MAX_AGE_DAYS}日窗口得{len(posts)}帖"
             )
 
     caliber = (
         f"- 分析帖数: {len(posts)}（{scope}窗口，过滤回复/短帖后） | "
-        f"快照帖数: {snapshot_count}（温度计口径）"
+        f"当日帖数: {day_count}（并集去重，温度计口径）"
     )
 
     if not posts:

@@ -236,6 +236,59 @@ def get_previous_snapshot(db_path: str, stock_code: str, before_time: int) -> Cr
         return CrawlSnapshot.from_row(row) if row else None
 
 
+def fetch_day_posts_union(
+    db_path: str,
+    date_str: str,
+    stock_code: str | None = None,
+) -> dict[str, list[dict]]:
+    """当日全部快照的帖子并集，按 (post_id→link 兜底) 去重。
+
+    2026-09-20 修: 日报/温度计此前只读当日最新一个快照, 而 crawl_single_stock
+    会把每个快照裁成"仅比上次水位更新的帖子" —— 一天多轮爬取时, 早间帖子
+    从最新快照里消失, 日报直接丢帖 (export_csv 2026-09-14 修过同款问题,
+    实测 9/13 当天 8 只股票被抓 2-3 次, 197 条已入库帖子丢进 CSV 之外,
+    日报路径同样受影响)。
+
+    去重保留 crawl_time 最新快照的副本 (互动数单调递增, 相对时间串最新鲜),
+    与 export_csv 的先见先留语义一致。post_id 与 link 都为空的帖子不参与
+    去重, 全部保留 (过不了下游 min_length 过滤的天然少数)。
+
+    Returns: {stock_code: [post dict, ...]}
+    """
+    q = (
+        "SELECT stock_code, posts_data FROM crawl_snapshots "
+        "WHERE date(crawl_time,'unixepoch','localtime')=? "
+    )
+    params: list = [date_str]
+    if stock_code:
+        q += "AND stock_code=? "
+        params.append(stock_code)
+    # crawl_time DESC + id DESC: 先见 = 最新快照的副本胜出
+    q += "ORDER BY stock_code, crawl_time DESC, id DESC"
+
+    result: dict[str, list[dict]] = {}
+    seen: dict[str, set[str]] = {}
+    with _connect(db_path) as conn:
+        for row in conn.execute(q, params).fetchall():
+            code = row["stock_code"]
+            if not row["posts_data"]:
+                continue
+            try:
+                posts = json.loads(row["posts_data"])
+            except (ValueError, TypeError):
+                continue
+            bucket = result.setdefault(code, [])
+            keys = seen.setdefault(code, set())
+            for p in posts:
+                key = (p.get("post_id") or "").strip() or (p.get("link") or "").strip()
+                if key:
+                    if key in keys:
+                        continue
+                    keys.add(key)
+                bucket.append(p)
+    return result
+
+
 # ════════════════════════════════════════════════════════
 # sentiment_stats
 # ════════════════════════════════════════════════════════

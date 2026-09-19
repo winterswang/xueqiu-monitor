@@ -286,7 +286,7 @@ class TestAnalyzeStockNoPosts:
         result = rg.analyze_stock("NOEXIST.US", "不存在", str(tmp_db.path), tmp_db.date_str, config)
         assert "无帖子数据" in result
         assert "分析帖数: 0" in result
-        assert "快照帖数: 0" in result
+        assert "当日帖数: 0" in result  # 2026-09-20 改并集口径
 
 
 # ════════════════════════════════════════════════════════
@@ -362,8 +362,8 @@ class TestAnalyzeStockFallback:
         tmp_db.insert_snapshot("TEST.HK", posts)
         config = {"llm": {"min_post_length": 5}}
         result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
-        # Snapshot has 3 posts, only 1 survives filtering
-        assert "快照帖数: 3" in result
+        # Day-union has 3 posts (single snapshot), only 1 survives filtering
+        assert "当日帖数: 3" in result  # 2026-09-20 改并集口径
         assert "分析帖数: 1" in result
         assert "温度计口径" in result
 
@@ -423,6 +423,78 @@ class TestPromptScope:
 
 
 # ════════════════════════════════════════════════════════
+# Day-union semantics (2026-09-20 修: 一天多快照并集去重)
+# ════════════════════════════════════════════════════════
+
+
+class TestFetchDayPostsUnion:
+    """db.fetch_day_posts_union: 当日全部快照并集 + post_id/link 去重."""
+
+    def test_multi_snapshot_union_no_loss(self, tmp_db):
+        """两个不相交快照 → 并集全部保留 (修复: 只读最新快照会丢早间帖)."""
+        now = int(time.time())
+        tmp_db.insert_snapshot("A.HK", [
+            {"post_id": "p1", "title": "早间帖", "content": "x"},
+        ], ts=now - 3600)
+        tmp_db.insert_snapshot("A.HK", [
+            {"post_id": "p2", "title": "午后帖", "content": "y"},
+        ], ts=now - 60)
+        union = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str, "A.HK")
+        assert len(union["A.HK"]) == 2
+
+    def test_dup_keeps_latest_snapshot_copy(self, tmp_db):
+        """同 post_id 出现在两个快照 → 保留最新快照的副本 (互动数更新)."""
+        now = int(time.time())
+        tmp_db.insert_snapshot("A.HK", [
+            {"post_id": "p1", "title": "同帖", "content": "x", "like_count": 3},
+        ], ts=now - 3600)
+        tmp_db.insert_snapshot("A.HK", [
+            {"post_id": "p1", "title": "同帖", "content": "x", "like_count": 99},
+        ], ts=now - 60)
+        union = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str, "A.HK")
+        assert len(union["A.HK"]) == 1
+        assert union["A.HK"][0]["like_count"] == 99
+
+    def test_link_fallback_dedup(self, tmp_db):
+        """post_id 为空时用 link 去重."""
+        tmp_db.insert_snapshot("A.HK", [{"link": "https://x/1", "title": "a", "content": "x"}])
+        tmp_db.insert_snapshot("A.HK", [{"link": "https://x/1", "title": "a", "content": "x"}])
+        union = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str, "A.HK")
+        assert len(union["A.HK"]) == 1
+
+    def test_empty_key_posts_all_kept(self, tmp_db):
+        """post_id 与 link 都为空 → 不去重, 全部保留 (天然过不了下游过滤)."""
+        tmp_db.insert_snapshot("A.HK", [{"title": "无ID帖", "content": "x"}, {"title": "无ID帖2", "content": "y"}])
+        union = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str, "A.HK")
+        assert len(union["A.HK"]) == 2
+
+    def test_stock_filter_and_cross_stock(self, tmp_db):
+        """stock_code 过滤生效; 不传则返回全部股票."""
+        tmp_db.insert_snapshot("A.HK", [{"post_id": "p1", "title": "a", "content": "x"}])
+        tmp_db.insert_snapshot("B.HK", [{"post_id": "p2", "title": "b", "content": "y"}])
+        only_a = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str, "A.HK")
+        assert list(only_a.keys()) == ["A.HK"]
+        both = rg.db.fetch_day_posts_union(str(tmp_db.path), tmp_db.date_str)
+        assert set(both.keys()) == {"A.HK", "B.HK"}
+
+    def test_single_snapshot_day_thermometer_matches(self, tmp_db):
+        """单快照日: 温度计并集口径 == 快照原值 (回归锚点)."""
+        posts = [
+            {"post_id": "p1", "title": "a", "content": "x", "sentiment_score": 0.6,
+             "like_count": 3, "comment_count": 1, "forward_count": 0},
+            {"post_id": "p2", "title": "b", "content": "y", "sentiment_score": -0.2,
+             "like_count": 0, "comment_count": 0, "forward_count": 0},
+        ]
+        tmp_db.insert_snapshot("A.HK", posts)
+        thermo = rg.fetch_market_thermometer(str(tmp_db.path), tmp_db.date_str)
+        assert len(thermo) == 1
+        assert thermo[0]["posts"] == 2
+        # equal = (0.6 + -0.2)/2 = 0.2; weighted = (0.6*5 + -0.2*1)/6 = 0.4667
+        assert thermo[0]["sentiment"] == pytest.approx(0.2, abs=1e-3)
+        assert thermo[0]["sentiment_weighted"] == pytest.approx(0.4667, abs=1e-3)
+
+
+# ════════════════════════════════════════════════════════
 # Fixtures
 # ════════════════════════════════════════════════════════
 
@@ -438,10 +510,11 @@ class TmpDB:
         from src import db as dbmod
         dbmod.init_db(str(self.path))
 
-    def insert_snapshot(self, stock_code: str, posts: list[dict]):
+    def insert_snapshot(self, stock_code: str, posts: list[dict], ts: int | None = None):
         """Insert a crawl snapshot with posts_data."""
         import json
-        ts = int(time.time())
+        if ts is None:
+            ts = int(time.time())
         self.conn.execute(
             """INSERT INTO crawl_snapshots
                (stock_code, crawl_time, posts_count, posts_data, sentiment_avg, status)
