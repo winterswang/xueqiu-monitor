@@ -146,10 +146,11 @@ class TestBuildPrompt:
         assert "上升" in prompt
         assert "hot_word_surge" in prompt
         assert "财报" in prompt
-        assert "讨论焦点" in prompt
-        assert "多空分歧" in prompt
-        assert "风险提示" in prompt
-        assert "情感解读" in prompt
+        assert "今日新增" in prompt  # v2 deep 档五段
+        assert "多空交锋" in prompt
+        assert "值得关注的判断" in prompt
+        assert "新增风险" in prompt
+        assert "情感读数" in prompt
 
     def test_prompt_includes_post_time(self):
         """Prompt must surface each post's time so LLM can tell new from old."""
@@ -203,7 +204,7 @@ class TestBuildPrompt:
                                            streaks=streaks)
         assert "连续5天" in prompt
         assert "🆕新增" in prompt
-        assert "话题连续性" in prompt
+        assert "今日新增" in prompt  # v2: 持续/新增由 🆕段承接
 
     def test_prompt_handles_missing_yesterday(self):
         """Prompt shows 'no data' when yesterday context absent."""
@@ -284,9 +285,11 @@ class TestAnalyzeStockNoPosts:
         """Empty posts → graceful 'no data' message with dual calibers."""
         config = {"llm": {"min_post_length": 30}}
         result = rg.analyze_stock("NOEXIST.US", "不存在", str(tmp_db.path), tmp_db.date_str, config)
-        assert "无帖子数据" in result
-        assert "分析帖数: 0" in result
-        assert "当日帖数: 0" in result  # 2026-09-20 改并集口径
+        section = result["section"]  # v2: 返回 {section, tier, takeaway}
+        assert result["tier"] == rg.TIER_FLAT
+        assert "无帖子数据" in section
+        assert "分析帖数: 0" in section
+        assert "当日帖数: 0" in section  # 2026-09-20 改并集口径
 
 
 # ════════════════════════════════════════════════════════
@@ -336,9 +339,10 @@ class TestAnalyzeStockFallback:
         tmp_db.insert_snapshot("TEST.HK", posts)
         config = {"llm": {"min_post_length": 30}}
         result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
-        assert "无帖子数据" not in result
-        assert "近7日" in result
-        assert "分析帖数: 1" in result
+        section = result["section"]  # v2: 返回 {section, tier, takeaway}
+        assert "无帖子数据" not in section
+        assert "近7日" in section
+        assert "分析帖数: 1" in section
 
     def test_fallback_not_triggered_when_today_has_posts(self, tmp_db):
         """Today's posts present → scope stays 今日, old post excluded."""
@@ -349,8 +353,9 @@ class TestAnalyzeStockFallback:
         tmp_db.insert_snapshot("TEST.HK", posts)
         config = {"llm": {"min_post_length": 10}}
         result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
-        assert "近7日" not in result
-        assert "分析帖数: 1" in result
+        section = result["section"]
+        assert "近7日" not in section
+        assert "分析帖数: 1" in section
 
     def test_snapshot_count_surfaced_in_header(self, tmp_db):
         """Dual calibers: snapshot size vs filtered count both in header (P0-1)."""
@@ -362,10 +367,11 @@ class TestAnalyzeStockFallback:
         tmp_db.insert_snapshot("TEST.HK", posts)
         config = {"llm": {"min_post_length": 5}}
         result = rg.analyze_stock("TEST.HK", "测试股", str(tmp_db.path), tmp_db.date_str, config)
+        section = result["section"]
         # Day-union has 3 posts (single snapshot), only 1 survives filtering
-        assert "当日帖数: 3" in result  # 2026-09-20 改并集口径
-        assert "分析帖数: 1" in result
-        assert "温度计口径" in result
+        assert "当日帖数: 3" in section  # 2026-09-20 改并集口径
+        assert "分析帖数: 1" in section
+        assert "温度计口径" in section
 
 
 class TestNormalizeLlmHeadings:
@@ -408,7 +414,7 @@ class TestPromptScope:
         )
         assert "近7日的雪球讨论" in prompt
         assert "近7日讨论帖" in prompt
-        assert "近7日核心讨论观点" in prompt
+        assert "近7日新增" in prompt  # v2 deep 档
         # New formatting rules must be present
         assert "严禁" in prompt
         assert "4 个 #" in prompt
@@ -637,3 +643,59 @@ class TestAnnouncementUrlPassthrough:
             announcements=[],
         )
         assert "今日无新公告" in prompt
+
+
+# ════════════════════════════════════════════════════════
+# v2 增量分档 (2026-09-20)
+# ════════════════════════════════════════════════════════
+
+
+class TestClassifyStockTier:
+    """三档判定: KOL/告警/高权重公告硬通道, 互动量/帖数规则."""
+
+    def test_kol_post_forces_deep(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(rg, "_load_kol_whitelist", lambda: {"但斌"})
+        posts = [{"title": "t", "content": "c", "author": "但斌"}]
+        tier = rg.classify_stock_tier("A.HK", posts, [], [], {})
+        assert tier == rg.TIER_DEEP
+
+    def test_p1_alert_forces_deep(self):
+        posts = [{"title": "t", "content": "c", "author": "路人"}]
+        alerts = [{"type": "hot_word_surge", "priority": "P1", "z_score": 3.0, "detail": {}}]
+        assert rg.classify_stock_tier("A.HK", posts, alerts, [], {}) == rg.TIER_DEEP
+
+    def test_high_value_announcement_forces_deep(self):
+        posts = [{"title": "t", "content": "c", "author": "路人"}]
+        anns = [{"title": "2026年中期报告"}]
+        assert rg.classify_stock_tier("A.HK", posts, [], anns, {}) == rg.TIER_DEEP
+
+    def test_engagement_threshold_deep(self):
+        posts = [
+            {"title": "t", "content": "c", "author": "x",
+             "like_count": 40, "comment_count": 10, "forward_count": 0}
+            for _ in range(3)
+        ]
+        assert rg.classify_stock_tier("A.HK", posts, [], [], {}) == rg.TIER_DEEP
+
+    def test_std_and_flat(self):
+        std_posts = [{"title": "t", "content": "c", "author": "x"}] * 3
+        assert rg.classify_stock_tier("A.HK", std_posts, [], [], {}) == rg.TIER_STD
+        few = [{"title": "t", "content": "c", "author": "x"}]
+        assert rg.classify_stock_tier("A.HK", few, [], [], {}) == rg.TIER_FLAT
+
+
+class TestTakeawayExtraction:
+    """⭐最有价值观点 精确锚定提取 (修复残缺片段)."""
+
+    def test_extracts_after_marker(self):
+        text = "##### 情感读数\n读数内容\n\n**⭐最有价值观点：**\n`⭐ [SK海力士] 存储周期顶部论 [31]`"
+        # 模拟 analyze_stock 内部逻辑
+        import re as _re
+        m = _re.search(r"最有价值观点[^\n]*\n+\s*`?⭐\s*([^\n`]{8,200})`?", text)
+        assert m and "存储周期顶部论" in m.group(1)
+
+    def test_ignores_body_star(self):
+        text = "正文提到 ⭐KOL 某人发言很长一段没有标记行"
+        import re as _re
+        m = _re.search(r"最有价值观点[^\n]*\n+\s*`?⭐\s*([^\n`]{8,200})`?", text)
+        assert m is None

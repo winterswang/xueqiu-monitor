@@ -554,6 +554,7 @@ def _build_analysis_prompt(
     announcements: Optional[list[dict]] = None,
     scope: str = "今日",
     news_details: Optional[dict[str, str]] = None,
+    tier: str = "deep",
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -568,6 +569,8 @@ def _build_analysis_prompt(
             enrich_details (v2 Phase 2) — replaces the ~110-char sina
             snippet with the article body so the LLM reasons over the
             actual content instead of a headline.
+        tier: v2 增量档位 (deep/std/flat) — 只切换输出指令模板,
+            不决定是否分析 (全部股票照常调用)。
     """
     news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
@@ -680,25 +683,56 @@ def _build_analysis_prompt(
 {posts_text}
 
 ---
+{_tier_instructions(tier, scope)}"""
 
-请输出结构化分析（Markdown 格式），包含以下五个部分：
 
-### 讨论焦点
-提炼 3-5 条{scope}核心讨论观点（每条一句话概括，附代表性帖子编号）
+def _tier_instructions(tier: str, scope: str) -> str:
+    """按档位返回输出指令模板 (v2: 档位决定呈现, 不决定是否分析).
 
-### 多空分歧
-看多 vs 看空的主要论据（如分歧不明显则说明）
+    - deep (深读): 新五段, 增量优先 —— 🆕新增/交锋/判断/风险/读数,
+      并要求单列"⭐最有价值观点"供全场要点节挑选
+    - std (标准): 只写主线新进展一段 —— 延续型讨论不重复展开
+    - flat (平稳): 低流量指令 —— 无增量时允许输出一行结论
+    """
+    if tier == TIER_STD:
+        return f"""请输出（Markdown 格式）：
 
-### 风险提示
-帖子中提到的关键风险（如无则标注"暂无明显风险讨论"）
+### 主线新进展
+{scope}讨论属于既有主线的延续。用 2-3 句说明**{scope}有何新进展/新论据/新角度**（附帖子编号）。不要重复背景介绍，不要罗列存量观点。
 
-### 话题连续性
-区分以下两类内容（如全部为新增则说明"{scope}无持续叙事"）：
-- **📊 持续叙事**：与昨日/近期重复的话题，简要标注已持续天数，重点说**{scope}有何新进展或新角度**
-- **🆕 {scope}新增**：昨日未出现的新话题、新事件、新观点
+### 情感读数
+一行：结合情感数据（今日分 vs 14日基准）与帖子内容总结情绪
 
-### 情感解读
-结合情感数据和帖子内容，一句话总结{scope}市场情绪
+⚠️ 格式要求：
+- 两段标题必须用 `#### `（4 个 #）开头，严禁输出更高级别标题
+- 帖子引用格式统一用 `[编号]`"""
+    if tier == TIER_FLAT:
+        return f"""{scope}帖子较少（低关注度）。请结合公告与资讯详情（如有）分析：
+
+- 若确有值得注意的新事件/新观点/新风险：用 `#### ` 标题输出简短分析（新增内容 + 情感读数，共 2-4 句）
+- 若{scope}确无增量（纯闲聊/零互动噪音）：只输出一行 `（无新增量）情感分 {scope}读数 X`，不要为了填篇幅编造内容
+
+⚠️ 帖子引用格式统一用 `[编号]`，严禁输出 `#`/`##`/`###` 级别标题"""
+    # deep (默认, 兼容旧调用)
+    return f"""请输出结构化分析（Markdown 格式），包含以下五个部分：
+
+### 🆕 {scope}新增
+{scope}新出现的事件/观点/数据（每条一句话，附帖子编号；news/公告详情中的重要信息在此引用）。若全部为既有话题延续，请明确说明"{scope}无新增，均为存量主线演进"并简述演进点。
+
+### 多空交锋
+只写{scope}有新论据的真实交锋（看多 vs 看空的新论点，附编号）；纯延续、无新论据的分歧不要重复展开。
+
+### 💡 值得关注的判断
+{scope}最有价值的观点或判断（KOL⭐/高互动帖优先），附可信度备注（样本量/互动量）。
+
+### ⚠️ 新增风险
+只列{scope}新出现的风险（旧风险不重复）。如无则写"暂无新增风险"。
+
+### 情感读数
+一行：今日情感分 vs 14日基准（含偏离幅度），结合内容一句话定性
+
+**⭐最有价值观点**（单独一行，供全场要点挑选）：
+`⭐ [股票]一句话观点（引用编号）`
 
 ⚠️ 格式要求：
 - 五个小节标题必须用 `#### `（4 个 #）开头，**严禁**输出 `#`/`##`/`###` 级别的大标题
@@ -786,11 +820,15 @@ def analyze_stock(
         logger.info(
             f"  {stock_code}: 当日及近{FALLBACK_MAX_AGE_DAYS}日均无帖，跳过"
         )
-        return (
-            f"#### {stock_code} {stock_name}\n\n"
-            f"{caliber}\n\n"
-            f"今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
-        )
+        return {
+            "section": (
+                f"#### {stock_name} [{stock_code}]\n\n"
+                f"{caliber}\n\n"
+                f"今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
+            ),
+            "tier": TIER_FLAT,
+            "takeaway": "",
+        }
 
     trend = fetch_sentiment_trend(db_path, stock_code)
     alerts = fetch_stock_alerts(db_path, stock_code, date_str)
@@ -799,14 +837,17 @@ def analyze_stock(
     streaks = fetch_hot_word_streaks(db_path, stock_code, date_str)
     announcements = fetch_stock_announcements(db_path, stock_code, date_str)
 
+    # v2 增量分档: 决定 prompt 模板与呈现格式 (全部股票照常调 LLM)
+    tier = classify_stock_tier(stock_code, posts, alerts, announcements, config)
+
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
         yesterday=yesterday, streaks=streaks, announcements=announcements,
-        scope=scope, news_details=news_details,
+        scope=scope, news_details=news_details, tier=tier,
     )
 
     logger.info(
-        f"  {stock_code}: {len(posts)}帖({scope}), "
+        f"  {stock_code}: {len(posts)}帖({scope}) 档位={tier}, "
         f"prompt={len(prompt)}字, 调用 LLM..."
     )
 
@@ -824,17 +865,39 @@ def analyze_stock(
         text = _normalize_llm_headings(response.choices[0].message.content or "")
         logger.info(f"  {stock_code}: LLM 完成 {elapsed:.1f}s, {len(text)}字")
 
-        # Build section header + LLM output
-        header = f"#### {stock_code} {stock_name}\n\n"
+        # 提取 ⭐最有价值观点 行 (deep 档, 供全场要点节挑选).
+        # 精确锚定 "最有价值观点" 标题后的反引号行 —— 宽松全局匹配会抓到
+        # 正文里的残缺片段 (2026-09-19 重跑实测: 要点节出现无头绪条目)。
+        takeaway = ""
+        m = re.search(
+            r"最有价值观点[^\n]*\n+\s*`?⭐\s*([^\n`]{8,200})`?", text
+        )
+        if m:
+            takeaway = m.group(1).strip()
+
+        # Build section header + LLM output.
+        # v2: 板块从章节级降为标注级; 档位徽标帮助读者扫读。
+        sector = config.get("_sectors", {}).get(stock_code, "")
+        sector_tag = f"（{sector}）" if sector else ""
+        tier_badge = {"deep": "🔵", "std": "📈", "flat": ""}.get(tier, "")
+        header = f"#### {tier_badge}{stock_name}{sector_tag} [{stock_code}]\n\n"
         header += f"{caliber}\n"
         header += f"- 情感分: {trend.get('today_mean', 'N/A')} | 趋势: {trend.get('trend', 'N/A')}\n\n"
-        return header + text + "\n"
+        return {
+            "section": header + text + "\n",
+            "tier": tier,
+            "takeaway": takeaway,
+        }
     except Exception as e:
         logger.error(f"  {stock_code}: LLM 调用失败: {e}")
-        return (
-            f"#### {stock_code} {stock_name}\n\n"
-            f"{caliber}\n\nLLM 分析失败: {e}\n"
-        )
+        return {
+            "section": (
+                f"#### {stock_name} [{stock_code}]\n\n"
+                f"{caliber}\n\nLLM 分析失败: {e}\n"
+            ),
+            "tier": tier,
+            "takeaway": "",
+        }
 
 
 # ════════════════════════════════════════════════════════
@@ -897,6 +960,362 @@ def _group_by_sector(stocks_cfg: dict) -> dict:
         sector = info.get("sector", "其他")
         sectors.setdefault(sector, []).append(code)
     return sectors
+
+
+# ════════════════════════════════════════════════════════
+# v2: 增量分档 / 跨日状态 / 变化温度计 (2026-09-20)
+# ════════════════════════════════════════════════════════
+
+# 档位只决定 prompt 模板与呈现格式, 不决定是否调 LLM (全部 41 只照常分析)
+TIER_DEEP = "deep"   # 深读: 新五段
+TIER_STD = "std"     # 标准: 主线新进展一段
+TIER_FLAT = "flat"   # 平稳: 低流量指令, 无增量时 LLM 自判输出一行
+
+
+def classify_stock_tier(
+    stock_code: str,
+    posts: list[dict],
+    alerts: list[dict],
+    announcements: list[dict],
+    config: dict,
+) -> str:
+    """增量判定三档 (v2). 硬通道优先, 其余按互动量/帖数.
+
+    硬通道 (任一命中 → 深读):
+    - 当日有 KOL 白名单作者帖 (kol_whitelist.json)
+    - 当日 P0/P1 告警 (z-score 异动/高权重公告)
+    - 当日高权重公告 (classify_announcement=='high')
+    规则: 当日互动总量 ≥ tier.deep_engagement (默认 100) → 深读;
+    当日帖 ≥ 3 → 标准; 其余 → 平稳.
+    """
+    from .detail_fetcher import classify_announcement
+
+    kol = _load_kol_whitelist()
+    if any((p.get("author") or "") in kol for p in posts):
+        return TIER_DEEP
+    if any(a.get("priority") in ("P0", "P1") for a in alerts):
+        return TIER_DEEP
+    if any(
+        classify_announcement(a.get("title", "")) == "high" for a in announcements
+    ):
+        return TIER_DEEP
+    engagement = sum(
+        int(p.get("like_count") or 0)
+        + int(p.get("comment_count") or 0)
+        + int(p.get("forward_count") or 0)
+        for p in posts
+    )
+    tier_cfg = config.get("tier", {})
+    if engagement >= int(tier_cfg.get("deep_engagement", 100)):
+        return TIER_DEEP
+    if len(posts) >= int(tier_cfg.get("std_min_posts", 3)):
+        return TIER_STD
+    return TIER_FLAT
+
+
+def _summary_path(output_dir: Path, date_str: str) -> Path:
+    return output_dir / f"{date_str}-summary.json"
+
+
+def load_prev_summary(
+    output_dir: Path, date_str: str, lookback_days: int = 3
+) -> Optional[dict]:
+    """读最近一份 v2 summary.json (最多回看 lookback_days 天, 断更即弃)."""
+    try:
+        base = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+    for i in range(1, lookback_days + 1):
+        p = _summary_path(output_dir, (base - timedelta(days=i)).strftime("%Y-%m-%d"))
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+    return None
+
+
+def write_summary(output_dir: Path, date_str: str, data: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _summary_path(output_dir, date_str).write_text(
+        json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+
+def _sentiment_delta(today_weighted: float, prev: Optional[dict], code: str) -> Optional[float]:
+    """今日加权 vs 昨日加权 (v2 summary 基准). 无昨日数据返回 None."""
+    if not prev:
+        return None
+    y = (prev.get("stocks") or {}).get(code, {}).get("weighted")
+    if y is None:
+        return None
+    return round(today_weighted - float(y), 3)
+
+
+def _build_thermometer_v2(
+    thermometer: list[dict],
+    prev: Optional[dict],
+    stocks_cfg: dict,
+    deep_set: set[str],
+) -> tuple[str, list[dict]]:
+    """温度计 v2: 只写变化 (全场锚点 + 转暖/转冷榜), 平稳股一行列举.
+
+    Returns (markdown, rows) — rows 带 delta 供要点节候选复用。
+    """
+    rows: list[dict] = []
+    for t in thermometer:
+        code = t["stock_code"]
+        name = stocks_cfg.get(code, {}).get("name", code)
+        delta = _sentiment_delta(t.get("sentiment_weighted", t["sentiment"]), prev, code)
+        rows.append({**t, "name": name, "delta": delta})
+
+    warming = sorted(
+        [r for r in rows if r["delta"] is not None and r["delta"] >= 0.15],
+        key=lambda r: -r["delta"],
+    )
+    cooling = sorted(
+        [r for r in rows if r["delta"] is not None and r["delta"] <= -0.15],
+        key=lambda r: r["delta"],
+    )
+    flat = [r for r in rows if r not in warming and r not in cooling]
+    has_prev = any(r["delta"] is not None for r in rows)
+
+    lines = ["## 二、市场温度计\n"]
+    if not has_prev:
+        lines.append(
+            "*首日无昨日基准，「较昨日」明日启用；当前按今日加权情感排列。*\n"
+        )
+
+    # 全场锚点
+    if rows:
+        w_vals = [r.get("sentiment_weighted", r["sentiment"]) for r in rows]
+        mkt_w = sum(w_vals) / len(w_vals)
+        most_pos = max(rows, key=lambda r: r.get("sentiment_weighted", r["sentiment"]))
+        most_neg = min(rows, key=lambda r: r.get("sentiment_weighted", r["sentiment"]))
+        lines.append(
+            f"**全场**: 加权情感 {mkt_w:+.3f} | 转暖 {len(warming)} 只 · "
+            f"转冷 {len(cooling)} 只 · 平稳 {len(flat)} 只\n"
+        )
+        lines.append(
+            f"最积极: **{most_pos['name']}**({most_pos.get('sentiment_weighted'):+.3f}) | "
+            f"最消极: **{most_neg['name']}**({most_neg.get('sentiment_weighted'):+.3f})\n"
+        )
+
+    def _table(group: list[dict], title: str) -> None:
+        if not group:
+            return
+        lines.append(f"\n### {title}\n")
+        lines.append("| 股票 | 名称 | 帖数 | 情感(加权) | 较昨日 | 深读 |")
+        lines.append("|------|------|------|-----------|--------|------|")
+        for r in group:
+            posts_disp = f"{r['posts']}+" if r["posts"] >= 100 else str(r["posts"])
+            deep_mark = "🔵" if r["stock_code"] in deep_set else ""
+            lines.append(
+                f"| {r['stock_code']} | {r['name']} | {posts_disp} | "
+                f"{r.get('sentiment_weighted', r['sentiment']):+.3f} | "
+                f"{r['delta']:+.3f} | {deep_mark} |"
+            )
+
+    _table(warming, "🔺 显著转暖（Δ加权 ≥ +0.15）")
+    _table(cooling, "🔻 显著转冷（Δ加权 ≤ -0.15）")
+
+    if flat:
+        flat_str = "、".join(
+            f"{r['name']}({r.get('sentiment_weighted', r['sentiment']):+.2f})"
+            for r in sorted(flat, key=lambda r: -r.get("sentiment_weighted", r["sentiment"]))
+        )
+        lines.append(f"\n**平稳**（无显著变化）: {flat_str}\n")
+
+    return "\n".join(lines) + "\n", rows
+
+
+def fetch_day_alerts(db_path: str, date_str: str) -> list[dict]:
+    """当日全部 P0/P1 告警 (跨股, 供要点节候选)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT stock_code, alert_type, priority, z_score, detail
+               FROM change_alert
+               WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
+               ORDER BY z_score DESC LIMIT 20""",
+            (date_str,),
+        ).fetchall()
+        return [
+            {
+                "stock_code": r["stock_code"], "type": r["alert_type"],
+                "priority": r["priority"], "z_score": round(r["z_score"], 2),
+                "detail": json.loads(r["detail"]) if r["detail"] else {},
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def _build_highlights_section(
+    db_path: str,
+    date_str: str,
+    stocks_cfg: dict,
+    thermo_rows: list[dict],
+    takeaways: list[str],
+    config: dict,
+) -> str:
+    """今日要点 (v2): 四路候选信号 → 一次 LLM 调用凝成 3-5 条; 失败规则降级.
+
+    候选来源: P0/P1 告警 / 高权重公告 / 温度计 Δ 显著变化 / KOL 最有价值观点。
+    """
+    from .detail_fetcher import classify_announcement
+
+    def _name(code: str) -> str:
+        return stocks_cfg.get(code, {}).get("name", code)
+
+    candidates: list[str] = []
+    for a in fetch_day_alerts(db_path, date_str):
+        title = a["detail"].get("title") or a["type"]
+        candidates.append(
+            f"- [告警P{a['priority'][1]}] {_name(a['stock_code'])}: {title} (z={a['z_score']})"
+        )
+    conn = _connect(db_path)
+    try:
+        ann_rows = conn.execute(
+            """SELECT a.stock_code, a.ann_title FROM announcements a
+               JOIN crawl_snapshots s ON a.snapshot_id = s.id
+               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+            (date_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for r in ann_rows:
+        if classify_announcement(r["ann_title"]) == "high":
+            candidates.append(f"- [公告] {_name(r['stock_code'])}: {r['ann_title'][:60]}")
+    for r in thermo_rows:
+        if r["delta"] is not None and abs(r["delta"]) >= 0.15:
+            arrow = "转暖" if r["delta"] > 0 else "转冷"
+            candidates.append(
+                f"- [情绪{arrow}] {r['name']}: 加权情感较昨日 {r['delta']:+.2f}"
+            )
+    for t in takeaways[:8]:
+        candidates.append(f"- [观点] {t[:120]}")
+
+    lines = ["## 一、今日要点\n"]
+    if not candidates:
+        lines.append("今日无显著异动、高权重公告或增量观点。\n")
+        return "\n".join(lines)
+
+    # 一次轻量 LLM 调用: 挑选并改写为"公司|发生了什么|为什么重要"
+    prompt = (
+        "以下是一组今日股票舆情候选信号（告警/公告/情绪变化/观点）。"
+        "请挑选 3-5 件最值得投资者关注的，每件改写为一行：**公司｜发生了什么｜为什么重要**。"
+        "优先级：重大事件告警与高权重公告 > 显著情绪反转 > 高质量观点。"
+        "不要编造候选之外的信息，保留具体数字。直接输出行列表（以 - 开头），无任何标题。\n\n"
+        + "\n".join(candidates[:30])
+    )
+    try:
+        client = _get_llm_client()
+        model = config.get("llm", {}).get("model", "minimax-m3")
+        rsp = client.chat.completions.create(
+            model=model, max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}], temperature=0.2,
+        )
+        text = (rsp.choices[0].message.content or "").strip()
+        bullets = [l for l in text.splitlines() if l.strip().startswith("-")]
+        if bullets:
+            lines.append("\n".join(bullets[:6]) + "\n")
+            return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"要点节 LLM 失败, 规则降级: {e}")
+    # 规则降级: 原样输出 top 候选
+    lines.extend(candidates[:6])
+    return "\n".join(lines) + "\n"
+
+
+def _build_mainlines_section(
+    db_path: str, date_str: str, stocks_cfg: dict, lookback_days: int = 7
+) -> str:
+    """持续主线 (v2): 跨股热词聚合表, 只列今日仍在活跃的主线.
+
+    主线 = 跨 >=2 只股票, 或单股 streak >=3 天的叙事词。
+    昨日有、今日无的主线自然不出现 (停滞主线零占位)。
+    """
+    conn = _connect(db_path)
+    try:
+        target = datetime.strptime(date_str, "%Y-%m-%d")
+        end_ts = int((target + timedelta(days=1)).timestamp())
+        start_ts = int((target - timedelta(days=lookback_days - 1)).timestamp())
+        today_rows = conn.execute(
+            """SELECT word, stock_code, MAX(tfidf_score) tf
+               FROM hot_word_event
+               WHERE date(event_time,'unixepoch','localtime')=?
+               GROUP BY word, stock_code ORDER BY tf DESC LIMIT 400""",
+            (date_str,),
+        ).fetchall()
+        hist_rows = conn.execute(
+            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') day
+               FROM hot_word_event WHERE event_time >= ? AND event_time < ?""",
+            (start_ts, end_ts),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    word_days: dict[str, set[str]] = {}
+    for r in hist_rows:
+        word_days.setdefault(r["word"], set()).add(r["day"])
+    word_stocks: dict[str, list[str]] = {}
+    word_tf: dict[str, float] = {}
+    for r in today_rows:
+        word_stocks.setdefault(r["word"], []).append(r["stock_code"])
+        word_tf[r["word"]] = max(word_tf.get(r["word"], 0), r["tf"])
+
+    # 复用热词节的个股名过滤 (股票名碎片不构成主线).
+    # 碎片判定 (2026-09-19 重跑实测增强): 词的任一 token 命中
+    # 名字 token / 代码 / 或是任一股票名的子串 → 名字碎片, 丢弃
+    # ("腾讯 控股"含"腾讯"、"sk skhy"含代码前缀); 重复二元组
+    # ("ai ai") 同样低信息, 丢弃。
+    import jieba
+    name_tokens: set[str] = set()
+    name_strings: list[str] = []
+    for code, info in stocks_cfg.items():
+        name = info.get("name", "")
+        if name:
+            name_tokens |= {t.lower() for t in jieba.cut(name) if len(t.strip()) >= 2}
+            name_strings.append(name.lower())
+        name_tokens.add(code.lower())
+        name_tokens.add(code.split(".")[0].lower())
+
+    def _is_name_fragment(word: str) -> bool:
+        tokens = [t.lower() for t in word.split() if t.strip()]
+        if len(tokens) >= 2 and len(set(tokens)) == 1:
+            return True  # "ai ai" 式重复组
+        for t in tokens:
+            if t in name_tokens:
+                return True
+            if len(t) >= 2 and any(t in nm for nm in name_strings):
+                return True
+        return False
+
+    lines = ["## 四、持续主线（今日仍在演进）\n"]
+    rows_out = []
+    for word, stocks in word_stocks.items():
+        wl = (word or "").lower().strip()
+        if not wl or len(wl) < 2 or word.isdigit():
+            continue
+        if _is_name_fragment(word):
+            continue
+        days = len(word_days.get(word, set()))
+        if len(stocks) >= 2 or days >= 3:
+            rows_out.append((word, days, stocks, word_tf[word]))
+    rows_out.sort(key=lambda x: (-len(x[2]), -x[1], -x[3]))
+    if not rows_out:
+        lines.append("今日无持续主线（均为单日新话题）。\n")
+        return "\n".join(lines)
+    lines.append("| 主线 | 活跃天数 | 关联 | 今日热度 |")
+    lines.append("|------|----------|------|----------|")
+    for word, days, stocks, tf in rows_out[:12]:
+        names = "、".join(
+            stocks_cfg.get(s, {}).get("name", s) for s in stocks[:4]
+        ) + ("…" if len(stocks) > 4 else "")
+        lines.append(f"| {word} | {days} | {names} | {tf:.1f} |")
+    return "\n".join(lines) + "\n"
 
 
 def enrich_details(
@@ -990,7 +1409,11 @@ def generate_daily_report(
     config_path: str = "etc/config.report.json",
     date_str: Optional[str] = None,
 ) -> str:
-    """Generate the full daily report and return Markdown content.
+    """Generate the full daily report (v2 format) and return Markdown.
+
+    v2 结构 (2026-09-20): 今日要点 → 温度计(只写变化) → 个股深读(按增量
+    排序, 平稳股紧凑化) → 持续主线 → 尾注。组织主轴是"今天与昨天比发生了
+    什么", 静态描述压缩, 无增量零占位。跨日状态落 {date}-summary.json。
 
     Args:
         config_path: Path to report config JSON.
@@ -1003,31 +1426,36 @@ def generate_daily_report(
     db_path = cfg["db_path"]
     stocks_cfg = cfg["stocks"]
     date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    output_dir = Path(cfg.get("report_output_dir", "data/daily_reports"))
+    prev_summary = load_prev_summary(output_dir, date_str)
 
-    logger.info(f"=== 自选股舆情日报生成开始 {date_str} ===")
+    logger.info(
+        f"=== 自选股舆情日报 v2 生成开始 {date_str} "
+        f"(昨日summary: {'有' if prev_summary else '无'}) ==="
+    )
 
-    # ── Section 1: Market thermometer (SQL only, no LLM) ──
-    logger.info("[1/3] 生成市场温度计...")
+    # 板块映射注入 config (analyze_stock 的 header 标注用, 不入配置文件)
+    cfg["_sectors"] = {
+        code: info.get("sector", "") for code, info in stocks_cfg.items()
+    }
+
+    # ── Section 2 data: Market thermometer (SQL only, no LLM) ──
+    logger.info("[1/4] 生成市场温度计数据...")
     thermometer = fetch_market_thermometer(db_path, date_str)
-    thermo_md = _build_thermometer_section(thermometer, stocks_cfg)
 
-    # ── Section 1.5: Detail enrichment (v2 Phase 2, 2026-09-20) ──
-    # news 全文 + 高权重公告详情; 失败不阻塞日报 (只影响素材深度)
+    # ── Detail enrichment (v2 Phase 2): news 全文 + 高权重公告详情 ──
     news_details: dict[str, dict[str, str]] = {}
     if cfg.get("detail", {}).get("enabled", True):
-        logger.info("[1.5/3] 详情补全 (news 全文 + 高权重公告详情)...")
+        logger.info("[1.5/4] 详情补全 (news 全文 + 高权重公告详情)...")
         try:
             news_details, _, _ = enrich_details(db_path, date_str, cfg)
         except Exception as e:
             logger.error(f"详情补全失败(不阻塞日报): {e}")
 
-    # ── Section 2: Per-stock analysis (LLM) ──
-    logger.info("[2/3] 逐股票 LLM 分析...")
-    sectors = _group_by_sector(stocks_cfg)
+    # ── Per-stock analysis (LLM, 全部股票; 档位决定呈现) ──
+    logger.info("[2/4] 逐股票 LLM 分析 (增量分档)...")
     concurrency = cfg.get("llm", {}).get("concurrency", 3)
-
-    # Build all stock analysis tasks
-    stock_results: dict[str, str] = {}
+    results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {}
         for code, info in stocks_cfg.items():
@@ -1045,43 +1473,102 @@ def generate_daily_report(
         for future in as_completed(futures):
             code = futures[future]
             try:
-                stock_results[code] = future.result()
+                results[code] = future.result()
             except Exception as e:
                 logger.error(f"  {code}: 分析异常: {e}")
-                stock_results[code] = (
-                    f"#### {code} {stocks_cfg[code]['name']}\n\n分析异常: {e}\n"
-                )
+                results[code] = {
+                    "section": (
+                        f"#### {stocks_cfg[code]['name']} [{code}]\n\n分析异常: {e}\n"
+                    ),
+                    "tier": TIER_STD,
+                    "takeaway": "",
+                }
 
-    # Assemble per-sector sections
-    sector_emojis = {
-        "消费": "🛍️",
-        "AI/科技": "🤖",
-        "互联网/游戏": "🎮",
-        "出行/酒旅": "✈️",
-        "新能源": "🔋",
-        "医疗器械": "🏥",
-        "矿业": "⛏️",
-        "航天": "🚀",
-        "其他": "📊",
-    }
-    stock_sections = ["## 二、个股深度分析\n"]
-    for sector, codes in sectors.items():
-        emoji = sector_emojis.get(sector, "📊")
-        stock_sections.append(f"\n### {emoji} {sector}\n")
-        for code in codes:
-            stock_sections.append(stock_results.get(code, f"#### {code}\n\n无数据\n"))
+    deep_set = {c for c, r in results.items() if r["tier"] == TIER_DEEP}
+    takeaways = [r["takeaway"] for r in results.values() if r.get("takeaway")]
 
-    # ── Section 3: Hot words cross-stock ──
-    logger.info("[3/3] 生成热词云...")
-    hot_words_md = _build_hot_words_section(db_path, date_str, stocks_cfg)
+    # ── Thermometer render (需要 deep_set, 故在分析后) ──
+    thermo_md, thermo_rows = _build_thermometer_v2(
+        thermometer, prev_summary, stocks_cfg, deep_set
+    )
 
-    # ── Assemble full report ──
+    # ── Section 1: 今日要点 (LLM 一次调用, 候选来自告警/公告/Δ/观点) ──
+    logger.info("[3/4] 生成今日要点...")
+    try:
+        highlights_md = _build_highlights_section(
+            db_path, date_str, stocks_cfg, thermo_rows, takeaways, cfg
+        )
+    except Exception as e:
+        logger.error(f"要点节失败(不阻塞): {e}")
+        highlights_md = "## 一、今日要点\n\n生成失败。\n"
+
+    # ── Section 4: 持续主线 ──
+    try:
+        mainlines_md = _build_mainlines_section(db_path, date_str, stocks_cfg)
+    except Exception as e:
+        logger.error(f"主线节失败(不阻塞): {e}")
+        mainlines_md = "## 四、持续主线\n\n生成失败。\n"
+
+    # ── Assemble: 深读 → 标准 → 平稳(紧凑) ──
+    deep_codes = sorted(
+        (c for c, r in results.items() if r["tier"] == TIER_DEEP),
+        key=lambda c: stocks_cfg[c].get("name", c),
+    )
+    std_codes = sorted(
+        (c for c, r in results.items() if r["tier"] == TIER_STD),
+        key=lambda c: stocks_cfg[c].get("name", c),
+    )
+    flat_rows: list[str] = []
+    flat_full: list[str] = []
+    for c, r in results.items():
+        if r["tier"] != TIER_FLAT:
+            continue
+        name = stocks_cfg.get(c, {}).get("name", c)
+        section = r["section"]
+        # section = "#### 标题\n\n- meta行...\n\n正文"。LLM 自判无增量时
+        # 正文首行以"（无新增量）"开头 → 紧凑列表; 有实质内容的保留小节。
+        # (首行判定: 早版用 body[:60] 窗口漏检 meta 行之后的正文, 全部误进
+        # 完整小节 — 2026-09-19 重跑实测修复)
+        parts = section.split("\n\n", 2)
+        body = parts[2] if len(parts) > 2 else ""
+        first_line = body.strip().splitlines()[0].strip() if body.strip() else ""
+        if first_line.startswith("（无新增量）"):
+            one_line = first_line[:90]
+            flat_rows.append(f"- **{name}** {one_line}")
+        else:
+            flat_full.append(section)
+
+    n_deep, n_std, n_flat = len(deep_codes), len(std_codes), len(flat_rows) + len(flat_full)
+    stock_md = ["## 三、个股深读\n"]
+    for c in deep_codes + std_codes:
+        stock_md.append(results[c]["section"])
+    if flat_full:
+        stock_md.append("\n### 其他今日有增量的股票\n")
+        stock_md.extend(flat_full)
+    if flat_rows:
+        stock_md.append("\n### 平稳股（无新增量，仅读数）\n")
+        stock_md.extend(flat_rows)
+
+    # ── 尾注 ──
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    notes = [
+        f"今日口径: 深读 {n_deep} 只 · 标准 {n_std} 只 · 平稳 {n_flat} 只"
+        f"（全部 {len(stocks_cfg)} 只均经 LLM 分析，档位只决定呈现）",
+        "帖数 `100+` 为单次抓取上限截断值；标注「近7日」的股票当日无帖、已回退 7 日窗口。",
+        f"news/公告详情来源: 智谱 reader（今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文）；主线与热词来自 TF-IDF。",
+    ]
+    # 汇总当日异常涌现热词进尾注 (≤5 个)
+    notes_md = "\n".join(f"- {n}" for n in notes)
+
     report = f"""# 📊 自选股舆情日报
 
 **日期**: {date_str}
 **生成时间**: {now_str}
-**覆盖股票**: {len(stocks_cfg)} 只（按板块分组）
+**覆盖股票**: {len(stocks_cfg)} 只
+
+---
+
+{highlights_md}
 
 ---
 
@@ -1089,23 +1576,48 @@ def generate_daily_report(
 
 ---
 
-{"".join(stock_sections)}
+{"".join(stock_md)}
 
 ---
 
-{hot_words_md}
+{mainlines_md}
 
 ---
 
-*本报告由 xueqiu-monitor 自动生成，数据来源：雪球。LLM 分析模型：MiniMax-M3（经火山方舟 coding plan）。*
+**尾注**
+
+{notes_md}
+
+*本报告由 xueqiu-monitor v2 自动生成，数据来源：雪球。LLM 分析模型：MiniMax-M3（经火山方舟 coding plan）。*
 """
 
-    # Save to file
-    output_dir = Path(cfg.get("report_output_dir", "data/daily_reports"))
+    # Save report + cross-day summary (v2)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{date_str}-sentiment.md"
     output_path.write_text(report, encoding="utf-8")
     logger.info(f"日报已保存: {output_path}")
+
+    try:
+        weighted_map = {
+            r["stock_code"]: r.get("sentiment_weighted", r["sentiment"])
+            for r in thermometer
+        }
+        write_summary(
+            output_dir,
+            date_str,
+            {
+                "date": date_str,
+                "stocks": {
+                    c: {
+                        "tier": r["tier"],
+                        "weighted": weighted_map.get(c),
+                    }
+                    for c, r in results.items()
+                },
+            },
+        )
+    except Exception as e:
+        logger.warning(f"summary.json 写入失败(不影响日报): {e}")
 
     return report
 
