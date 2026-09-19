@@ -141,6 +141,47 @@ def mock_stocks():
 
 
 @pytest.fixture
+def mock_opencli_feed(monkeypatch):
+    """Mock xueqiu_analyzer.fetcher_opencli.fetch_news/fetch_replies.
+
+    cli.py (2026-09-18) imports these at runtime inside run_pipeline and
+    calls the real opencli Chrome bridge without this mock — the e2e test
+    would fetch ~30 live news items per stock plus live reply threads
+    (network-dependent, ~70s, and breaks posts_count assertions).
+
+    Same isolation convention as tests/test_crawler_retry.py.
+    SH600519 gets 2 fake news items (posts_count 15 -> 17); every
+    candidate post URL gets 2 fake replies.
+    """
+    from unittest.mock import MagicMock
+
+    news_store = {
+        "SH600519": [
+            {"id": "n1", "title": "茅台批价企稳回升", "text": "飞天茅台批价止跌回升...",
+             "source": "财联社", "link": "https://xueqiu.com/news/n1",
+             "created_at": "2026-09-19T01:00:00.000Z"},
+            {"id": "n2", "title": "白酒板块早盘走强", "text": "白酒板块集体上涨...",
+             "source": "证券时报", "link": "https://xueqiu.com/news/n2",
+             "created_at": "2026-09-19T02:00:00.000Z"},
+        ],
+    }
+
+    def _fake_replies(url, limit=20):
+        return [
+            {"id": f"{url}-r1", "author": "回帖人甲", "text": "同意楼主观点",
+             "likes": 3, "created_at": "2026-09-19T01:30:00.000Z", "reply_to": ""},
+            {"id": f"{url}-r2", "author": "回帖人乙", "text": "数据引用有误",
+             "likes": 1, "created_at": "2026-09-19T02:30:00.000Z", "reply_to": ""},
+        ]
+
+    fake = MagicMock()
+    fake.fetch_news = lambda code, limit=30: news_store.get(code, [])
+    fake.fetch_replies = _fake_replies
+    monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake)
+    return news_store
+
+
+@pytest.fixture
 def temp_db(tmp_path):
     """Temporary config with in-memory database."""
     import json
@@ -186,7 +227,8 @@ def temp_db(tmp_path):
 class TestPipelineE2E:
     """End-to-end pipeline test with mocked crawler."""
 
-    def test_full_pipeline(self, temp_db, mock_crawl_result, mock_stocks, monkeypatch):
+    def test_full_pipeline(self, temp_db, mock_crawl_result, mock_stocks,
+                           mock_opencli_feed, monkeypatch):
         """Run full pipeline and verify all outputs."""
         from src import db, cli
         from src import crawler as crawler_mod
@@ -217,15 +259,29 @@ class TestPipelineE2E:
             # ── Verify DB contents ──
             db_path = temp_db.db_path
 
-            # Check snapshots
+            # Check snapshots (15 mock posts + 2 mock opencli news = 17)
             snap1 = db.get_latest_snapshot(db_path, "SH600519")
             assert snap1 is not None
-            assert snap1.posts_count == 15
+            assert snap1.posts_count == 17
             assert snap1.stock_code == "SH600519"
 
             snap2 = db.get_latest_snapshot(db_path, "SZ000858")
             assert snap2 is not None
             assert snap2.posts_count == 10
+
+            # Check opencli news merged into snapshot (2026-09-18 feature)
+            news_in_snap = [p for p in snap1.posts_data if p.get("type") == "news"]
+            assert len(news_in_snap) == 2
+            assert news_in_snap[0]["author"] == "财联社"
+
+            # Check reply backfill landed in post_replies (2026-09-18 feature)
+            # SH600519: 3 posts with comment_count>=5 (45/23/12) x 2 fake replies
+            with db._connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT post_id, COUNT(*) c FROM post_replies "
+                    "WHERE stock_code='SH600519' GROUP BY post_id").fetchall()
+            assert sum(r[1] for r in rows) == 6, f"expected 6 replies, got {rows}"
+            assert len(rows) == 3, f"expected 3 posts backfilled, got {rows}"
 
             # Check sentiment stats stored
             stats = db.get_historical_stats(db_path, "SH600519", days=30)
@@ -256,7 +312,8 @@ class TestPipelineE2E:
         finally:
             os.unlink(config_path)
 
-    def test_cold_start_suppression(self, temp_db, mock_crawl_result, mock_stocks, monkeypatch):
+    def test_cold_start_suppression(self, temp_db, mock_crawl_result, mock_stocks,
+                                    mock_opencli_feed, monkeypatch):
         """Cold start period should suppress all alerts."""
         from src import cli
         from src import crawler as crawler_mod

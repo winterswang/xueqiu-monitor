@@ -455,6 +455,61 @@ def insert_comments(db_path: str, comments: list[Comment]) -> int:
 
 
 # ════════════════════════════════════════════════════════
+# post_replies (回复正文 — 2026-09-18 接入, opencli replies 适配器)
+# ════════════════════════════════════════════════════════
+
+def ensure_post_replies_table(conn) -> None:
+    """post_replies 由调用方按需建表(与 backfill 的 post_fulltext 同约定):
+    schema.sql 不持有它, 任何写入者先调本函数。幂等。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS post_replies (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id     TEXT    NOT NULL,
+            reply_id    TEXT    NOT NULL DEFAULT '',
+            stock_code  TEXT    NOT NULL DEFAULT '',
+            author      TEXT    NOT NULL DEFAULT '',
+            likes       INTEGER NOT NULL DEFAULT 0,
+            text        TEXT    NOT NULL DEFAULT '',
+            created_at  TEXT    NOT NULL DEFAULT '',
+            reply_to    TEXT    NOT NULL DEFAULT '',
+            fetched_at  INTEGER NOT NULL
+        )
+    """)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_post_replies ON post_replies(post_id, reply_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_post_replies_code ON post_replies(stock_code)")
+
+
+def insert_post_replies(db_path: str, rows: list[dict]) -> int:
+    """幂等写入回复正文(唯一键 post_id+reply_id, INSERT OR IGNORE)。"""
+    if not rows:
+        return 0
+    with _connect(db_path) as conn:
+        ensure_post_replies_table(conn)
+        count = 0
+        for r in rows:
+            conn.execute(
+                """INSERT OR IGNORE INTO post_replies
+                   (post_id, reply_id, stock_code, author, likes, text, created_at, reply_to, fetched_at)
+                   VALUES (:post_id, :reply_id, :stock_code, :author, :likes, :text, :created_at, :reply_to, :fetched_at)""",
+                r,
+            )
+            count += 1
+        return count
+
+
+def existing_reply_post_ids(db_path: str, stock_code: str = "") -> set[str]:
+    """该股票(或全库)已抓过回复的 post_id 集合 —— 管道幂等用。"""
+    with _connect(db_path) as conn:
+        ensure_post_replies_table(conn)
+        if stock_code:
+            rows = conn.execute(
+                "SELECT DISTINCT post_id FROM post_replies WHERE stock_code = ?", (stock_code,)).fetchall()
+        else:
+            rows = conn.execute("SELECT DISTINCT post_id FROM post_replies").fetchall()
+        return {r[0] for r in rows}
+
+
+# ════════════════════════════════════════════════════════
 # announcements
 # ════════════════════════════════════════════════════════
 

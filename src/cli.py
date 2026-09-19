@@ -146,6 +146,31 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             stock_start = time.time()
             now = int(time.time())
 
+            # ── 资讯并入 (2026-09-18): 快路径此前只有讨论+公告, 资讯被架空 ──
+            # 浏览器路径的 news 合并代码(crawler.py)一直存在, 只是快路径永远喂空数组。
+            # 这里在快照落盘前补上: opencli news 适配器直连 stock_timeline.json。
+            if cfg.crawler.get("fetch_news", True):
+                try:
+                    sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
+                    from xueqiu_analyzer.fetcher_opencli import fetch_news
+                    _news = fetch_news(stock_code)
+                    if _news:
+                        for _n in _news:
+                            cr["posts_data"].append({
+                                "type": "news",
+                                "post_id": _n.get("link") or _n.get("id") or _n.get("title"),
+                                "title": _n.get("title", ""),
+                                "content": _n.get("text", ""),
+                                "link": _n.get("link", ""),
+                                "author": _n.get("source", ""),
+                                "time": _n.get("created_at") or "",
+                                "sentiment_score": 0.0,
+                            })
+                        cr["posts_count"] = len(cr["posts_data"])
+                        logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
+                except Exception as _e:
+                    logger.debug(f"  {stock_code}: 资讯获取失败(不影响其余数据): {_e}")
+
             # ── Store snapshot ──
             snap = CrawlSnapshot(
                 stock_code=stock_code,
@@ -171,6 +196,47 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             if comments_list:
                 n_comments = db.insert_comments(db_path, comments_list)
                 logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
+
+            # ── 回复正文 (2026-09-18): 评论数 top-N 帖, opencli replies 适配器 ──
+            # comments 表只有计数; 正文此前从未落盘(crawler 主动过滤回复)。
+            if cfg.crawler.get("fetch_replies", True):
+                try:
+                    per = int(cfg.crawler.get("replies_per_stock", 5))
+                    min_c = int(cfg.crawler.get("replies_min_comments", 5))
+                    rlimit = int(cfg.crawler.get("replies_limit", 20))
+                    if per > 0:
+                        sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
+                        from xueqiu_analyzer.fetcher_opencli import fetch_replies
+                        have = db.existing_reply_post_ids(db_path, stock_code)
+                        cands = sorted(
+                            (p2 for p2 in cr["posts_data"]
+                             if (p2.get("type") or "discussion") == "discussion"
+                             and (p2.get("link") or p2.get("post_id") or "").startswith("https://xueqiu.com/")
+                             and int(p2.get("comment_count") or 0) >= min_c),
+                            key=lambda x: -int(x.get("comment_count") or 0))[:per]
+                        n_posts = n_replies = 0
+                        now_r = int(time.time())
+                        for p2 in cands:
+                            url = p2.get("link") or p2.get("post_id")
+                            if url in have:
+                                continue  # 幂等: 已抓过
+                            rows = fetch_replies(url, rlimit)
+                            if rows:
+                                db.insert_post_replies(db_path, [{
+                                    "post_id": url, "reply_id": str(r.get("id") or ""),
+                                    "stock_code": stock_code, "author": str(r.get("author") or ""),
+                                    "likes": int(r.get("likes") or 0), "text": str(r.get("text") or ""),
+                                    "created_at": str(r.get("created_at") or ""),
+                                    "reply_to": str(r.get("reply_to") or ""),
+                                    "fetched_at": now_r,
+                                } for r in rows])
+                                n_posts += 1
+                                n_replies += len(rows)
+                                time.sleep(1.2)  # 对站点友好
+                        if n_posts:
+                            logger.debug(f"  {stock_code}: 回复正文 +{n_posts}帖/{n_replies}条")
+                except Exception as _e:
+                    logger.debug(f"  {stock_code}: 回复获取失败(不影响其余数据): {_e}")
     
             # ── Store announcements ──
             # ann_date 必须用**公告自身的发布时间**, 不是抓取时刻(2026-09-14 修)。
