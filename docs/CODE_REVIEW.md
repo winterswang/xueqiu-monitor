@@ -200,3 +200,35 @@ db.py 连接管理（_ClosingConnection/WAL/重试）质量好；notifier 分级
 ## 结论
 
 Round 1 的 B+ → 当前 **B+（债增）**：三个月 11 个 PR 快速迭代把功能推到位（分组调度/公告链路/日报形态），但衍生脚本与主路径口径漂移、公告分级缺位、健康检查无语义层。建议 v0.7 修复 N1-N7 + 公告分级 + 哨兵，详见 docs/v0.7_design.md。
+
+---
+
+# Round 3 Review — 2026-09-20（分支 `feature/v2-daily-report`，v2 升级 9 个提交）
+
+> 方法：全量 diff 走查（18 文件 / +3013 行）+ 真实数据端到端实测（DB 只读副本、本地 Chrome、
+> 真实公告与新闻链接）+ ruff + 291 测试。
+
+## 本轮修掉
+
+| # | 问题 | 证据 |
+|---|------|------|
+| R3-1 | `tests/test_detail_fetcher.py` 有两个同名 `TestJunkPageDetection` 类，后者遮蔽前者 → 3 个测试从未执行 | ruff F811；已删重复类 |
+| R3-2 | `requirements.txt` 缺 `pymupdf`：新环境/Docker 里公告 PDF 通道静默降级到付费 reader | 代码 `import fitz` 无声明；已补 |
+| R3-3 | 日报尾注写"详情来源: 智谱 reader"，与 v2 实际通道不符（用户可见输出） | 当日日报正文；改为本地浏览器/PDF/EDGAR + reader 兜底 |
+| R3-4 | README 三处失真：表数量 8（实际 13）、依赖缺 pymupdf/opencli、配置表写 `MINIMAX_API_KEY`（代码已明确不读该变量） | 代码实测；已更正 |
+| R3-5 | Round 2 的 N4（公告告警硬编码 P2）由 `classify_announcement` 分级闭环；同表 P2 项"US 公告链接非详情页"由 SEC EDGAR 通道闭环 | `src/filter.py` / `src/detail_fetcher.py` |
+| R3-6 | 会话内修掉的详情层缺陷：公告任务 SQL 漏选 `stock_code` → 整轮详情失败；美股 form 未纳入分级 → EDGAR 通道空转；时效闸不认东财 URL 日期 → 最旧 159 天旧闻漏网 | `tests/test_enrich_details.py` / `tests/test_detail_fetcher.py` 回归 |
+
+## 实测验证（2026-09-20，真实数据）
+
+- 291 测试全绿（v2 前 266）
+- `scripts/verify_posts_migration.py` 全绿：集合等值 / 双写无缺口 / 内容抽查（10.1 万行 posts）
+- 详情冷启动（清空 `detail_fetch_log` 的副本）：时效闸修复后任务 111 → 56 条，83s，**付费 reader 调用 0 次**
+- 通道逐一实测：巨潮/港股/科创板 PDF 本地解析全文清晰；新浪/东财 news 正文干净；TSM 6-K、TCOM 20-F EDGAR 原文可读
+
+## 遗留（未修，非阻塞）
+
+- 8 条 `xueqiu.com/n/<中文标题>` 畸形 news 链接来自爬虫新闻流解析，详情层已判废，源头待查
+- `detail_fetch_log` 缓存实为 24 小时滚动窗口（docstring 写"当日"），跨日语义略有出入
+- `posts_data` 停写仍在观察期，`fetch_day_posts_union` 等读路径仍读 JSON 列
+- 既有 lint 债（src 12 处 F401/F841、scripts E402 等）与 `run_pipeline` 巨型函数未动；新增行 0 lint 问题

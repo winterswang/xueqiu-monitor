@@ -8,6 +8,7 @@ anthropic>=0.49.0          # legacy (kept for compat)
 openai>=1.40.0             # LLM: sentiment + report analysis (ARK coding plan, OpenAI-compatible)
 playwright>=1.58.0         # Crawler (installed via xueqiu-analyzer; listed here for isolated envs)
 jieba>=0.42.1              # Chinese tokenization (detector hot-word analysis)
+pymupdf>=1.24.0             # 公告 PDF 本地解析 (detail_fetcher, v2 详情层)
 
 # Testing
 pytest>=7.4.0

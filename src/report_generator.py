@@ -1253,7 +1253,7 @@ def _build_highlights_section(
             messages=[{"role": "user", "content": prompt}], temperature=0.2,
         )
         text = (rsp.choices[0].message.content or "").strip()
-        bullets = [l for l in text.splitlines() if l.strip().startswith("-")]
+        bullets = [ln for ln in text.splitlines() if ln.strip().startswith("-")]
         if bullets:
             lines.append("\n".join(bullets[:6]) + "\n")
             return "\n".join(lines)
@@ -1604,7 +1604,8 @@ def generate_daily_report(
         f"今日口径: 深读 {n_deep} 只 · 标准 {n_std} 只 · 平稳 {n_flat} 只"
         f"（全部 {len(stocks_cfg)} 只均经 LLM 分析，档位只决定呈现）",
         "帖数 `100+` 为单次抓取上限截断值；标注「近7日」的股票当日无帖、已回退 7 日窗口。",
-        f"news/公告详情来源: 智谱 reader（今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文）；主线与热词来自 TF-IDF。",
+        f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
+        f"今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文；主线与热词来自 TF-IDF。",
     ]
     # 汇总当日异常涌现热词进尾注 (≤5 个)
     notes_md = "\n".join(f"- {n}" for n in notes)

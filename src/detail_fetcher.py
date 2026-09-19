@@ -32,7 +32,6 @@ import os
 import re
 import subprocess
 import threading
-import time
 import urllib.error
 import urllib.request
 from typing import Optional

@@ -1,6 +1,6 @@
 # xueqiu-monitor — 自选股雪球舆情持续监控
 
-面向 A 股/港股投资者的舆情监控系统。爬取雪球帖子、资讯、公告，通过 **MiniMax LLM 情感分析 + Z-score 统计检测** 自动发现舆情实质性变化，**分级推送到飞书群**。
+面向 A 股/港股投资者的舆情监控系统。爬取雪球帖子、资讯、公告，通过 **LLM 情感分析（MiniMax-M3，经火山方舟）+ Z-score 统计检测** 自动发现舆情实质性变化，**分级推送到飞书群**。
 
 > 区别于全文推送：95% 的雪球内容是灌水/重复/噪音。本系统只推送有增量信息的变化。
 > 区别于 morning-brief：morning-brief 看量价（K 线/PE/技术面），xueqiu-monitor 看舆情（情绪面），两套独立互补。
@@ -16,9 +16,15 @@
 - 超时保护 + 单股失败不阻塞
 
 ### 🧠 情感分析
-- **MiniMax M2.7 LLM** 批量分析讨论帖情感（-1 到 +1）
+- **MiniMax-M3（火山方舟 coding plan，OpenAI 兼容）** 批量分析讨论帖情感（-1 到 +1）
 - 新闻标题 **关键词匹配**（大涨/暴跌/增持/减持 等），零 API 成本
 - 无 LLM key 时自动降级为纯关键词模式
+
+### 📄 详情富化（v2）
+- **news 全文**：三道过滤闸（时效 / 噪音 / 限量）后，用 opencli 驱动本地 Chrome 抓正文，零 API 成本
+- **公告详情**：A 股/港股 PDF 本地解析（pymupdf）；美股公告按标题里的 accession number 直连 SEC EDGAR 原文
+- 两者都拿不到时才降级搜标题拿「新闻解读」（产物标注来源）；智谱 reader 仅作兜底
+- 单条失败不阻塞日报，结果按 link 当日缓存
 
 ### 📊 变化检测
 - **Z-score 统计检测**：帖子数异常暴增、情感倾向显著偏移（14 天滚动窗口）
@@ -75,7 +81,9 @@ cron/timer
     └──────────┘
 ```
 
-**8 张核心表**：`crawl_snapshots` / `sentiment_stats` / `change_alert` / `hot_word_dict` / `hot_word_event` / `push_history` / `comments` / `announcements`
+**13 张表**（`src/schema.sql`）：`crawl_snapshots` / `posts` / `sentiment_stats` / `change_alert` / `hot_word_dict` / `hot_word_event` / `push_history` / `comments` / `announcements` / `detail_fetch_log` / `db_meta` / `xueqiu_monitor_meta` / `pool_history`
+（另有 `post_fulltext` / `post_replies` 由 `scripts/backfill_*.py` 按需创建）
+舆情日报由 `src/report_generator.py` 生成：详情富化 → 逐股 LLM 增量分档（深读/标准/平稳）→ 温度计/要点/主线组装 → 输出 Markdown 并推 IMA。
 
 ## 快速开始
 
@@ -85,7 +93,7 @@ cd xueqiu-monitor
 pip install -r requirements.txt
 
 # 配置（二选一）
-cp .env.example .env   # 编辑填入 MiniMax key + LARK_CHAT_ID
+cp .env.example .env   # 编辑填入 ARK_API_KEY + LARK_CHAT_ID
 # 或编辑 etc/config.json 设置白名单等
 
 # 初始化数据库
@@ -102,7 +110,8 @@ python -m src.cli -c etc/config.json --dry-run -v
 
 | 配置项 | 来源 | 说明 |
 |--------|------|------|
-| `MINIMAX_API_KEY` | `.env` | MiniMax LLM（情感分析，可选） |
+| `ARK_API_KEY` | `.env` | LLM（情感分析 + 日报，OpenAI 兼容；也兼容 `ARKCODE_API_KEY`） |
+| `ZHIPU_API_KEY` | `.env` | 详情兜底通道（智谱 reader / web-search-pro，可选） |
 | `LARK_CHAT_ID` | `.env` | 飞书群 ID（lark CLI 模式） |
 | `XUEQIU_ANALYZER_PATH` | `.env` 或 `config.json` | xueqiu-analyzer 路径 |
 | `MORNING_BRIEF_DB` | `.env` 或 `config.json` | morning-brief 自选股 DB 路径 |
@@ -135,7 +144,9 @@ python -m pytest tests/ -v --cov=src
 
 - Python 3.11+
 - [xueqiu-analyzer](https://github.com/winterswang/xueqiu-analyzer-skill)（爬虫）
-- MiniMax API（情感分析，可选——缺失时用关键词匹配）
+- LLM API（默认火山方舟 coding plan，OpenAI 兼容，可选——缺失时情感分析降级为关键词匹配）
+- pymupdf（公告 PDF 本地解析，随 `requirements.txt` 安装）
+- opencli + Chrome 扩展（news 正文抓取，可选——缺失时回退智谱 reader）
 - lark CLI（飞书推送，可选——缺失时写文件）
 
 ## 与 morning-brief 的关系

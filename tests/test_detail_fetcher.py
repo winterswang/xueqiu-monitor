@@ -214,28 +214,6 @@ class TestPdfFrontMatter:
 
 
 class TestJunkPageDetection:
-    """opencli 抓到的占位页/首页菜单不能当正文 (新浪 404 会跳首页)."""
-
-    def test_placeholder_page(self):
-        assert df._looks_like_junk_page(
-            "**页面没有找到 5秒钟之后将会带您进入新浪首页!**", "页面没有找到"
-        )
-
-    def test_homepage_menu_pile(self):
-        # 首页 2 万字里 218 个链接 (密度 1.1%), 正常文章 0.2%
-        content = "[_设为首页_](javascript:;)\n" + "".join(
-            f"新闻标题{i} [详情](https://finance.sina.com.cn/x/{i}.shtml)\n"
-            for i in range(60)
-        )
-        assert df._looks_like_junk_page(content) is True
-
-    def test_real_article_passes(self):
-        content = "（来源：电动知家）消息，9月18日微博话题登上热搜。" * 60
-        content += "[宁德时代](https://finance.sina.com.cn/realstock/x.shtml)"
-        assert df._looks_like_junk_page(content, "“非宁德时代不选”上热搜！") is False
-
-
-class TestJunkPageDetection:
     """opencli 抓到的废页不能当正文 (新浪 404 跳首页 / Chrome 错误页)."""
 
     def test_placeholder_page(self):
