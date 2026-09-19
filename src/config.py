@@ -38,6 +38,12 @@ DEFAULT_CONFIG = {
             "MORNING_BRIEF_DB",
             str(Path(_PROJECT_ROOT).parent / "morning-brief" / "data" / "morning-brief.db"),
         ),
+        # ── 2026-09-18 接入: 资讯与回复正文(opencli news/replies 适配器) ──
+        "fetch_news": True,          # 资讯走快路径 API(此前只有浏览器路径, 被架空)
+        "fetch_replies": True,       # 高讨论帖的回复正文
+        "replies_per_stock": 5,      # 每股取评论数 top-N 帖抓回复
+        "replies_min_comments": 5,   # 评论数低于此值的帖不抓回复
+        "replies_limit": 20,         # 每帖取回复数(第 1 页)
     },
     "detector": {
         "z_score_window_days": 14,
