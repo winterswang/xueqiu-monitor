@@ -335,7 +335,16 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             db.insert_sentiment_stat(db_path, stat)
     
             # ── TF-IDF hot words ──
-            posts_texts = [p.get("content", "") or p.get("title", "") for p in cr["posts_data"]]
+            # 2026-09-20 修: 热词输入排除 news —— 资讯标题是"信源语言"
+            # (融资余额播报/专利公告日/新浪港股好仓), 不是雪球用户的讨论语言,
+            # 混入后污染 hot_word_event → 日报主线表一半是资讯噪音词
+            # (2026-09-19 主线表实测: 12 条中 6 条为 news 标题词)。
+            # news 的增量价值由 detail_fetcher 过滤闸 + 日报深读路径承载。
+            posts_texts = [
+                p.get("content", "") or p.get("title", "")
+                for p in cr["posts_data"]
+                if (p.get("type") or "discussion") != "news"
+            ]
             curr_tfidf = {}
             if posts_texts:
                 hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])

@@ -1553,8 +1553,10 @@ def generate_daily_report(
         body = parts[2] if len(parts) > 2 else ""
         first_line = body.strip().splitlines()[0].strip() if body.strip() else ""
         if first_line.startswith("（无新增量）"):
-            one_line = first_line[:90]
-            flat_rows.append(f"- **{name}** {one_line}")
+            # 截断补省略号, 尾部带 \n —— 组装用 "".join(无分隔符),
+            # 此前无换行导致平稳股四行粘连成一段 (2026-09-19 首跑实测)
+            one_line = first_line[:88] + ("…" if len(first_line) > 88 else "")
+            flat_rows.append(f"- **{name}** {one_line}\n")
         else:
             flat_full.append(section)
 
