@@ -588,7 +588,13 @@ def _build_analysis_prompt(
     # v2 Phase 5: 帖上限按档位 (deep 100 / std+flat 40); 调用方可覆盖
     if max_posts is None:
         max_posts = 100 if tier == TIER_DEEP else 40
+    # v2 (2026-09-20 补): 单股 prompt 帖区总量上限 —— 并集口径 + news 全文
+    # 注入后, NVDA/宁德实测 prompt 达 91k 字, 触发限流重试 (单次 319.9s,
+    # 日报总耗时翻倍)。帖已按互动量降序, 超限从尾部 (低互动) 截断。
+    _POSTS_TEXT_CAP = 40_000
     posts_text = ""
+    truncated_by_cap = False
+    used_posts = 0
     for i, p in enumerate(posts, 1):
         engagement = (
             f"❤️{p['like_count']} 💬{p['comment_count']} 🔄{p['forward_count']}"
@@ -605,9 +611,18 @@ def _build_analysis_prompt(
             f"\n---\n[{i}] {author}{kol_tag} | 🕐{time_str} | ({engagement})\n"
             f"{p['title']}\n{body}\n"
         )
+        used_posts = i
         if i >= max_posts:  # safety cap, tier-scaled (v2 Phase 5)
             posts_text += f"\n...（共 {len(posts)} 帖，已截取前 {max_posts} 帖）\n"
             break
+        if len(posts_text) >= _POSTS_TEXT_CAP:
+            truncated_by_cap = True
+            break
+    if truncated_by_cap:
+        posts_text += (
+            f"\n...（共 {len(posts)} 帖，按互动量取前 {used_posts} 帖，"
+            f"正文总量达 {_POSTS_TEXT_CAP // 1000}k 字上限）\n"
+        )
 
     # Format trend
     if trend.get("has_trend"):
