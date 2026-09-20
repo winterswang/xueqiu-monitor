@@ -170,7 +170,6 @@
   "llm": {
     "model": "minimax-m3",
     "concurrency": 5,
-    "max_posts_per_stock": 0,
     "min_post_length": 30,
     "timeout_seconds": 300,
     "content_caps": {

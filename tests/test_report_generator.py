@@ -277,23 +277,6 @@ class TestHotWordStreaks:
         assert by_word["新词"]["is_persistent"] is False
 
 
-class TestThermometerSection:
-    """Test market thermometer Markdown generation."""
-
-    def test_thermometer_table_format(self):
-        """Thermometer generates valid markdown table."""
-        thermo = [
-            {"stock_code": "AAA.US", "posts": 100, "sentiment": 0.15},
-            {"stock_code": "BBB.HK", "posts": 80, "sentiment": -0.05},
-        ]
-        stocks_cfg = {"AAA.US": {"name": "股票A"}, "BBB.HK": {"name": "股票B"}}
-        md = rg._build_thermometer_section(thermo, stocks_cfg)
-        assert "| 股票 |" in md
-        assert "股票A" in md
-        assert "股票B" in md
-        assert "最积极" in md
-
-
 class TestAnalyzeStockNoPosts:
     """Test analyze_stock when no posts available."""
 

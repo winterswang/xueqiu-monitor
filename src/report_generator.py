@@ -478,7 +478,7 @@ def fetch_market_thermometer(db_path: str, date_str: str) -> list[dict]:
     Returns one dict per stock:
       stock_code, posts (day-union dedup count), sentiment (equal-weight
       avg), sentiment_weighted (interaction-weighted avg, see
-      _weighted_sentiment), weighted_diff (weighted - equal).
+      _sentiment_aggregates), weighted_diff (weighted - equal).
     """
     union = db.fetch_day_posts_union(db_path, date_str)
     result = []
@@ -530,44 +530,6 @@ def _sentiment_aggregates(posts: list[dict]) -> tuple[float | None, float | None
     equal = sum(s for s, _ in scores) / len(scores)
     weighted = sum(s * w for s, w in scores) / total_w if total_w > 0 else None
     return equal, weighted, len(scores)
-
-
-def _weighted_sentiment(posts_data: str | None) -> tuple[float | None, int]:
-    """Interaction-weighted sentiment from a snapshot's posts_data JSON.
-
-    Weight = like_count + comment_count + forward_count + 1 (Laplace
-    floor so zero-engagement posts still count once). Returns
-    (weighted_mean, posts_used); (None, 0) when posts_data is empty or
-    no post has a usable sentiment_score.
-    """
-    if not posts_data:
-        return None, 0
-    try:
-        posts = json.loads(posts_data)
-    except (ValueError, TypeError):
-        return None, 0
-    if not posts:
-        return None, 0
-    total_w = 0.0
-    total_ws = 0.0
-    used = 0
-    for p in posts:
-        s = p.get("sentiment_score")
-        if s is None:
-            continue
-        try:
-            s = float(s)
-        except (TypeError, ValueError):
-            continue
-        w = float(p.get("like_count", 0) or 0) + float(
-            p.get("comment_count", 0) or 0
-        ) + float(p.get("forward_count", 0) or 0) + 1.0
-        total_w += w
-        total_ws += w * s
-        used += 1
-    if total_w <= 0 or used == 0:
-        return None, 0
-    return total_ws / total_w, used
 
 
 # ════════════════════════════════════════════════════════
@@ -845,8 +807,11 @@ def analyze_stock(
     date_str: str,
     config: dict,
     news_details: Optional[dict[str, str]] = None,
-) -> str:
-    """Run LLM analysis for a single stock. Returns Markdown section.
+) -> dict:
+    """Run LLM analysis for a single stock.
+
+    Returns (v2): {"section": Markdown 小节, "tier": deep/std/flat,
+    "takeaway": ⭐最有价值观点 (deep 档), "analyzed": bool}.
 
     Post-count calibers surfaced in the section header:
     - 分析帖数: posts surviving fetch_stock_posts filtering (LLM input)
@@ -979,68 +944,6 @@ def analyze_stock(
             "tier": tier,
             "takeaway": "",
         }
-
-
-# ════════════════════════════════════════════════════════
-# Report assembly
-# ════════════════════════════════════════════════════════
-
-
-def _build_thermometer_section(thermometer: list, stocks_cfg: dict) -> str:
-    """Build market thermometer section.
-
-    Columns: 股票 / 名称 / 帖子数 / 情感(等权) / 情感(加权) / 加权差.
-    The interaction-weighted column exposes the divergence between the
-    "loud core circle" (high-engagement posts) and the "silent majority"
-    (low-engagement posts) - the equal-weight average alone carries a
-    systematic optimism bias on high-attention stocks (v0.7.5, note
-    "舆情日报信息密度审查 v2" lever 1).
-    """
-    lines = ["## 一、市场温度计\n"]
-    lines.append("| 股票 | 名称 | 帖子数 | 情感(等权) | 情感(加权) | 加权差 |")
-    lines.append("|------|------|--------|-----------|-----------|--------|")
-    for t in thermometer:
-        code = t["stock_code"]
-        name = stocks_cfg.get(code, {}).get("name", code)
-        sent = t["sentiment"]
-        sent_w = t.get("sentiment_weighted", sent)
-        diff = t.get("weighted_diff", 0.0)
-        # Emoji based on sentiment
-        if sent > 0.1:
-            emoji = "🟢"
-        elif sent < -0.1:
-            emoji = "🔴"
-        else:
-            emoji = "⚪"
-        lines.append(
-            f"| {code} | {name} | {t['posts']} | {emoji} {sent:+.3f} | {sent_w:+.3f} | {diff:+.3f} |"
-        )
-
-    # Summary line
-    if thermometer:
-        most_positive = max(thermometer, key=lambda x: x.get("sentiment_weighted", x["sentiment"]))
-        most_negative = min(thermometer, key=lambda x: x.get("sentiment_weighted", x["sentiment"]))
-        p_name = stocks_cfg.get(most_positive["stock_code"], {}).get(
-            "name", most_positive["stock_code"]
-        )
-        n_name = stocks_cfg.get(most_negative["stock_code"], {}).get(
-            "name", most_negative["stock_code"]
-        )
-        lines.append("")
-        lines.append(
-            f"最积极(加权): **{p_name}**({most_positive.get('sentiment_weighted', most_positive['sentiment']):+.3f}) | "
-            f"最消极(加权): **{n_name}**({most_negative.get('sentiment_weighted', most_negative['sentiment']):+.3f})"
-        )
-
-    return "\n".join(lines) + "\n"
-
-def _group_by_sector(stocks_cfg: dict) -> dict:
-    """Group stocks by sector."""
-    sectors: dict[str, list[str]] = {}
-    for code, info in stocks_cfg.items():
-        sector = info.get("sector", "其他")
-        sectors.setdefault(sector, []).append(code)
-    return sectors
 
 
 # ════════════════════════════════════════════════════════
@@ -1670,7 +1573,6 @@ def generate_daily_report(
         f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
         f"今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文；主线与热词来自 TF-IDF。",
     ]
-    # 汇总当日异常涌现热词进尾注 (≤5 个)
     notes_md = "\n".join(f"- {n}" for n in notes)
 
     report = f"""# 📊 自选股舆情日报 {date_str}
@@ -1733,148 +1635,6 @@ def generate_daily_report(
         logger.warning(f"summary.json 写入失败(不影响日报): {e}")
 
     return report
-
-
-def _build_hot_words_section(
-    db_path: str, date_str: str, stocks_cfg: dict
-) -> str:
-    """Build cross-stock hot words section (v0.8 rewrite).
-
-    Filter per-stock FIRST, then aggregate across stocks. The old global
-    top-30 approach let name fragments ("宁德 时代" tfidf=8.18) crowd out
-    narrative words ("特斯拉" tfidf=1.74). Output has two tiers: cross-stock
-    co-occurrence words and per-stock top narrative words.
-    """
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            """SELECT stock_code, word, tfidf_score
-               FROM hot_word_event
-               WHERE date(event_time,'unixepoch','localtime')=?""",
-            (date_str,),
-        ).fetchall()
-        if not rows:
-            return "## 三、今日热词\n\n今日无热词数据。\n"
-
-        # Per-stock name token sets (jieba segmentation of names)
-        import jieba
-        all_name_tokens: set[str] = set()
-        code_names: set[str] = set()
-        for code, info in stocks_cfg.items():
-            name = info.get("name", "")
-            if name:
-                all_name_tokens |= {t.lower() for t in jieba.cut(name) if t.strip()}
-            code_names.add(code.lower())
-            code_names.add(code.split(".")[0].lower())
-
-        # Common low-signal stopwords + SEC announcement boilerplate tokens
-        stopwords = {
-            "ai", "股票", "投资", "市场", "今天", "今日", "现在", "可以",
-            "什么", "一个", "这个", "我们", "他们", "已经", "没有", "觉得",
-            "公司", "股价", "买入", "卖出", "持有", "仓位", "操作",
-            "accession", "securities", "number", "size", "statement",
-            "changes", "file", "form", "kb", "report", "inc", "the",
-            "and", "of", "in", "for", "filed", "commission", "beneficial",
-            "ownership", "statement of", "in beneficial", "of changes",
-            "changes in", "securities accession", "accession number",
-            "of securities", "size kb", "number size", "size number",
-            "浊静 徐清",
-        }
-
-        # Filter per stock first: word -> {stock_code: max_tfidf}
-        single_stock: dict[str, dict[str, float]] = {}
-        for r in rows:
-            word = (r["word"] or "").strip()
-            wl = word.lower()
-            code = r["stock_code"]
-            score = float(r["tfidf_score"] or 0.0)
-            if len(word) < 2 or word.isdigit():
-                continue
-            if wl in stopwords or word in stopwords:
-                continue
-            if wl in code_names or word in code_names:
-                continue
-            toks = [t.lower() for t in word.split()]
-            is_name_variant = False
-            if len(toks) > 1:
-                if any(t in all_name_tokens or t in code_names for t in toks):
-                    is_name_variant = True
-            elif wl in all_name_tokens:
-                is_name_variant = True
-            if is_name_variant:
-                continue
-            single_stock.setdefault(word, {})[code] = max(
-                single_stock.get(word, {}).get(code, 0.0), score
-            )
-
-        # Tier 1: cross-stock words (>= 2 stocks)
-        cross = {w: cs for w, cs in single_stock.items() if len(cs) >= 2}
-        # Tier 2: per-stock top3 narrative words
-        per_stock_top: dict[str, list[tuple[str, float]]] = {}
-        for w, cs in single_stock.items():
-            if len(cs) >= 2:
-                continue
-            code, score = next(iter(cs.items()))
-            per_stock_top.setdefault(code, []).append((w, score))
-        for code in per_stock_top:
-            per_stock_top[code].sort(key=lambda x: x[1], reverse=True)
-            per_stock_top[code] = per_stock_top[code][:3]
-
-        # Streak annotations (reuse fetch_hot_word_streaks per stock)
-        streak_map: dict[str, int] = {}
-        involved_codes = set()
-        for cs in cross.values():
-            involved_codes.update(cs.keys())
-        for code in per_stock_top:
-            involved_codes.add(code)
-        for code in involved_codes:
-            try:
-                streaks = fetch_hot_word_streaks(db_path, code, date_str)
-            except Exception:
-                streaks = []
-            for st in streaks:
-                w = st.get("word")
-                if w:
-                    streak_map[w] = int(st.get("streak_days", 0))
-
-        def _tag(word: str) -> str:
-            days = streak_map.get(word, 0)
-            if days >= 3:
-                return f"📊连续{days}天"
-            if days >= 2:
-                return f"连续{days}天"
-            return "🆕新增"
-
-        lines = ["## 三、今日热词\n"]
-        if cross:
-            lines.append("### 跨股共现（多股同时讨论）\n")
-            for w, cs in sorted(
-                cross.items(),
-                key=lambda x: (len(x[1]), max(x[1].values())),
-                reverse=True,
-            )[:10]:
-                names = []
-                for code in sorted(cs):
-                    nm = stocks_cfg.get(code, {}).get("name", code)
-                    names.append(nm)
-                lines.append(
-                    f"- **{w}** ({len(cs)}只: {', '.join(names)}) {_tag(w)}"
-                )
-            lines.append("")
-
-        lines.append("### 个股热点（按 TF-IDF 信号排序）\n")
-        singles: list[tuple[str, str, float]] = []
-        for code, wl in per_stock_top.items():
-            for w, score in wl:
-                nm = stocks_cfg.get(code, {}).get("name", code)
-                singles.append((w, nm, score))
-        singles.sort(key=lambda x: x[2], reverse=True)
-        for w, nm, score in singles[:20]:
-            lines.append(f"- **{w}** ({nm}, tfidf={score:.1f}) {_tag(w)}")
-
-        return "\n".join(lines) + "\n"
-    finally:
-        conn.close()
 
 # ════════════════════════════════════════════════════════
 # CLI entry point

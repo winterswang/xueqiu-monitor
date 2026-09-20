@@ -54,26 +54,6 @@ class TestEngagementFirstSort:
         assert result[1]["title"] == "较早的同互动帖"
 
 
-class TestWeightedSentiment:
-    """Interaction-weighted sentiment (note lever 1)."""
-
-    def test_weighted_emphasizes_high_engagement(self):
-        data = json.dumps([
-            {"sentiment_score": 0.5, "like_count": 0, "comment_count": 0, "forward_count": 0},
-            {"sentiment_score": -0.5, "like_count": 100, "comment_count": 50, "forward_count": 10},
-        ])
-        w, used = rg._weighted_sentiment(data)
-        assert used == 2
-        assert w is not None and w < 0.0
-
-    def test_weighted_handles_empty(self):
-        assert rg._weighted_sentiment(None) == (None, 0)
-        assert rg._weighted_sentiment("not json") == (None, 0)
-
-    def test_weighted_skips_missing_scores(self):
-        assert rg._weighted_sentiment(json.dumps([{"title": "no score"}])) == (None, 0)
-
-
 class TestThermometerLatestSnapshot:
     """fetch_market_thermometer must use the LATEST snapshot per stock.
 
