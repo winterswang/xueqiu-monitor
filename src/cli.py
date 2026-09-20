@@ -149,8 +149,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # ── 资讯并入 (2026-09-18): 快路径此前只有讨论+公告, 资讯被架空 ──
             # 浏览器路径的 news 合并代码(crawler.py)一直存在, 只是快路径永远喂空数组。
             # 这里在快照落盘前补上: opencli news 适配器直连 stock_timeline.json。
+            # 2026-09-20 修: news 不再硬编码 sentiment_score=0.0 —— 用 sentiment
+            # 的关键词打分(与管内 news 同一逻辑), 并入后重算 sentiment_avg,
+            # 否则这批 news 永远是 0 分并稀释温度计加权情感。
             if cfg.crawler.get("fetch_news", True):
                 try:
+                    from .sentiment import score_news_post
                     sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
                     from xueqiu_analyzer.fetcher_opencli import fetch_news
                     _news = fetch_news(stock_code)
@@ -164,9 +168,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                                 "link": _n.get("link", ""),
                                 "author": _n.get("source", ""),
                                 "time": _n.get("created_at") or "",
-                                "sentiment_score": 0.0,
+                                "sentiment_score": score_news_post(
+                                    _n.get("title", ""), _n.get("text", "")
+                                ),
                             })
                         cr["posts_count"] = len(cr["posts_data"])
+                        cr["sentiment_avg"] = crawler._compute_sentiment_avg(cr["posts_data"])
                         logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
                 except Exception as _e:
                     logger.debug(f"  {stock_code}: 资讯获取失败(不影响其余数据): {_e}")
@@ -328,7 +335,16 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             db.insert_sentiment_stat(db_path, stat)
     
             # ── TF-IDF hot words ──
-            posts_texts = [p.get("content", "") or p.get("title", "") for p in cr["posts_data"]]
+            # 2026-09-20 修: 热词输入排除 news —— 资讯标题是"信源语言"
+            # (融资余额播报/专利公告日/新浪港股好仓), 不是雪球用户的讨论语言,
+            # 混入后污染 hot_word_event → 日报主线表一半是资讯噪音词
+            # (2026-09-19 主线表实测: 12 条中 6 条为 news 标题词)。
+            # news 的增量价值由 detail_fetcher 过滤闸 + 日报深读路径承载。
+            posts_texts = [
+                p.get("content", "") or p.get("title", "")
+                for p in cr["posts_data"]
+                if (p.get("type") or "discussion") != "news"
+            ]
             curr_tfidf = {}
             if posts_texts:
                 hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])

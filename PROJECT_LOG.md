@@ -260,3 +260,61 @@ cron (07:00)
 > Git post-commit hook 在每次提交后通过 `deepseek exec --auto` 触发即时分析。
 > AI 分析代理自动读取 diff、理解语义并更新上方各板块。
 > `LAST_ANALYZED` 标记追踪最近一次分析的 commit，确保不重复处理。
+
+
+---
+
+## 🔄 v0.7 → v2 演进补记 (2026-09-20, PROJECT_LOG 停更于 v0.1 后的沿革)
+
+> 本节由 v2 升级会话补记。详细设计见 docs/ (v0.7_design / v0.9-requirements) 与 git log。
+
+### v0.7 – v0.9 (2026-08 ~ 09-12, 此前仅散落 docs/ 与 commit)
+- v0.7 "从稳定运行到信息增量": 公告分级去重(title+time)、新鲜度哨兵、
+  口径统一(report_common)、热词治理、反馈闭环删除
+- v0.8: 温度计互动加权列、热词节按个股过滤重写、公告 dedup_hash 修复
+- v0.8.5/8.6: 池轮换 30 → 41 只
+- v0.9: 轮换生命周期治理 (pool_history 台账 + rotate_pool.py + 真源收敛)
+- 2026-09-14: 增量爬取数据质量修复 (export_csv 当日快照并集丢 197 帖 /
+  ann_date 用公告自身时间 / comments 反推 post_id 致 10.9% 重复)
+- 2026-09-18/19: opencli news 并入快路径 + 回复正文回填 (165b0d7)
+
+### v2 升级 (2026-09-19/20, 分支 feature/v2-daily-report)
+- Phase 1 数据正确性: 日报/温度计改当日快照并集去重(修丢帖);
+  news 并入接关键词打分(修 0 分稀释)
+- Phase 2 素材深度: src/detail_fetcher.py 智谱 reader 详情抓取
+  (公告为主 + news 三道过滤闸: 68% 旧闻/噪音/每股 topN), 公告分级
+  (high 抓详情并升 P1 告警), detail_fetch_log 缓存, .env 加 ZHIPU_API_KEY
+- Phase 3 日报 v2 格式: 增量分档(deep/std/flat, 全部走 LLM 只分呈现),
+  今日要点(四路候选→LLM 凝练)/温度计只写变化/持续主线(名字碎片过滤)/
+  尾注; 跨日状态 {date}-summary.json; 离线重跑 9-18 篇幅 -27%
+- Phase 4 posts 表拆分: 独立 posts 表(全局唯一去重), 幂等回填 101271 行,
+  insert_snapshot 同事务双写, get_existing_post_ids 切表(性能+根治
+  >90d 重复入库); verify_posts_migration.py 对账绿; 其余读路径切换
+  与停写 posts_data 留双写观察期后
+- Phase 5 工程卫生: 截断参数收敛 config(content_caps/max_posts_by_tier),
+  concurrency 3→5, requirements 补 openai
+
+### v2 详情层成本优化 (2026-09-20, 承接用户"少花 reader 的钱"诉求)
+- 通道全本地化, 智谱 reader 从主通道降为兜底 (当日实测: news 56 条
+  零 API 调用, 公告 PDF 全本地解析):
+  - 公告 PDF (A股巨潮/港股雪球托管) → urllib 直下 + pymupdf 本地解析,
+    零 API 成本; 此前"巨潮乱码"证实是 reader 服务端解析问题, 本地不存在;
+    中期/年度报告自动跳过封面+目录页 (否则 8000 字上限被目录吃光)
+  - news 网页 → opencli 本地浏览器 (selector 精确容器优先, 实测 8 篇
+    并行 17s, 取到的正文比 reader 全页输出干净); 按线程分配独立会话,
+    并发抓取不再互相顶掉 tab
+  - 美股公告 → SEC EDGAR 公开 API 直连 (curl 子进程: Python urllib 到
+    sec.gov 的 TLS 在本机不稳; UA 需带真实邮箱, 否则 403), 仅
+    6-K/8-K/10-K/10-Q/20-F/40-F 拉全文, 顺带剥 inline-XBRL 机器事实块
+  - 原文彻底拿不到时才付费搜标题拿"新闻解读" (降级产物标注来源)
+- 修复当日复盘发现的三处缺陷:
+  - 公告任务 SQL 漏选 stock_code → IndexError, 整轮详情补全失败
+  - classify_announcement 只认中文关键词, 美股 6-K/20-F 全被归为 other,
+    SEC EDGAR 通道实际收不到任务
+  - 时效闸只认新浪 URL 日期形态, 东财「相关推荐」的几个月前旧闻
+    (/a/YYYYMMDD...html, 实测最旧 159 天) 全部漏网; 补东财/同花顺形态后
+    当日详情任务 111 → 56 条
+- 质量闸: 404/跳转占位页 (新浪 404 会 5 秒后跳首页, 首页 body 是 2 万字
+  菜单堆) 与 Chrome 连接错误页一律弃用; 单条抓取异常不再拖垮整批
+- 观测: 详情抓取日志现在带通道名 (cache / pdf_local / opencli / reader),
+  grep "[detail] reader" 即可核对当日付费调用数

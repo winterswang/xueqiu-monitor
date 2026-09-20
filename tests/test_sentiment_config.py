@@ -56,3 +56,30 @@ def test_llm_timeouts_allow_minimax_long_batches():
         f"SENTIMENT_TOTAL_TIMEOUT={sentiment.SENTIMENT_TOTAL_TIMEOUT}s < 300s; "
         "thread-level cap will trip before LLM finishes"
     )
+
+
+# ════════════════════════════════════════════════════════
+# score_news_post (2026-09-20: opencli news 并入路径的关键词打分)
+# ════════════════════════════════════════════════════════
+
+
+class TestScoreNewsPost:
+    """Public single-headline scorer must match _analyze_news semantics."""
+
+    def test_bullish_headline(self):
+        assert sentiment.score_news_post("公司宣布大额回购股份") == 0.5
+
+    def test_bearish_headline(self):
+        assert sentiment.score_news_post("股价暴跌, 股东拟减持") == -0.5
+
+    def test_mixed_signal_neutral(self):
+        # 同时含看涨与看跌词 → 0.0 (与 _analyze_news 的 mixed 分支一致)
+        title = "暴涨之后又暴跌"
+        assert sentiment.score_news_post(title) == 0.0
+
+    def test_no_signal_neutral(self):
+        assert sentiment.score_news_post("公司发布中期报告") == 0.0
+
+    def test_content_used_as_fallback(self):
+        # 标题无信号但正文前 100 字含看跌词 → -0.5
+        assert sentiment.score_news_post("中报出炉", "业绩暴雷") == -0.5

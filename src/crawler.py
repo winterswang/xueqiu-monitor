@@ -686,7 +686,7 @@ def _crawl_with_retry(stock_code: str, timeout: int, max_retries: int = 0,
 
 
 def _compute_sentiment_avg(posts: list[dict]) -> float:
-    """Placeholder: average sentiment from posts_data. All 0.0 for Phase 1."""
+    """posts_data 的等权平均情感分 (news 并入后重算 sentiment_avg 用)."""
     if not posts:
         return 0.0
     scores = [p.get("sentiment_score", 0.0) for p in posts]

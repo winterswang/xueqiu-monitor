@@ -98,6 +98,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         logger.info("[migrate] added column ann_link to announcements")
 
+    # v2 Phase 2 (2026-09-20): ann_detail stores announcement full-text /
+    # search-fallback context fetched by detail_fetcher; detail_fetch_log
+    # caches per-link fetch results (status incl. failure marks).
+    if not any(c[1] == "ann_detail" for c in ann_cols):
+        conn.execute(
+            "ALTER TABLE announcements ADD COLUMN ann_detail TEXT NOT NULL DEFAULT ''"
+        )
+        logger.info("[migrate] added column ann_detail to announcements")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS detail_fetch_log (
+            link       TEXT PRIMARY KEY,
+            status     TEXT    NOT NULL,
+            title      TEXT    NOT NULL DEFAULT '',
+            content    TEXT    NOT NULL DEFAULT '',
+            fetched_at INTEGER NOT NULL
+        )"""
+    )
+
     # v0.7 F4: purge generic/noise words from hot_word_dict. Before v0.7 the
     # storage path stored every TF-IDF token without the alert path's stopword
     # filter, polluting the dict with words like ai/市场/这个/就是. This removes
@@ -200,12 +218,110 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except Exception as e:  # detector import must never block init_db
         logger.warning("[migrate] hot_word_dict noise purge skipped: %s", e)
 
+    # v2 Phase 4 (2026-09-20): posts 表回填 — 从 crawl_snapshots.posts_data
+    # 拆出独立 posts 行。幂等 marker (db_meta.posts_backfill_max_snapshot_id):
+    # 只处理 id > marker 的快照; 回填后老代码又跑了一段时间的增量会在下次
+    # init_db 自动补齐 (自愈)。顺序必须 crawl_time 全局降序 —— INSERT OR
+    # IGNORE 先见者胜 = 最新快照的副本胜出 (互动数更新, 时间串更新鲜),
+    # 与 export_csv 先见先留语义一致。实测全量 ~11.4 万行单事务 3-8s。
+    _backfill_posts(conn)
+
+
+def _backfill_posts(conn: sqlite3.Connection) -> None:
+    """posts 表回填 (幂等, 见 _run_migrations 注释)."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    row = conn.execute(
+        "SELECT value FROM db_meta WHERE key='posts_backfill_max_snapshot_id'"
+    ).fetchone()
+    marker = int(row[0]) if row else 0
+    upper = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM crawl_snapshots"
+    ).fetchone()[0]
+    if marker >= upper:
+        return
+
+    # 相对时间串 ("3分钟前") 的解析基准是 crawl_time; 解析器在 crawler 里,
+    # 函数级导入避免 db → crawler 的模块级循环依赖 (与 detector 同款守卫)
+    try:
+        from .crawler import _parse_post_time
+    except Exception:
+        def _parse_post_time(s, now):  # noqa: F811 — 解析不可用时 post_ts=0
+            return 0.0
+
+    snaps = conn.execute(
+        "SELECT id, stock_code, crawl_time, posts_data FROM crawl_snapshots "
+        "WHERE id > ? AND id <= ? ORDER BY crawl_time DESC, id DESC",
+        (marker, upper),
+    ).fetchall()
+    inserted = ignored = 0
+    for s_id, code, crawl_time, posts_json in snaps:
+        try:
+            items = json.loads(posts_json) if posts_json else []
+        except (ValueError, TypeError):
+            logger.warning("[migrate] snapshot %s posts_data 不可解析, 跳过", s_id)
+            continue
+        for p in items:
+            row = _post_row_tuple(p, code, crawl_time, _parse_post_time)
+            cur = conn.execute(_POSTS_INSERT_SQL, (*row, s_id, crawl_time))
+            if cur.rowcount > 0:
+                inserted += 1
+            else:
+                ignored += 1
+    conn.execute(
+        "INSERT INTO db_meta(key, value) "
+        "VALUES('posts_backfill_max_snapshot_id', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(upper),),
+    )
+    logger.info(
+        "[migrate] posts backfill: %d inserted, %d dup-ignored (marker %d → %d)",
+        inserted, ignored, marker, upper,
+    )
+
 
 # ════════════════════════════════════════════════════════
 # crawl_snapshots
 # ════════════════════════════════════════════════════════
 
+def _post_row_tuple(
+    p: dict, code: str, crawl_time: int, parse_time=None
+) -> tuple:
+    """posts 表行构造 (回填与双写共用). dedup_key = post_id→link 兜底."""
+    if parse_time is None:
+        try:
+            from .crawler import _parse_post_time as parse_time
+        except Exception:
+            parse_time = lambda s, now: 0.0  # noqa: E731
+    post_id = (p.get("post_id") or "").strip()
+    link = (p.get("link") or "").strip()
+    return (
+        code, post_id or link or None, post_id, p.get("type") or "",
+        p.get("title") or "", p.get("content") or "", p.get("author") or "",
+        p.get("time") or "",
+        int(parse_time(p.get("time") or "", crawl_time)),
+        int(p.get("like_count") or 0), int(p.get("comment_count") or 0),
+        int(p.get("forward_count") or 0),
+        float(p.get("sentiment_score") or 0.0),
+        link,
+    )
+
+
+_POSTS_INSERT_SQL = (
+    """INSERT OR IGNORE INTO posts
+       (stock_code, dedup_key, post_id, post_type, title, content, author,
+        time_text, post_ts, like_count, comment_count, forward_count,
+        sentiment_score, link, snapshot_id, first_seen_ts)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+)
+
+
 def insert_snapshot(db_path: str, snap: CrawlSnapshot) -> int:
+    """Insert snapshot + 同事务双写 posts 表 (v2 Phase 4).
+
+    posts 写失败则快照整体回滚 (宁缺毋分叉); posts_data 保留双写观察期。
+    """
     d = snap.to_dict()
     del d["id"]
     with _connect(db_path) as conn:
@@ -214,7 +330,11 @@ def insert_snapshot(db_path: str, snap: CrawlSnapshot) -> int:
                VALUES (:stock_code, :crawl_time, :posts_count, :posts_data, :sentiment_avg, :status)""",
             d
         )
-        return cur.lastrowid
+        snapshot_id = cur.lastrowid
+        for p in snap.posts_data or []:
+            row = _post_row_tuple(p, snap.stock_code, snap.crawl_time)
+            conn.execute(_POSTS_INSERT_SQL, (*row, snapshot_id, snap.crawl_time))
+        return snapshot_id
 
 
 def get_latest_snapshot(db_path: str, stock_code: str) -> CrawlSnapshot | None:
@@ -234,6 +354,59 @@ def get_previous_snapshot(db_path: str, stock_code: str, before_time: int) -> Cr
             (stock_code, before_time)
         ).fetchone()
         return CrawlSnapshot.from_row(row) if row else None
+
+
+def fetch_day_posts_union(
+    db_path: str,
+    date_str: str,
+    stock_code: str | None = None,
+) -> dict[str, list[dict]]:
+    """当日全部快照的帖子并集，按 (post_id→link 兜底) 去重。
+
+    2026-09-20 修: 日报/温度计此前只读当日最新一个快照, 而 crawl_single_stock
+    会把每个快照裁成"仅比上次水位更新的帖子" —— 一天多轮爬取时, 早间帖子
+    从最新快照里消失, 日报直接丢帖 (export_csv 2026-09-14 修过同款问题,
+    实测 9/13 当天 8 只股票被抓 2-3 次, 197 条已入库帖子丢进 CSV 之外,
+    日报路径同样受影响)。
+
+    去重保留 crawl_time 最新快照的副本 (互动数单调递增, 相对时间串最新鲜),
+    与 export_csv 的先见先留语义一致。post_id 与 link 都为空的帖子不参与
+    去重, 全部保留 (过不了下游 min_length 过滤的天然少数)。
+
+    Returns: {stock_code: [post dict, ...]}
+    """
+    q = (
+        "SELECT stock_code, posts_data FROM crawl_snapshots "
+        "WHERE date(crawl_time,'unixepoch','localtime')=? "
+    )
+    params: list = [date_str]
+    if stock_code:
+        q += "AND stock_code=? "
+        params.append(stock_code)
+    # crawl_time DESC + id DESC: 先见 = 最新快照的副本胜出
+    q += "ORDER BY stock_code, crawl_time DESC, id DESC"
+
+    result: dict[str, list[dict]] = {}
+    seen: dict[str, set[str]] = {}
+    with _connect(db_path) as conn:
+        for row in conn.execute(q, params).fetchall():
+            code = row["stock_code"]
+            if not row["posts_data"]:
+                continue
+            try:
+                posts = json.loads(row["posts_data"])
+            except (ValueError, TypeError):
+                continue
+            bucket = result.setdefault(code, [])
+            keys = seen.setdefault(code, set())
+            for p in posts:
+                key = (p.get("post_id") or "").strip() or (p.get("link") or "").strip()
+                if key:
+                    if key in keys:
+                        continue
+                    keys.add(key)
+                bucket.append(p)
+    return result
 
 
 # ════════════════════════════════════════════════════════
@@ -542,6 +715,49 @@ def get_announcements_by_snapshot(db_path: str, snapshot_id: int) -> list[dict]:
         ]
 
 
+def set_ann_detail(db_path: str, ann_id: int, detail: str) -> None:
+    """Persist fetched announcement detail (v2 Phase 2). Idempotent overwrite."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE announcements SET ann_detail=? WHERE id=?", (detail, ann_id)
+        )
+
+
+# ════════════════════════════════════════════════════════
+# detail_fetch_log (v2 Phase 2)
+# ════════════════════════════════════════════════════════
+
+def get_detail_fetch(db_path: str, link: str) -> dict | None:
+    """当日有效的详情抓取缓存; 跨日返回 None (公告解读允许次日更新)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT status, title, content, fetched_at FROM detail_fetch_log WHERE link=?",
+            (link,)
+        ).fetchone()
+        if not row:
+            return None
+        if int(row["fetched_at"]) < time.time() - 86400:
+            return None
+        return {
+            "status": row["status"], "title": row["title"], "content": row["content"]
+        }
+
+
+def insert_detail_fetch(
+    db_path: str, link: str, status: str, title: str, content: str
+) -> None:
+    """Upsert a fetch-log row (failure marks included — no same-day retry)."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO detail_fetch_log (link, status, title, content, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(link) DO UPDATE SET
+                 status=excluded.status, title=excluded.title,
+                 content=excluded.content, fetched_at=excluded.fetched_at""",
+            (link, status, title, content, int(time.time()))
+        )
+
+
 def get_recent_announcement_alerts(
     db_path: str, stock_code: str, dedup_hash: str, days: int = 7
 ) -> list[dict]:
@@ -619,16 +835,22 @@ def get_existing_post_ids(db_path: str, stock_code: str, window_days: int = 90) 
 
     窗口从 30 天放宽到 90 天: 安静股票的老帖会长期停留在最新 feed 里,
     窗口太窄就会周期性重复入库。
+
+    2026-09-20 (v2 Phase 4) 改: 读独立 posts 表**全量**(不再按窗口)。
+    - 性能: 旧查询对窗口内全部快照做 json_each 全展开(90 天 × 每股多快照
+      × ~100 帖), 新查询纯索引扫描 uq_posts_stock_dedup;
+    - 正确性: >90 天老帖此前会周期性重复入库, 现在 uq 索引是全局硬保证,
+      此集合只是预过滤。window_days 参数保留仅为签名兼容。
+    语义兼容: 旧集合过滤 falsy post_id; 新集合返回 dedup_key ——
+    post_id 非空时两者同值, post_id 为空(旧版漏判)时爬虫侧判新、
+    INSERT OR IGNORE 被唯一索引挡住, 终态仍正确。
     """
-    cutoff = int(time.time()) - window_days * 86400
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """SELECT DISTINCT json_extract(p.value, '$.post_id')
-               FROM crawl_snapshots cs, json_each(cs.posts_data) p
-               WHERE cs.stock_code = ? AND cs.crawl_time > ?""",
-            (stock_code, cutoff)
+            "SELECT dedup_key FROM posts WHERE stock_code=? AND dedup_key IS NOT NULL",
+            (stock_code,),
         ).fetchall()
-        return {r[0] for r in rows if r[0]}
+        return {r[0] for r in rows}
 
 
 def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float) -> None:

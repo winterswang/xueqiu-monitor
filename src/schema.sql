@@ -109,7 +109,55 @@ CREATE TABLE IF NOT EXISTS announcements (
     ann_type    TEXT    NOT NULL DEFAULT '',
     ann_link    TEXT    NOT NULL DEFAULT '',
     is_new      INTEGER NOT NULL DEFAULT 1,
+    ann_detail  TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (snapshot_id) REFERENCES crawl_snapshots(id)
+);
+
+-- 11. detail_fetch_log — 详情抓取缓存 (v2 Phase 2, 2026-09-20)
+-- news/公告正文按 link 幂等缓存, status 含失败标记 (error/garbled) 防当日反复重试;
+-- 当日缓存次日过期 (get 侧按 fetched_at 过滤), 跨日公告解读允许更新。
+CREATE TABLE IF NOT EXISTS detail_fetch_log (
+    link       TEXT PRIMARY KEY,
+    status     TEXT    NOT NULL,
+    title      TEXT    NOT NULL DEFAULT '',
+    content    TEXT    NOT NULL DEFAULT '',
+    fetched_at INTEGER NOT NULL
+);
+
+-- 12. posts — 帖子独立表 (v2 Phase 4, 2026-09-20)
+-- 从 crawl_snapshots.posts_data (JSON 数组塞一个 TEXT 列) 拆出:
+-- 去重查询不再 json_each 全展开; (stock_code, dedup_key) 全局唯一约束
+-- 根治 90 天窗口外老帖周期性重复入库。dedup_key = post_id→link 兜底,
+-- 两者皆空为 NULL (SQLite 唯一索引 NULL 互不相等, 退化行不去重不冲突)。
+-- posts_data 双写保留一个观察期, 之后写 '[]' (列不 DROP, 旧 JSON 归档)。
+CREATE TABLE IF NOT EXISTS posts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code      TEXT    NOT NULL,
+    dedup_key       TEXT,
+    post_id         TEXT    NOT NULL DEFAULT '',
+    post_type       TEXT    NOT NULL DEFAULT '',
+    title           TEXT    NOT NULL DEFAULT '',
+    content         TEXT    NOT NULL DEFAULT '',
+    author          TEXT    NOT NULL DEFAULT '',
+    time_text       TEXT    NOT NULL DEFAULT '',
+    post_ts         INTEGER NOT NULL DEFAULT 0,
+    like_count      INTEGER NOT NULL DEFAULT 0,
+    comment_count   INTEGER NOT NULL DEFAULT 0,
+    forward_count   INTEGER NOT NULL DEFAULT 0,
+    sentiment_score REAL    NOT NULL DEFAULT 0.0,
+    link            TEXT    NOT NULL DEFAULT '',
+    snapshot_id     INTEGER NOT NULL,
+    first_seen_ts   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (snapshot_id) REFERENCES crawl_snapshots(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_stock_dedup ON posts(stock_code, dedup_key);
+CREATE INDEX IF NOT EXISTS idx_posts_stock_seen ON posts(stock_code, first_seen_ts);
+CREATE INDEX IF NOT EXISTS idx_posts_snapshot ON posts(snapshot_id);
+
+-- 13. db_meta — 迁移进度标记等 KV (v2 Phase 4)
+CREATE TABLE IF NOT EXISTS db_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 -- 9. xueqiu_monitor_meta — 增量爬取元数据

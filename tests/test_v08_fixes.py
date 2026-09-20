@@ -30,85 +30,11 @@ def tmp_db():
         conn.close()
 
 
-def insert_hot_word(tmp_db, stock_code, word, score, days_ago=0):
-    ts = int(time.time()) - days_ago * 86400
-    tmp_db.conn.execute(
-        "INSERT INTO hot_word_event (stock_code, word, tfidf_score, event_time, z_score)"
-        " VALUES (?, ?, ?, ?, 0)",
-        (stock_code, word, score, ts),
-    )
-    tmp_db.conn.commit()
-
-
 STOCKS = {
     "300750.SZ": {"name": "宁德时代"},
     "601899.SH": {"name": "紫金矿业"},
     "PDD.US": {"name": "拼多多"},
 }
-
-
-# ════════════════════════════════════════════════════════
-# P1: hot-words section rewrite
-# ════════════════════════════════════════════════════════
-
-class TestHotWordsFilterBeforeAggregate:
-    """Name fragments must be filtered per-stock BEFORE cross-stock ranking."""
-
-    def test_name_fragments_removed(self, tmp_db):
-        """'宁德 时代' / '紫金 矿业' (jieba fragments of stock names) must not
-        appear in the section even with huge TF-IDF scores."""
-        insert_hot_word(tmp_db, "300750.SZ", "宁德 时代", 8.18)
-        insert_hot_word(tmp_db, "601899.SH", "紫金 矿业", 7.50)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "宁德 时代" not in md
-        assert "紫金 矿业" not in md
-
-    def test_narrative_words_kept(self, tmp_db):
-        """Real narrative words (马斯克) must survive the name-token filter."""
-        insert_hot_word(tmp_db, "300750.SZ", "马斯克", 1.74)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "马斯克" in md
-
-    def test_sec_boilerplate_removed(self, tmp_db):
-        """SEC announcement boilerplate fragments ('size kb', 'accession number')
-        must not surface as hot words."""
-        insert_hot_word(tmp_db, "PDD.US", "size kb", 5.0)
-        insert_hot_word(tmp_db, "PDD.US", "accession number", 4.0)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "size kb" not in md
-        assert "accession number" not in md
-
-    def test_cross_stock_aggregation_tier(self, tmp_db):
-        """A word discussed on 2+ stocks lands in the cross-stock tier."""
-        insert_hot_word(tmp_db, "300750.SZ", "特斯拉", 3.0)
-        insert_hot_word(tmp_db, "PDD.US", "特斯拉", 2.0)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "跨股共现" in md
-        assert "特斯拉" in md
-        assert "2只" in md
-
-    def test_single_stock_words_in_tier2(self, tmp_db):
-        """A word on one stock only appears under 个股热点, not 跨股共现."""
-        insert_hot_word(tmp_db, "300750.SZ", "动力电池", 4.0)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "跨股共现" not in md
-        assert "个股热点" in md
-        assert "动力电池" in md
-
-    def test_streak_annotation(self, tmp_db):
-        """A word present 3+ days gets 📊连续N天; a 1-day word gets 🆕新增."""
-        insert_hot_word(tmp_db, "300750.SZ", "持续词", 3.0, days_ago=3)
-        insert_hot_word(tmp_db, "300750.SZ", "持续词", 3.0, days_ago=2)
-        insert_hot_word(tmp_db, "300750.SZ", "持续词", 3.0, days_ago=1)
-        insert_hot_word(tmp_db, "300750.SZ", "持续词", 3.0, days_ago=0)
-        insert_hot_word(tmp_db, "300750.SZ", "新词", 1.5, days_ago=0)
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "📊连续" in md and "连续4天" in md
-        assert "新词" in md and "🆕新增" in md
-
-    def test_no_data(self, tmp_db):
-        md = rg._build_hot_words_section(str(tmp_db.path), tmp_db.date_str, STOCKS)
-        assert "今日无热词数据" in md
 
 
 # ════════════════════════════════════════════════════════

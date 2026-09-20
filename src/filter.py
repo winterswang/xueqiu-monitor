@@ -155,9 +155,21 @@ def filter_alerts(
 
     # Step 1: assign priority
     for alert in alerts:
-        # Announcements are informational events, not statistical anomalies → always P2
+        # Announcements are informational events, not statistical anomalies.
+        # v2 Phase 2 (2026-09-20): 高权重公告(财报/收购/回购/审批等,
+        # detail_fetcher.classify_announcement)升 P1 进汇总推送; 例行披露
+        # (翌日披露/督导/更正)仍 P2 静默 —— 否则腾讯每日购回报表这类
+        # 高频例行件与 FDA 审批同级, P1 通道被淹没。
         if alert.alert_type == "new_announcement":
-            alert.priority = "P2"
+            try:
+                from .detail_fetcher import classify_announcement
+                title = (alert.detail or {}).get("title", "") if isinstance(
+                    alert.detail, dict) else ""
+                alert.priority = (
+                    "P1" if classify_announcement(title) == "high" else "P2"
+                )
+            except Exception:
+                alert.priority = "P2"
         else:
             alert.priority = assign_priority(alert, config)
             if cold_start and alert.priority != "P0":
