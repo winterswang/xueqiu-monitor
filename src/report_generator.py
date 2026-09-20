@@ -893,14 +893,19 @@ def analyze_stock(
         logger.info(
             f"  {stock_code}: 当日及近{FALLBACK_MAX_AGE_DAYS}日均无帖，跳过"
         )
+        # 正文必须以"（无新增量）"开头 —— 组装层靠这个前缀把股票归入
+        # "平稳股（无新增量，仅读数）"紧凑列表。此前写"今日及近7日无帖子数据。"
+        # 没有该前缀, 结果 0 帖的股票被塞进"其他今日有增量的股票"完整小节
+        # (2026-09-19 实测: 特斯拉当日/近7日 0 帖, 标题与内容自相矛盾)
         return {
             "section": (
                 f"#### {stock_name} [{stock_code}]\n\n"
                 f"{caliber}\n\n"
-                f"今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
+                f"（无新增量）今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
             ),
             "tier": TIER_FLAT,
             "takeaway": "",
+            "analyzed": False,
         }
 
     trend = fetch_sentiment_trend(db_path, stock_code)
@@ -1580,6 +1585,7 @@ def generate_daily_report(
                     ),
                     "tier": TIER_STD,
                     "takeaway": "",
+                    "analyzed": False,
                 }
 
     deep_set = {c for c, r in results.items() if r["tier"] == TIER_DEEP}
@@ -1639,6 +1645,7 @@ def generate_daily_report(
             flat_full.append(section)
 
     n_deep, n_std, n_flat = len(deep_codes), len(std_codes), len(flat_rows) + len(flat_full)
+    n_analyzed = sum(1 for r in results.values() if r.get("analyzed", True))
     stock_md = ["## 三、个股深读\n"]
     for c in deep_codes + std_codes:
         stock_md.append(_as_block(results[c]["section"]))
@@ -1653,7 +1660,12 @@ def generate_daily_report(
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     notes = [
         f"今日口径: 深读 {n_deep} 只 · 标准 {n_std} 只 · 平稳 {n_flat} 只"
-        f"（全部 {len(stocks_cfg)} 只均经 LLM 分析，档位只决定呈现）",
+        f"（{n_analyzed}/{len(stocks_cfg)} 只经 LLM 分析"
+        + (
+            f"，{len(stocks_cfg) - n_analyzed} 只近 7 日无帖仅记录"
+            if n_analyzed < len(stocks_cfg) else ""
+        )
+        + "；档位只决定呈现）",
         "帖数 `100+` 为单次抓取上限截断值；标注「近7日」的股票当日无帖、已回退 7 日窗口。",
         f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
         f"今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文；主线与热词来自 TF-IDF。",
@@ -1661,7 +1673,7 @@ def generate_daily_report(
     # 汇总当日异常涌现热词进尾注 (≤5 个)
     notes_md = "\n".join(f"- {n}" for n in notes)
 
-    report = f"""# 📊 自选股舆情日报
+    report = f"""# 📊 自选股舆情日报 {date_str}
 
 **日期**: {date_str}
 **生成时间**: {now_str}

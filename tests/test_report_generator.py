@@ -751,3 +751,29 @@ class TestAlertSummary:
         assert rg._alert_summary({"type": "post_spike", "detail": {}}) != ""
         assert rg._alert_summary({"type": "unknown_kind", "detail": {}}) == "unknown_kind"
 
+
+class TestNoDataStock:
+    """0 帖股票必须进"平稳股"紧凑行, 不能占一个"有增量"小节."""
+
+    def test_zero_post_stock_is_compact_flat(self, tmp_db):
+        res = rg.analyze_stock(
+            "TSLA.US", "特斯拉", str(tmp_db.path), tmp_db.date_str,
+            {"llm": {"min_post_length": 30}},
+        )
+        assert res["tier"] == rg.TIER_FLAT
+        assert res["analyzed"] is False
+        body = res["section"].split("\n\n", 2)[2]
+        # 组装层按此前缀把股票归入紧凑列表 (2026-09-19 实测特斯拉被误放进
+        # "其他今日有增量的股票" 完整小节)
+        assert body.strip().startswith("（无新增量）")
+
+    def test_compact_row_uses_the_marker(self, tmp_db):
+        res = rg.analyze_stock(
+            "TSLA.US", "特斯拉", str(tmp_db.path), tmp_db.date_str,
+            {"llm": {"min_post_length": 30}},
+        )
+        body = res["section"].split("\n\n", 2)[2]
+        first_line = body.strip().splitlines()[0].strip()
+        assert first_line.startswith("（无新增量）")
+        assert len(first_line) < 88
+
