@@ -1622,7 +1622,8 @@ def generate_daily_report(
                 f"，{len(stocks_cfg) - n_analyzed} 只近 7 日无帖仅记录"
                 if n_analyzed < len(stocks_cfg) else ""
             )
-            + "；档位只决定呈现）"
+            # 全部深读时"档位只决定呈现"是废话, 只在真有分档时提
+            + ("；档位只决定呈现）" if n_std else "）")
         ),
         "帖数 `100+` 为单次抓取上限截断值；标注「近7日」的股票当日无帖、已回退 7 日窗口。",
         f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
