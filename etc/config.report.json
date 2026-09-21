@@ -189,6 +189,7 @@
     "news_per_stock": 5
   },
   "tier": {
+    "deep_all": true,
     "deep_engagement": 100,
     "deep_material_chars": 10000,
     "std_min_posts": 3

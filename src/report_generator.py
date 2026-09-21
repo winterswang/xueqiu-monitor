@@ -723,6 +723,7 @@ def _tier_instructions(tier: str, scope: str) -> str:
     - deep (深读): 新五段, 增量优先 —— 🆕新增/交锋/判断/风险/读数,
       并要求单列"⭐最有价值观点"供全场要点节挑选
     - std (标准): 只写主线新进展一段 —— 延续型讨论不重复展开
+      (2026-09-21 起默认不启用: tier.deep_all=true 时有帖即深读)
     - flat (平稳): 低流量指令 —— 无增量时允许输出一行结论
     """
     if tier == TIER_STD:
@@ -764,6 +765,10 @@ def _tier_instructions(tier: str, scope: str) -> str:
 
 **⭐最有价值观点**（单独一行，供全场要点挑选）：
 `⭐ [股票]一句话观点（引用编号）`
+
+⚠️ 素材不足时的例外：若该股当天素材确实极少（例如仅 1-2 帖且零互动、
+无公告/资讯详情），**不要为凑齐小节而编造** —— 只输出「🆕 {scope}新增」
+（写明"{scope}无新增，仅零星闲聊/零互动噪音"）与「情感读数」两节即可。
 
 ⚠️ 格式要求：
 - 五个小节标题必须用 `#### `（4 个 #）开头，**严禁**输出 `#`/`##`/`###` 级别的大标题
@@ -989,8 +994,10 @@ def classify_stock_tier(
     - 当日有 KOL 白名单作者帖 (kol_whitelist.json)
     - 当日 P0/P1 告警 (z-score 异动/高权重公告)
     - 当日高权重公告 (classify_announcement=='high')
-    规则: 当日互动总量 ≥ tier.deep_engagement (默认 100) → 深读;
-    当日帖 ≥ 3 → 标准; 其余 → 平稳.
+    2026-09-21 起: **有帖就深读**（tier.deep_all, 默认开）—— 不再有"标准"
+    档; 当日与近 7 日都无帖的才进"平稳"紧凑行。此前的分档规则 (互动量 ≥
+    deep_engagement / 正文 ≥ deep_material_chars / 帖 ≥ std_min_posts)
+    保留在 deep_all=false 时生效, 便于回滚。
 
     day_engagement: 当日**并集**互动总量 (温度计同源)。不传时退回用传入
     posts 计算 —— 但那个集合已剔除回复/资讯, 会显著低估 (见调用点注释)。
@@ -999,6 +1006,9 @@ def classify_stock_tier(
     44 帖 2.6 万字, 并集互动仅 71, 只按互动判会掉进"标准"两句话模板)。
     """
     from .detail_fetcher import classify_announcement
+
+    if not posts:
+        return TIER_FLAT   # 无帖 → 平稳紧凑行 (调用方也会先走无数据分支)
 
     kol = _load_kol_whitelist()
     if any((p.get("author") or "") in kol for p in posts):
@@ -1017,6 +1027,9 @@ def classify_stock_tier(
             for p in posts
         )
     tier_cfg = config.get("tier", {})
+    if tier_cfg.get("deep_all", True):
+        # 有帖即深读 (用户决定: 不要"标准"档)
+        return TIER_DEEP
     if day_engagement >= int(tier_cfg.get("deep_engagement", 100)):
         return TIER_DEEP
     if material_chars is None:
@@ -1595,13 +1608,22 @@ def generate_daily_report(
     # ── 尾注 ──
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     notes = [
-        f"今日口径: 深读 {n_deep} 只 · 标准 {n_std} 只 · 平稳 {n_flat} 只"
-        f"（{n_analyzed}/{len(stocks_cfg)} 只经 LLM 分析"
-        + (
-            f"，{len(stocks_cfg) - n_analyzed} 只近 7 日无帖仅记录"
-            if n_analyzed < len(stocks_cfg) else ""
-        )
-        + "；档位只决定呈现）",
+        (
+            "今日口径: "
+            + " · ".join(
+                seg for seg in (
+                    f"深读 {n_deep} 只" if n_deep else "",
+                    f"标准 {n_std} 只" if n_std else "",
+                    f"平稳 {n_flat} 只" if n_flat else "",
+                ) if seg
+            )
+            + f"（{n_analyzed}/{len(stocks_cfg)} 只经 LLM 分析"
+            + (
+                f"，{len(stocks_cfg) - n_analyzed} 只近 7 日无帖仅记录"
+                if n_analyzed < len(stocks_cfg) else ""
+            )
+            + "；档位只决定呈现）"
+        ),
         "帖数 `100+` 为单次抓取上限截断值；标注「近7日」的股票当日无帖、已回退 7 日窗口。",
         f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
         f"今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文；主线与热词来自 TF-IDF。",

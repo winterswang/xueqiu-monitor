@@ -650,76 +650,80 @@ class TestAnnouncementUrlPassthrough:
 
 
 class TestClassifyStockTier:
-    """三档判定: KOL/告警/高权重公告硬通道, 互动量/帖数规则."""
+    """三档判定. 2026-09-21 起默认"有帖即深读" (deep_all), 无帖才平稳.
 
-    def test_kol_post_forces_deep(self, tmp_db, monkeypatch):
-        monkeypatch.setattr(rg, "_load_kol_whitelist", lambda: {"但斌"})
-        posts = [{"title": "t", "content": "c", "author": "但斌"}]
-        tier = rg.classify_stock_tier("A.HK", posts, [], [], {})
-        assert tier == rg.TIER_DEEP
+    旧的分档规则 (硬通道 / 互动量 / 材料量 / 帖数) 保留在 deep_all=false
+    时生效, 这里两条路径都覆盖。
+    """
 
-    def test_p1_alert_forces_deep(self):
-        posts = [{"title": "t", "content": "c", "author": "路人"}]
-        alerts = [{"type": "hot_word_surge", "priority": "P1", "z_score": 3.0, "detail": {}}]
-        assert rg.classify_stock_tier("A.HK", posts, alerts, [], {}) == rg.TIER_DEEP
-
-    def test_high_value_announcement_forces_deep(self):
-        posts = [{"title": "t", "content": "c", "author": "路人"}]
-        anns = [{"title": "2026年中期报告"}]
-        assert rg.classify_stock_tier("A.HK", posts, [], anns, {}) == rg.TIER_DEEP
-
-    def test_engagement_threshold_deep(self):
-        posts = [
-            {"title": "t", "content": "c", "author": "x",
-             "like_count": 40, "comment_count": 10, "forward_count": 0}
-            for _ in range(3)
-        ]
-        assert rg.classify_stock_tier("A.HK", posts, [], [], {}) == rg.TIER_DEEP
-
-    def test_std_and_flat(self):
-        std_posts = [{"title": "t", "content": "c", "author": "x"}] * 3
-        assert rg.classify_stock_tier("A.HK", std_posts, [], [], {}) == rg.TIER_STD
-        few = [{"title": "t", "content": "c", "author": "x"}]
-        assert rg.classify_stock_tier("A.HK", few, [], [], {}) == rg.TIER_FLAT
-
-    # ── 2026-09-21 修: 互动量必须按"当日并集"算, 另加材料量通道 ──
-    CFG = {"tier": {"deep_engagement": 100, "deep_material_chars": 10000,
-                    "std_min_posts": 3}}
+    LEGACY = {"tier": {"deep_all": False, "deep_engagement": 100,
+                       "deep_material_chars": 10000, "std_min_posts": 3}}
 
     @staticmethod
-    def _mk(n=5, content="正文" * 50, like=0):
+    def _mk(n=5, content="正文" * 50, like=0, author="A"):
         return [{"title": "t", "content": content, "like_count": like,
-                 "comment_count": 0, "forward_count": 0, "author": "A"}
+                 "comment_count": 0, "forward_count": 0, "author": author}
                 for _ in range(n)]
 
-    def test_deep_by_day_union_engagement(self):
+    # ── 默认路径: 有帖即深读 ──
+    def test_any_post_is_deep(self):
+        for n in (1, 3, 30):
+            assert rg.classify_stock_tier(
+                "A.HK", self._mk(n, content="短"), [], [], {}
+            ) == rg.TIER_DEEP
+
+    def test_zero_posts_is_flat(self):
+        assert rg.classify_stock_tier("A.HK", [], [], [], {}) == rg.TIER_FLAT
+
+    def test_kol_and_alerts_still_deep(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(rg, "_load_kol_whitelist", lambda: {"但斌"})
+        posts = [{"title": "t", "content": "c", "author": "但斌"}]
+        assert rg.classify_stock_tier("A.HK", posts, [], [], {}) == rg.TIER_DEEP
+        alerts = [{"type": "hot_word_surge", "priority": "P1",
+                   "z_score": 3.0, "detail": {}}]
+        assert rg.classify_stock_tier(
+            "A.HK", self._mk(2), alerts, [], {}
+        ) == rg.TIER_DEEP
+        anns = [{"title": "2026年中期报告"}]
+        assert rg.classify_stock_tier(
+            "A.HK", self._mk(2), [], anns, {}
+        ) == rg.TIER_DEEP
+
+    # ── 回滚路径: deep_all=false 时按互动/材料/帖数分档 ──
+    def test_legacy_engagement_threshold_deep(self):
+        posts = [{"title": "t", "content": "c", "author": "x",
+                  "like_count": 40, "comment_count": 10, "forward_count": 0}
+                 for _ in range(3)]
+        assert rg.classify_stock_tier(
+            "A.HK", posts, [], [], self.LEGACY
+        ) == rg.TIER_DEEP
+
+    def test_legacy_deep_by_day_union_engagement(self):
         """过滤后帖集互动很低, 但当日并集达标 → 深读.
 
         2026-09-20 实测: 茅台并集互动 301, 过滤后只剩 52; 用过滤集算会让
         全场只有 2 只过线, 深读塌缩成 6 只 (用户实测"后半篇全是薄小节")。
         """
         assert rg.classify_stock_tier(
-            "600519.SH", self._mk(5), [], [], self.CFG,
+            "600519.SH", self._mk(5), [], [], self.LEGACY,
             day_engagement=301, material_chars=1000,
         ) == rg.TIER_DEEP
 
-    def test_deep_by_material_volume(self):
+    def test_legacy_deep_by_material_volume(self):
         """互动低但材料足 (宁德时代 44 帖 2.6 万字, 并集互动 71) → 深读."""
         assert rg.classify_stock_tier(
-            "300750.SZ", self._mk(5), [], [], self.CFG,
+            "300750.SZ", self._mk(5), [], [], self.LEGACY,
             day_engagement=71, material_chars=26528,
         ) == rg.TIER_DEEP
 
-    def test_std_when_little_material_and_low_engagement(self):
+    def test_legacy_std_and_flat(self):
+        std_posts = [{"title": "t", "content": "c", "author": "x"}] * 3
         assert rg.classify_stock_tier(
-            "001232.SZ", self._mk(4, content="短内容" * 10), [], [], self.CFG,
-            day_engagement=20, material_chars=500,
+            "A.HK", std_posts, [], [], self.LEGACY
         ) == rg.TIER_STD
-
-    def test_few_posts_are_flat(self):
+        few = [{"title": "t", "content": "c", "author": "x"}]
         assert rg.classify_stock_tier(
-            "688775.SH", self._mk(2, content="短内容" * 10), [], [], self.CFG,
-            day_engagement=0, material_chars=200,
+            "A.HK", few, [], [], self.LEGACY
         ) == rg.TIER_FLAT
 
 
