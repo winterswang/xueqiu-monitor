@@ -190,6 +190,7 @@
   },
   "tier": {
     "deep_engagement": 100,
+    "deep_material_chars": 10000,
     "std_min_posts": 3
   },
   "ima": {

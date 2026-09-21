@@ -881,7 +881,25 @@ def analyze_stock(
     announcements = fetch_stock_announcements(db_path, stock_code, date_str)
 
     # v2 增量分档: 决定 prompt 模板与呈现格式 (全部股票照常调 LLM)
-    tier = classify_stock_tier(stock_code, posts, alerts, announcements, config)
+    # 档位的"互动量"口径必须是当日并集 (与温度计同源): 过滤后的帖集已剔除
+    # 回复/资讯, 而高互动帖恰恰常是回复与资讯 —— 用过滤集算会让 engagement
+    # 通道实际失效 (2026-09-20 实测: 并集 301 的茅台过滤后只剩 52, 全场
+    # 只有 2 只过 100 线, 深读塌缩成 6 只, 后半篇全是薄小节)
+    day_posts = db.fetch_day_posts_union(db_path, date_str, stock_code).get(
+        stock_code, []
+    )
+    day_engagement = sum(
+        int(p.get("like_count") or 0) + int(p.get("comment_count") or 0)
+        + int(p.get("forward_count") or 0)
+        for p in day_posts
+    )
+    tier = classify_stock_tier(
+        stock_code, posts, alerts, announcements, config,
+        day_engagement=day_engagement,
+        material_chars=sum(
+            len(p.get("content") or "") + len(p.get("title") or "") for p in posts
+        ),
+    )
 
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
@@ -962,6 +980,8 @@ def classify_stock_tier(
     alerts: list[dict],
     announcements: list[dict],
     config: dict,
+    day_engagement: Optional[int] = None,
+    material_chars: Optional[int] = None,
 ) -> str:
     """增量判定三档 (v2). 硬通道优先, 其余按互动量/帖数.
 
@@ -971,6 +991,12 @@ def classify_stock_tier(
     - 当日高权重公告 (classify_announcement=='high')
     规则: 当日互动总量 ≥ tier.deep_engagement (默认 100) → 深读;
     当日帖 ≥ 3 → 标准; 其余 → 平稳.
+
+    day_engagement: 当日**并集**互动总量 (温度计同源)。不传时退回用传入
+    posts 计算 —— 但那个集合已剔除回复/资讯, 会显著低估 (见调用点注释)。
+    material_chars: 分析帖正文总字数; ≥ tier.deep_material_chars (默认 1 万)
+    也判深读 —— 有些股票当天没人点赞但材料很足 (2026-09-20 实测: 宁德时代
+    44 帖 2.6 万字, 并集互动仅 71, 只按互动判会掉进"标准"两句话模板)。
     """
     from .detail_fetcher import classify_announcement
 
@@ -983,14 +1009,21 @@ def classify_stock_tier(
         classify_announcement(a.get("title", "")) == "high" for a in announcements
     ):
         return TIER_DEEP
-    engagement = sum(
-        int(p.get("like_count") or 0)
-        + int(p.get("comment_count") or 0)
-        + int(p.get("forward_count") or 0)
-        for p in posts
-    )
+    if day_engagement is None:
+        day_engagement = sum(
+            int(p.get("like_count") or 0)
+            + int(p.get("comment_count") or 0)
+            + int(p.get("forward_count") or 0)
+            for p in posts
+        )
     tier_cfg = config.get("tier", {})
-    if engagement >= int(tier_cfg.get("deep_engagement", 100)):
+    if day_engagement >= int(tier_cfg.get("deep_engagement", 100)):
+        return TIER_DEEP
+    if material_chars is None:
+        material_chars = sum(
+            len(p.get("content") or "") + len(p.get("title") or "") for p in posts
+        )
+    if material_chars >= int(tier_cfg.get("deep_material_chars", 10000)):
         return TIER_DEEP
     if len(posts) >= int(tier_cfg.get("std_min_posts", 3)):
         return TIER_STD

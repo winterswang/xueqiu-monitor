@@ -682,6 +682,46 @@ class TestClassifyStockTier:
         few = [{"title": "t", "content": "c", "author": "x"}]
         assert rg.classify_stock_tier("A.HK", few, [], [], {}) == rg.TIER_FLAT
 
+    # ── 2026-09-21 修: 互动量必须按"当日并集"算, 另加材料量通道 ──
+    CFG = {"tier": {"deep_engagement": 100, "deep_material_chars": 10000,
+                    "std_min_posts": 3}}
+
+    @staticmethod
+    def _mk(n=5, content="正文" * 50, like=0):
+        return [{"title": "t", "content": content, "like_count": like,
+                 "comment_count": 0, "forward_count": 0, "author": "A"}
+                for _ in range(n)]
+
+    def test_deep_by_day_union_engagement(self):
+        """过滤后帖集互动很低, 但当日并集达标 → 深读.
+
+        2026-09-20 实测: 茅台并集互动 301, 过滤后只剩 52; 用过滤集算会让
+        全场只有 2 只过线, 深读塌缩成 6 只 (用户实测"后半篇全是薄小节")。
+        """
+        assert rg.classify_stock_tier(
+            "600519.SH", self._mk(5), [], [], self.CFG,
+            day_engagement=301, material_chars=1000,
+        ) == rg.TIER_DEEP
+
+    def test_deep_by_material_volume(self):
+        """互动低但材料足 (宁德时代 44 帖 2.6 万字, 并集互动 71) → 深读."""
+        assert rg.classify_stock_tier(
+            "300750.SZ", self._mk(5), [], [], self.CFG,
+            day_engagement=71, material_chars=26528,
+        ) == rg.TIER_DEEP
+
+    def test_std_when_little_material_and_low_engagement(self):
+        assert rg.classify_stock_tier(
+            "001232.SZ", self._mk(4, content="短内容" * 10), [], [], self.CFG,
+            day_engagement=20, material_chars=500,
+        ) == rg.TIER_STD
+
+    def test_few_posts_are_flat(self):
+        assert rg.classify_stock_tier(
+            "688775.SH", self._mk(2, content="短内容" * 10), [], [], self.CFG,
+            day_engagement=0, material_chars=200,
+        ) == rg.TIER_FLAT
+
 
 class TestTakeawayExtraction:
     """⭐最有价值观点 精确锚定提取 (修复残缺片段)."""
