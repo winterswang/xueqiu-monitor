@@ -174,8 +174,9 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
             if _ocli_ok():
                 logger.info(f"  opencli: 预取 {stock_code}")
-                try:
-                    for item in (_ocli_discs(stock_code, limit=100) or []):
+
+                def _extend_discussions(items: list) -> None:
+                    for item in (items or []):
                         _opencli_posts.append({
                             "type": "discussion",
                             "post_id": item.get("url", "") or item.get("id", ""),
@@ -193,6 +194,9 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                             "like_count": item.get("likes", 0) or 0,
                             "forward_count": item.get("retweets", 0) or 0,
                         })
+
+                try:
+                    _extend_discussions(_ocli_discs(stock_code, limit=100))
                     logger.info(f"  opencli: {len(_opencli_posts)} 条讨论")
                 except Exception as e:
                     logger.warning(f"  opencli 讨论失败: {e}")
@@ -207,6 +211,24 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                     logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
                 except Exception as e:
                     logger.warning(f"  opencli 公告失败: {e}")
+                # 2026-09-24: comments 限流形态兜底 —— 讨论空但公告正常, 说明是
+                # comments 接口被限流而非整站故障(981.HK 9/23、2423/300866 9/22-23
+                # 连续 failed 且快照不落库)。sleep 30s 后重试一次, 仍空才接受。
+                # 两路都空时不重试, 维持 Playwright 回退语义。
+                if not _opencli_posts and _opencli_notices:
+                    logger.info("  opencli: 讨论空但公告正常(疑似限流), 30s 后重试一次")
+                    time.sleep(30)
+                    try:
+                        _extend_discussions(_ocli_discs(stock_code, limit=100))
+                        if _opencli_posts:
+                            logger.info(
+                                f"  opencli: 讨论重试成功 {len(_opencli_posts)} 条 "
+                                f"(首次被限流, sleep 30s 后恢复)"
+                            )
+                        else:
+                            logger.warning("  opencli: 讨论重试仍为空")
+                    except Exception as e:
+                        logger.warning(f"  opencli 讨论重试失败: {e}")
         except Exception as e:
             logger.debug(f"  opencli 跳过: {e}")
 
