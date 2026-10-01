@@ -58,3 +58,78 @@ def test_health_gate_healthy_when_at_least_half_have_posts():
 
     assert health["status"] == "healthy"
     assert health["posts_coverage"] == 0.5
+
+# ─────────────────────────────────────────────────────────────
+# 资讯维度（2026-10-01 事故回归）
+#
+# 事故形态：资讯整源失效（被风控验证页挡住 / 取数静默失败），
+# 但 posts_count = 讨论+公告+资讯 是聚合计数，被讨论量稀释后仍 > 0，
+# 于是 health 报 healthy、日报照发 —— 失效完全不可见。
+# 因此健康判定必须把资讯当成独立维度，按「错误率」判定。
+# ─────────────────────────────────────────────────────────────
+
+
+def _result_with_news(code: str, news_status: str, posts_count: int = 50) -> dict:
+    return {
+        "stock_code": code,
+        "status": "success",
+        "posts_count": posts_count,
+        "news_status": news_status,
+        "diagnostic": {},
+    }
+
+
+def test_news_total_failure_degrades_health_even_when_posts_are_healthy():
+    """讨论全部正常、资讯全部异常 → 必须 degraded（这就是被稀释的情形）。"""
+    results = [_result_with_news(f"S{i}", "error") for i in range(10)]
+
+    health = _evaluate_crawl_health(results)
+
+    assert health["posts_coverage"] == 1.0, "前提：讨论覆盖是满的"
+    assert health["news_errors"] == 10
+    assert health["news_error_rate"] == 1.0
+    assert health["status"] == "degraded"
+    assert health["news_error_codes"] == [f"S{i}" for i in range(10)]
+
+
+def test_news_partial_failure_downgrades_healthy_to_warn():
+    """资讯错误率 30% → 从 healthy 降为 warn。"""
+    results = [_result_with_news(f"A{i}", "ok") for i in range(7)]
+    results += [_result_with_news(f"B{i}", "error") for i in range(3)]
+
+    health = _evaluate_crawl_health(results)
+
+    assert health["posts_coverage"] == 1.0
+    assert abs(health["news_error_rate"] - 0.3) < 1e-9
+    assert health["status"] == "warn"
+
+
+def test_news_all_ok_keeps_healthy():
+    """资讯正常时不应改变原有判定（回归保护）。"""
+    results = [_result_with_news(f"C{i}", "ok") for i in range(10)]
+
+    health = _evaluate_crawl_health(results)
+
+    assert health["status"] == "healthy"
+    assert health["news_coverage"] == 1.0
+    assert health["news_errors"] == 0
+
+
+def test_news_empty_is_not_error():
+    """干净返回空（真的没有资讯）不算异常，不应拉低健康状态。"""
+    results = [_result_with_news(f"D{i}", "empty") for i in range(10)]
+
+    health = _evaluate_crawl_health(results)
+
+    assert health["news_errors"] == 0
+    assert health["status"] == "healthy"
+
+
+def test_news_dimension_absent_keeps_legacy_behaviour():
+    """没有 news_status 字段时（旧调用方 / 未启用 fetch_news）按原逻辑判定。"""
+    results = [_result(f"E{i}", 1) for i in range(10)]
+
+    health = _evaluate_crawl_health(results)
+
+    assert health["news_tracked"] == 0
+    assert health["status"] == "healthy"

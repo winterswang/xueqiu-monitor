@@ -142,7 +142,7 @@ def mock_stocks():
 
 @pytest.fixture
 def mock_opencli_feed(monkeypatch):
-    """Mock xueqiu_analyzer.fetcher_opencli.fetch_news/fetch_replies.
+    """Mock xueqiu_analyzer.fetcher_opencli.fetch_news_with_status/fetch_replies.
 
     cli.py (2026-09-18) imports these at runtime inside run_pipeline and
     calls the real opencli Chrome bridge without this mock — the e2e test
@@ -176,6 +176,7 @@ def mock_opencli_feed(monkeypatch):
 
     fake = MagicMock()
     fake.fetch_news = lambda code, limit=30: news_store.get(code, [])
+    fake.fetch_news_with_status = lambda code, limit=30: (news_store.get(code, []), None)
     fake.fetch_replies = _fake_replies
     monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake)
     return news_store
@@ -500,4 +501,3 @@ class TestPipelineE2E:
         assert scores[1] == -0.5, f"暴雷→negative: {scores[1]}"
         assert scores[2] == 0.5, f"分红→positive: {scores[2]}"
         print(f"✅ news keyword sentiment: {scores}")
-
