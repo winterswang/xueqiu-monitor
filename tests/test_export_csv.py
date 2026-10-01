@@ -528,8 +528,17 @@ class TestUploadCsvToKb:
 
     @patch.object(export_csv.subprocess, "run")
     @patch.object(export_csv, "_ima_api")
-    def test_successful_upload(self, mock_api, mock_subproc):
-        """Full happy path: check → create → COS → add → media_id."""
+    def test_successful_upload(self, mock_api, mock_subproc, tmp_path, monkeypatch):
+        """Full happy path: check → create → COS → add → media_id.
+
+        COS_UPLOAD_SCRIPT 在 import 时按候选路径解析，CI 上那些路径都不存在，
+        原用例会在「COS 上传脚本不存在」分支提前 return None —— 本机有脚本所以
+        一直没暴露。这里显式指向临时文件，让这条路径变成 hermetic。
+        """
+        script = tmp_path / "cos-upload.cjs"
+        script.write_text("// stub", encoding="utf-8")
+        monkeypatch.setattr(export_csv, "COS_UPLOAD_SCRIPT", script)
+
         mock_api.side_effect = [
             {"code": 0, "data": {"results": [{"name": "test.csv", "is_repeated": False}]}},
             {
@@ -552,15 +561,13 @@ class TestUploadCsvToKb:
         ]
         mock_subproc.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
 
-        csv_path = Path("/tmp/fake_test_export_csv.csv")
+        csv_path = tmp_path / "fake_test_export_csv.csv"
         csv_path.write_text("dummy", encoding="utf-8")
-        try:
-            result = export_csv.upload_csv_to_kb(csv_path, "kb123")
-            assert result == "mid_001"
-            assert mock_api.call_count == 3  # check + create + add
-            assert mock_subproc.call_count == 1  # COS upload
-        finally:
-            csv_path.unlink(missing_ok=True)
+
+        result = export_csv.upload_csv_to_kb(csv_path, "kb123")
+        assert result == "mid_001"
+        assert mock_api.call_count == 3  # check + create + add
+        assert mock_subproc.call_count == 1  # COS upload
 
     @patch.object(export_csv, "_ima_api")
     def test_create_media_failure(self, mock_api):

@@ -17,7 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # fetch-depth: 0 —— tests/test_backfill_pool_history.py 需要完整 git 历史
+      # 才能重建自选股池台账（默认的浅克隆会让它拿到空历史而断言失败）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # monitor 的 src/crawler.py 通过 _ensure_xueqiu_analyzer_path() 引用 analyzer
       - name: Checkout analyzer
