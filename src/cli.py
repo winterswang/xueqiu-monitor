@@ -80,6 +80,47 @@ def _phase(name: str, start: bool = True) -> float | None:
         return elapsed
 
 
+
+
+def _source_integrity_section(since_ts: float) -> str:
+    # 汇总本次运行的源级抓取失败，产出日报末尾的「数据完整性」段落。
+    # 数据来自 fetcher_opencli 落盘的 logs/source_failures.jsonl。
+    import datetime as _dt
+    fail_log = Path(__file__).resolve().parent.parent / "logs" / "source_failures.jsonl"
+    since_iso = _dt.datetime.fromtimestamp(max(0.0, since_ts - 5)).isoformat(timespec="seconds")
+    rows = []
+    if fail_log.exists():
+        for line in fail_log.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if str(rec.get("ts", "")) >= since_iso:
+                rows.append(rec)
+    out = ["", "---", "", "## 数据完整性", ""]
+    if not rows:
+        out.append("✅ 本次运行所有信息源均正常（讨论 / 资讯 / 公告）")
+    else:
+        agg = {}
+        for r in rows:
+            key = (r.get("source") or "?", r.get("reason") or "其他")
+            agg[key] = agg.get(key, 0) + 1
+        out.append("⚠️ 本次运行有 **%d** 次源级抓取失败，下列数据可能不完整：" % len(rows))
+        out.append("")
+        out.append("| 信息源 | 次数 | 原因 |")
+        out.append("| --- | --- | --- |")
+        for (src_name, why), cnt in sorted(agg.items(), key=lambda kv: -kv[1]):
+            out.append("| %s | %d | %s |" % (src_name, cnt, why))
+        targets = sorted({str(r.get("target")) for r in rows if r.get("target")})
+        if targets:
+            out.append("")
+            out.append("涉及标的：%s%s" % ("、".join(targets[:20]), " 等" if len(targets) > 20 else ""))
+    out.append("")
+    return chr(10).join(out)
+
 def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     """Execute the full monitoring pipeline.
 
@@ -153,6 +194,10 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # 的关键词打分(与管内 news 同一逻辑), 并入后重算 sentiment_avg,
             # 否则这批 news 永远是 0 分并稀释温度计加权情感。
             if cfg.crawler.get("fetch_news", True):
+                # 资讯状态独立记录：posts_count 是聚合计数（讨论+公告+资讯），
+                # 资讯整源失败会被讨论量稀释，健康判定看不见 —— 所以单独留痕。
+                cr["news_status"] = "pending"
+                cr["news_count"] = 0
                 try:
                     from .sentiment import score_news_post
                     sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
@@ -174,9 +219,17 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                             })
                         cr["posts_count"] = len(cr["posts_data"])
                         cr["sentiment_avg"] = crawler._compute_sentiment_avg(cr["posts_data"])
+                        cr["news_status"] = "ok"
+                        cr["news_count"] = len(_news)
                         logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
+                    else:
+                        # 干净返回空：大概率是真的没有资讯，但也可能是取数侧静默失败，
+                        # 因此单独记成 empty，与 error 区分开。
+                        cr["news_status"] = "empty"
                 except Exception as _e:
-                    logger.debug(f"  {stock_code}: 资讯获取失败(不影响其余数据): {_e}")
+                    cr["news_status"] = "error"
+                    cr["news_error"] = str(_e)[:200]
+                    logger.warning(f"  {stock_code}: 资讯获取异常: {_e}")
 
             # ── Store snapshot ──
             snap = CrawlSnapshot(
@@ -496,6 +549,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             posts_data_map[cr["stock_code"]] = cr["posts_data"]
 
     report = notifier.generate_daily_report(all_alerts, posts_data_map)
+    report += _source_integrity_section(start_time)
     report_path = Path(db_path).parent / "daily_reports" / f"{time.strftime('%Y-%m-%d')}-alerts.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report)
@@ -603,15 +657,21 @@ def _get_stock_name(stocks: list[dict], code: str) -> str:
 
 
 def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
-    """Classify crawl health using posts coverage, not only status=success.
+    """Classify crawl health using posts coverage **and** news status.
 
-    status thresholds:
+    posts coverage thresholds:
       - healthy: posts coverage >= 50%
       - warn:    20% <= posts coverage < 50%
       - degraded: posts coverage < 20%
 
-    This catches the historical failure mode where most stocks were marked
-    status=success while posts_count=0 because API/DOM fallback returned no data.
+    news status thresholds (independent dimension):
+      - news error rate > 50%  → degraded
+      - news error rate > 20%  → 至少 warn
+
+    为什么需要第二个维度：posts_count = 讨论 + 公告 + 资讯，是**聚合计数**。
+    资讯整源失败时它仍 > 0（被讨论量稀释），所以只看聚合值会让资讯的失效
+    完全不可见 —— 2026-10-01 的事故就是这种形态。资讯状态由 run_pipeline
+    在并入资讯时写进 cr["news_status"]，这里按「该品牌内部错误率」判定。
     """
     total = len(crawl_results)
     if total == 0:
@@ -623,6 +683,12 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
             "failed": 0,
             "timeout": 0,
             "posts_coverage": 0.0,
+            "news_tracked": 0,
+            "news_ok": 0,
+            "news_errors": 0,
+            "news_coverage": 1.0,
+            "news_error_rate": 0.0,
+            "news_error_codes": [],
         }
 
     success_with_posts = [
@@ -644,6 +710,22 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
     else:
         status = "healthy"
 
+    # ── 资讯维度（独立判定，避免被聚合的 posts_count 稀释）──
+    news_tracked = [
+        r for r in crawl_results
+        if r.get("news_status") in ("ok", "empty", "error")
+    ]
+    news_errors = [r for r in news_tracked if r.get("news_status") == "error"]
+    news_ok = [r for r in news_tracked if r.get("news_status") == "ok"]
+    news_error_rate = len(news_errors) / len(news_tracked) if news_tracked else 0.0
+    news_coverage = len(news_ok) / len(news_tracked) if news_tracked else 1.0
+
+    if news_tracked:
+        if news_error_rate > 0.50 and status != "degraded":
+            status = "degraded"
+        elif news_error_rate > 0.20 and status == "healthy":
+            status = "warn"
+
     return {
         "status": status,
         "total": total,
@@ -655,6 +737,12 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
         "empty_success_codes": [r.get("stock_code", "?") for r in empty_success],
         "failed_codes": [r.get("stock_code", "?") for r in failed],
         "timeout_codes": [r.get("stock_code", "?") for r in timeout],
+        "news_tracked": len(news_tracked),
+        "news_ok": len(news_ok),
+        "news_errors": len(news_errors),
+        "news_coverage": news_coverage,
+        "news_error_rate": news_error_rate,
+        "news_error_codes": [r.get("stock_code", "?") for r in news_errors],
     }
 
 
@@ -686,6 +774,15 @@ def _log_crawl_health(
         f"超时: {health['timeout']} | "
         f"失败: {health['failed']}"
     )
+    # 资讯是独立维度：聚合的 posts_count 会掩盖它的失效，所以单独打印
+    if health.get("news_tracked"):
+        logger.info(
+            f"资讯: {health['news_ok']}/{health['news_tracked']} 成功 | "
+            f"异常: {health['news_errors']} | "
+            f"news_healthy={health['news_error_rate'] <= 0.20}"
+        )
+        if health.get("news_error_codes"):
+            logger.warning(f"⚠ 资讯抓取异常的标的: {health['news_error_codes']}")
 
     # ── 2. Coverage gate ──
     if health["status"] == "degraded":

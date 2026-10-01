@@ -12,6 +12,7 @@ Output: JSON to stdout, suitable for cron log monitoring.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -136,6 +137,41 @@ def check():
         results.append({"check": "watchlist", "status": FAIL, "detail": "watchlist.json not found"})
         errors.append("watchlist_missing")
 
+    # ── 3.5 按信息源检查抓取失败（news / notices / discussions / replies / stock）──
+    # 之前只统计讨论数，资讯整源挂掉也报 healthy；这里把源级失败显式列出来。
+    try:
+        fail_log = LOG_DIR / "source_failures.jsonl"
+        if fail_log.exists():
+            today = datetime.date.today().isoformat()
+            rows = []
+            for line in fail_log.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if str(rec.get("ts", "")).startswith(today):
+                    rows.append(rec)
+            if rows:
+                agg = {}
+                for rec in rows:
+                    key = (rec.get("source") or "?", rec.get("reason") or "其他")
+                    agg[key] = agg.get(key, 0) + 1
+                detail = "; ".join(
+                    "%s: %d 次（%s）" % (src_name, cnt, why)
+                    for (src_name, why), cnt in sorted(agg.items(), key=lambda kv: -kv[1])
+                )
+                results.append({"check": "source_failures", "status": WARN,
+                                "detail": "%d 次失败 → %s" % (len(rows), detail)})
+                errors.append("source_failures")
+            else:
+                results.append({"check": "source_failures", "status": OK, "detail": "今日无源级失败"})
+        else:
+            results.append({"check": "source_failures", "status": OK, "detail": "无失败记录文件"})
+    except Exception as exc:
+        results.append({"check": "source_failures", "status": WARN, "detail": "读取失败: %s" % exc})
     # ── 4. Check disk usage ──
     try:
         du = subprocess.run(["du", "-sh", str(PROJECT_ROOT / "data")], capture_output=True, text=True, timeout=10)
