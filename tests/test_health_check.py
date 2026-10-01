@@ -13,6 +13,7 @@ Runs against a temp project root so the real monitor.db is never touched.
 """
 
 import json
+import datetime
 import sys
 import tempfile
 import time
@@ -70,6 +71,87 @@ def _run_check(tmp_path: Path) -> dict:
             with pytest.raises(SystemExit):
                 health_check.check()
         return json.loads(out.getvalue())
+
+
+def test_latest_pipeline_window_uses_run_marker_and_summary():
+    """Source-failure window must end at SUMMARY, excluding later manual smoke tests."""
+    text = "\n".join([
+        "2026-10-01 13:00:00 [INFO] src.crawler: 从 morning-brief 加载 69 只自选股",
+        "2026-10-01 13:11:20 [INFO] __main__: [SUMMARY] stocks=7/7 success=7",
+        "2026-10-01 19:00:00 [INFO] manual smoke test",
+    ])
+    assert health_check._latest_pipeline_window(text) == (
+        datetime.datetime(2026, 10, 1, 13, 0, 0),
+        datetime.datetime(2026, 10, 1, 13, 11, 20),
+    )
+
+
+def test_source_failures_before_latest_run_are_ignored(tmp_path):
+    """A morning failure must not keep the afternoon health check warned."""
+    log = tmp_path / "source_failures.jsonl"
+    records = [
+        {"ts": "2026-10-01T11:00:00", "source": "news", "reason": "风控验证页"},
+        {"ts": "2026-10-01T13:01:00", "source": "news", "reason": "风控验证页"},
+    ]
+    log.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+
+    rows = health_check._read_source_failures_in_window(
+        log,
+        (
+            datetime.datetime(2026, 10, 1, 13, 0, 0),
+            datetime.datetime(2026, 10, 1, 13, 11, 20),
+        ),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["ts"] == "2026-10-01T13:01:00"
+
+
+def test_source_failure_window_falls_back_to_first_and_last_timestamps():
+    text = "2026-10-01 13:00:00 [INFO] legacy startup\n2026-10-01 13:05:00 [INFO] done"
+    assert health_check._latest_pipeline_window(text) == (
+        datetime.datetime(2026, 10, 1, 13, 0, 0),
+        datetime.datetime(2026, 10, 1, 13, 5, 0),
+    )
+
+
+def test_no_window_falls_back_to_today_not_empty(tmp_path):
+    """No pipeline log → fall back to today's records (old behaviour).
+
+    Returning [] would report "no source failures" with no evidence behind it —
+    exactly the silent-OK mode this check exists to catch.
+    """
+    log = tmp_path / "source_failures.jsonl"
+    today = datetime.date.today().isoformat()
+    old = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+    records = [
+        {"ts": "%sT09:00:00" % today, "source": "news", "reason": "风控验证页"},
+        {"ts": "%sT09:00:00" % old, "source": "news", "reason": "风控验证页"},
+    ]
+    log.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+
+    rows = health_check._read_source_failures_in_window(log, (None, None))
+
+    assert len(rows) == 1
+    assert rows[0]["ts"].startswith(today)
+
+
+def test_no_latest_log_does_not_crash(tmp_path):
+    """_get_latest_log() can return None; source_failures must not NameError."""
+    assert health_check._latest_pipeline_window("") == (None, None)
+
+
+def test_no_pipeline_log_does_not_report_read_failure(fake_project):
+    """Regression: source_window used to be bound only inside `if log:`.
+
+    With no pipeline log, section 3.5 raised NameError; the blanket except turned
+    that into a permanent WARN "读取失败: ..." on every run.
+    """
+    conn, tmp_path = fake_project
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert "source_failures" in checks
+    assert not checks["source_failures"]["detail"].startswith("读取失败"), checks["source_failures"]
 
 
 def test_fresh_db_status_ok(fake_project):

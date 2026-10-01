@@ -75,6 +75,74 @@ def _is_pipeline_running() -> bool:
         return False
 
 
+def _latest_pipeline_window(
+    log_text: str,
+) -> tuple[datetime.datetime | None, datetime.datetime | None]:
+    """Return the newest pipeline's start and completion timestamps.
+
+    Source failures are only meaningful when they occur inside this window.
+    Using "since start" alone would also count manual smoke-test failures written
+    after the scheduled pipeline had already finished.
+    """
+    start = None
+    end = None
+    timestamps: list[datetime.datetime] = []
+    timestamp_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+    for line in log_text.splitlines():
+        match = timestamp_pattern.match(line)
+        if not match:
+            continue
+        timestamp = datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+        timestamps.append(timestamp)
+        if "从 morning-brief 加载" in line:
+            start = timestamp
+            end = None
+        elif "[SUMMARY]" in line and start is not None and end is None:
+            end = timestamp
+
+    if start is not None:
+        return start, end
+
+    # Legacy fallback: treat the first and last timestamps as one run window.
+    # Note the pattern is anchored with ^ and has no MULTILINE, so it cannot be
+    # run over the whole text — every timestamp must be collected line by line.
+    if not timestamps:
+        return None, None
+    return timestamps[0], timestamps[-1]
+
+
+def _read_source_failures_in_window(
+    fail_log: Path,
+    window: tuple[datetime.datetime | None, datetime.datetime | None],
+) -> list[dict]:
+    """Read source failures that occurred inside the latest pipeline run.
+
+    When there is no usable window (no pipeline log yet), fall back to today's
+    records — the previous behaviour. Returning [] here would report "no source
+    failures" without any evidence, which is the silent-OK failure mode this
+    whole check exists to prevent.
+    """
+    start, end = window
+    today = datetime.date.today().isoformat()
+    rows: list[dict] = []
+    for line in fail_log.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            ts = datetime.datetime.fromisoformat(str(rec.get("ts", "")))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if start is not None:
+            if ts < start or (end is not None and ts > end):
+                continue
+        elif not str(rec.get("ts", "")).startswith(today):
+            continue
+        rows.append(rec)
+    return rows
+
+
 def check():
     results = []
     errors = []
@@ -95,8 +163,12 @@ def check():
 
     # ── 2. Check latest log for [SUMMARY] ──
     log = _get_latest_log()
+    # 默认窗口 (None, None)：没有可用日志时，下面 3.5 会退回老的「当天」口径。
+    # 必须先赋值 —— _get_latest_log() 可能返回 None，否则 3.5 会 NameError。
+    source_window: tuple[datetime.datetime | None, datetime.datetime | None] = (None, None)
     if log:
         text = log.read_text(encoding="utf-8", errors="replace")
+        source_window = _latest_pipeline_window(text)
         summary_match = re.search(r"\[SUMMARY\] (.+)", text)
         phase_end = re.findall(r"\[PHASE\] (\w+) end elapsed=([\d.]+)s", text)
 
@@ -142,18 +214,7 @@ def check():
     try:
         fail_log = LOG_DIR / "source_failures.jsonl"
         if fail_log.exists():
-            today = datetime.date.today().isoformat()
-            rows = []
-            for line in fail_log.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                if str(rec.get("ts", "")).startswith(today):
-                    rows.append(rec)
+            rows = _read_source_failures_in_window(fail_log, source_window)
             if rows:
                 agg = {}
                 for rec in rows:
@@ -167,7 +228,16 @@ def check():
                                 "detail": "%d 次失败 → %s" % (len(rows), detail)})
                 errors.append("source_failures")
             else:
-                results.append({"check": "source_failures", "status": OK, "detail": "今日无源级失败"})
+                start, end = source_window
+                if start is not None:
+                    span = start.strftime("%Y-%m-%d %H:%M:%S")
+                    if end is not None:
+                        span += " → " + end.strftime("%H:%M:%S")
+                    detail = "最近一轮无源级失败（窗口 %s）" % span
+                else:
+                    # 没有可用日志 → 用的是「当天」兜底口径，如实说明
+                    detail = "今日无源级失败（未能确定 pipeline 窗口）"
+                results.append({"check": "source_failures", "status": OK, "detail": detail})
         else:
             results.append({"check": "source_failures", "status": OK, "detail": "无失败记录文件"})
     except Exception as exc:
