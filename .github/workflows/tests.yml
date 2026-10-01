@@ -1,0 +1,52 @@
+name: tests
+
+# 需要 secret ANALYZER_REPO_TOKEN：一个能只读访问 winterswang/xueqiu-analyzer-skill
+# 的 fine-grained PAT。该仓库是 private，默认的 GITHUB_TOKEN 只能读当前仓库，
+# 跨仓库 checkout 会 404。缺少 secret 时 job 会在 checkout 步骤失败。
+#
+# 配置（一次性）:
+#   1. 建 fine-grained PAT，仅授权 xueqiu-analyzer-skill 的 Contents: Read
+#   2. gh secret set ANALYZER_REPO_TOKEN --repo winterswang/xueqiu-monitor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # monitor 的 src/crawler.py 通过 _ensure_xueqiu_analyzer_path() 引用 analyzer
+      - name: Checkout analyzer (private)
+        uses: actions/checkout@v4
+        with:
+          repository: winterswang/xueqiu-analyzer-skill
+          path: _deps/xueqiu-analyzer-skill
+          token: ${{ secrets.ANALYZER_REPO_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e _deps/xueqiu-analyzer-skill
+
+      - name: Run tests
+        env:
+          # 显式指向 sibling checkout；pip install -e 之后其实已可 import，
+          # 这里再钉一次，避免将来装包方式变化时静默走错路径。
+          XUEQIU_ANALYZER_PATH: ${{ github.workspace }}/_deps/xueqiu-analyzer-skill/src
+        run: python -m pytest tests/ -q
