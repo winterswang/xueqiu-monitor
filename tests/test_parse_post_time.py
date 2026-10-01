@@ -5,7 +5,7 @@ posts with absolute dates (e.g. LKNCY 2020-2022 news articles) previously
 parsed to 0.0, which caused the incremental filter to always keep them.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.crawler import _parse_post_time
 
@@ -140,38 +140,39 @@ class TestIso8601Format:
     '2026-08-12T04:57:37.000Z'. Before this fix, _parse_post_time returned 0.0,
     causing ALL posts to be marked "时间无法解析" and last_crawl_time to freeze
     at 8/7 (never updated because all_ts list was empty).
+
+    期望值一律写成**带时区的绝对时刻**。原来写成 naive 的
+    datetime(2026, 8, 12, 12, 57, 37).timestamp()，隐含假设宿主是 UTC+8 ——
+    在 UTC 的 CI runner 上会固定差 8 小时而假红（本机是 +08，所以一直没发现）。
     """
 
+    # 2026-08-12 12:57:37 北京时间 == 04:57:37 UTC，三种写法指向同一时刻
+    BEIJING = timezone(timedelta(hours=8))
+    EXPECTED = datetime(2026, 8, 12, 12, 57, 37, tzinfo=BEIJING).timestamp()
+    NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=BEIJING).timestamp()
+
     def test_iso8601_with_millis_z(self):
-        """The exact format opencli returns. Z = UTC, converted to Beijing (+8)."""
-        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
-        ts = _parse_post_time("2026-08-12T04:57:37.000Z", now)
-        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
-        assert abs(ts - expected) < 1
+        """The exact format opencli returns. Z = UTC."""
+        ts = _parse_post_time("2026-08-12T04:57:37.000Z", self.NOW)
+        assert abs(ts - self.EXPECTED) < 1
 
     def test_iso8601_without_millis(self):
-        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
-        ts = _parse_post_time("2026-08-12T04:57:37Z", now)
-        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
-        assert abs(ts - expected) < 1
+        ts = _parse_post_time("2026-08-12T04:57:37Z", self.NOW)
+        assert abs(ts - self.EXPECTED) < 1
 
     def test_iso8601_does_not_return_zero(self):
         """The core regression: must NOT return 0.0 for valid ISO 8601."""
-        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
-        assert _parse_post_time("2026-08-12T04:57:37.000Z", now) > 0
-        assert _parse_post_time("2026-08-08T00:00:01.000Z", now) > 0
+        assert _parse_post_time("2026-08-12T04:57:37.000Z", self.NOW) > 0
+        assert _parse_post_time("2026-08-08T00:00:01.000Z", self.NOW) > 0
 
     def test_iso8601_with_timezone_offset(self):
-        """ISO 8601 with +08:00 timezone offset."""
-        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
-        ts = _parse_post_time("2026-08-12T12:57:37+08:00", now)
-        expected = datetime(2026, 8, 12, 12, 57, 37).timestamp()
-        assert abs(ts - expected) < 1
+        """ISO 8601 with +08:00 offset — 与两个 Z 形式是同一时刻。"""
+        ts = _parse_post_time("2026-08-12T12:57:37+08:00", self.NOW)
+        assert abs(ts - self.EXPECTED) < 1
 
     def test_iso8601_invalid_date(self):
         """Invalid calendar date in ISO format should return 0.0."""
-        now = datetime(2026, 8, 12, 12, 0, 0).timestamp()
-        assert _parse_post_time("2026-02-30T04:57:37.000Z", now) == 0.0
+        assert _parse_post_time("2026-02-30T04:57:37.000Z", self.NOW) == 0.0
 
 
 # ════════════════════════════════════════════════════════

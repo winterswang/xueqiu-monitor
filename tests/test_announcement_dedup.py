@@ -10,9 +10,12 @@ producing 17 identical alerts (title_hash=b0b30aa8...) in a single run.
 """
 
 import hashlib
+import os
 import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 from src import detector
 from src import db
@@ -233,6 +236,21 @@ class TestAnnouncementTimeNormalization:
     """v0.8.2: normalize announcement time to a stable YYYY-MM-DD identity
     across the three crawler sources (opencli ISO, API %Y-%m-%d, DOM relative).
     """
+
+    @pytest.fixture(autouse=True)
+    def _beijing_timezone(self, monkeypatch):
+        """把宿主时区钉成北京时间。
+
+        _normalize_announcement_time 用 `datetime.fromtimestamp(now)` 取**宿主本地
+        时间**再 strftime —— 相对时间（"3天前"/"昨天"）的日期取决于宿主时区。
+        下面的期望值按北京时间写（生产宿主也是 +08），CI runner 是 UTC，
+        不钉时区就会稳定差一天而假红（本机是 +08，所以一直没暴露）。
+        """
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        time.tzset()
+        yield
+        monkeypatch.undo()
+        time.tzset()
 
     def test_iso8601_normalizes_to_date(self):
         from src.detector import _normalize_announcement_time as f
