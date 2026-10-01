@@ -201,31 +201,37 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 try:
                     from .sentiment import score_news_post
                     sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
-                    from xueqiu_analyzer.fetcher_opencli import fetch_news
-                    _news = fetch_news(stock_code)
-                    if _news:
-                        for _n in _news:
-                            cr["posts_data"].append({
-                                "type": "news",
-                                "post_id": _n.get("link") or _n.get("id") or _n.get("title"),
-                                "title": _n.get("title", ""),
-                                "content": _n.get("text", ""),
-                                "link": _n.get("link", ""),
-                                "author": _n.get("source", ""),
-                                "time": _n.get("created_at") or "",
-                                "sentiment_score": score_news_post(
-                                    _n.get("title", ""), _n.get("text", "")
-                                ),
-                            })
-                        cr["posts_count"] = len(cr["posts_data"])
-                        cr["sentiment_avg"] = crawler._compute_sentiment_avg(cr["posts_data"])
-                        cr["news_status"] = "ok"
-                        cr["news_count"] = len(_news)
-                        logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
+                    from xueqiu_analyzer.fetcher_opencli import fetch_news_with_status
+                    _news, _news_error = fetch_news_with_status(stock_code)
+                    if _news_error:
+                        # fetch_news() 的历史契约是失败也返回空列表；健康判定不能
+                        # 从空列表推断状态，必须走带状态的 API。
+                        cr["news_status"] = "error"
+                        cr["news_error"] = _news_error[:200]
+                        logger.warning(f"  {stock_code}: 资讯获取失败: {_news_error}")
                     else:
-                        # 干净返回空：大概率是真的没有资讯，但也可能是取数侧静默失败，
-                        # 因此单独记成 empty，与 error 区分开。
-                        cr["news_status"] = "empty"
+                        if _news:
+                            for _n in _news:
+                                cr["posts_data"].append({
+                                    "type": "news",
+                                    "post_id": _n.get("link") or _n.get("id") or _n.get("title"),
+                                    "title": _n.get("title", ""),
+                                    "content": _n.get("text", ""),
+                                    "link": _n.get("link", ""),
+                                    "author": _n.get("source", ""),
+                                    "time": _n.get("created_at") or "",
+                                    "sentiment_score": score_news_post(
+                                        _n.get("title", ""), _n.get("text", "")
+                                    ),
+                                })
+                            cr["posts_count"] = len(cr["posts_data"])
+                            cr["sentiment_avg"] = crawler._compute_sentiment_avg(cr["posts_data"])
+                            cr["news_status"] = "ok"
+                            cr["news_count"] = len(_news)
+                            logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
+                        else:
+                            # 带状态 API 已确认这是成功返回空，而不是取数失败。
+                            cr["news_status"] = "empty"
                 except Exception as _e:
                     cr["news_status"] = "error"
                     cr["news_error"] = str(_e)[:200]
