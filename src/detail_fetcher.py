@@ -728,3 +728,35 @@ def fetch_announcement_detail(
         logger.info(f"[detail] search_fallback → ok ({detail['status']}): {title[:50]}")
         return f"[原文不可得({detail['status']}), 以下为新闻解读]\n{bg[:5000]}"
     return ""
+
+
+def resolve_us_filing_url(title: str, stock_code: str) -> str:
+    """返回 SEC filing 主文档 URL；供正文解析与源文件归档共用。"""
+    match = _ACCESSION_RE.search(title or "")
+    if not match or _form_of_title(title) not in _US_FULLTEXT_FORMS:
+        return ""
+    accession = match.group(1)
+    ticker = stock_code.split(".")[0]
+    cik = _ticker_to_cik(ticker)
+    if not cik:
+        return ""
+    try:
+        submissions = _sec_get(
+            f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json",
+            as_json=True,
+        )
+        accessions = submissions.get("filings", {}).get("recent", {}).get(
+            "accessionNumber", []
+        )
+        if accession not in accessions:
+            return ""
+        index = accessions.index(accession)
+        document = submissions["filings"]["recent"]["primaryDocument"][index]
+        accession_nodash = accession.replace("-", "")
+        return (
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
+            f"{accession_nodash}/{document}"
+        )
+    except Exception as exc:
+        logger.warning(f"[detail] EDGAR URL 定位失败 {ticker}/{accession}: {exc}")
+        return ""

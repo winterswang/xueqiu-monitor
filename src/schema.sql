@@ -124,6 +124,31 @@ CREATE TABLE IF NOT EXISTS detail_fetch_log (
     fetched_at INTEGER NOT NULL
 );
 
+-- 14. announcement_sources — 公告原始文件归档/上传台账
+-- 下载与 IMA 上传拆成两条 cron: 先本地归档, 再异步上传; 任一步失败
+-- 都保留在 DB 里按 retry_count 断点续跑, 不阻断舆情主流程。
+CREATE TABLE IF NOT EXISTS announcement_sources (
+    announcement_id INTEGER PRIMARY KEY,
+    source_url      TEXT    NOT NULL,
+    market          TEXT    NOT NULL,
+    doc_category    TEXT    NOT NULL,
+    report_form     TEXT    NOT NULL DEFAULT '',
+    local_path      TEXT    NOT NULL DEFAULT '',
+    sha256          TEXT    NOT NULL DEFAULT '',
+    mime_type       TEXT    NOT NULL DEFAULT '',
+    download_status TEXT    NOT NULL DEFAULT 'pending',
+    download_error  TEXT    NOT NULL DEFAULT '',
+    downloaded_at   INTEGER NOT NULL DEFAULT 0,
+    upload_status   TEXT    NOT NULL DEFAULT 'pending',
+    upload_error    TEXT    NOT NULL DEFAULT '',
+    media_id        TEXT    NOT NULL DEFAULT '',
+    uploaded_at     INTEGER NOT NULL DEFAULT 0,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (announcement_id) REFERENCES announcements(id)
+);
+CREATE INDEX IF NOT EXISTS idx_ann_sources_download
+    ON announcement_sources(download_status, upload_status, retry_count);
+
 -- 12. posts — 帖子独立表 (v2 Phase 4, 2026-09-20)
 -- 从 crawl_snapshots.posts_data (JSON 数组塞一个 TEXT 列) 拆出:
 -- 去重查询不再 json_each 全展开; (stock_code, dedup_key) 全局唯一约束
