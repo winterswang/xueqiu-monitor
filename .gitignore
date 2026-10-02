@@ -2,6 +2,7 @@ data/*.db
 data/*.db-*
 data/*.db.bak*
 data/daily_reports/
+data/announcement_sources/
 data/monitor.db.bak*
 data/watchlist.db.bak*
 logs/
