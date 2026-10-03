@@ -4,9 +4,12 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from src.announcement_sources import (
-    ArchiveSummary,
+    MAX_DOWNLOAD_BYTES,
     SourcePlan,
+    DownloadTooLargeError,
     archive_day,
     build_filename,
     classify_source,
@@ -14,6 +17,7 @@ from src.announcement_sources import (
     market_from_stock_code,
     upload_pending,
 )
+from src.announcement_sources import _fetch_bytes
 from src.db import init_db
 
 
@@ -186,6 +190,239 @@ def test_upload_pending_updates_success_and_missing_file_failure(tmp_path):
     assert missing.selected == 0
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
-            "SELECT upload_status, media_id, retry_count FROM announcement_sources"
+            "SELECT upload_status, media_id, upload_retry_count "
+            "FROM announcement_sources"
         ).fetchone()
     assert row == ("uploaded", "media-1", 0)
+
+
+def test_legacy_retry_count_is_split_by_phase(tmp_path):
+    db_path = tmp_path / "monitor.db"
+    _seed_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE announcement_sources")
+        conn.execute(
+            """CREATE TABLE announcement_sources (
+                announcement_id INTEGER PRIMARY KEY,
+                source_url TEXT NOT NULL,
+                market TEXT NOT NULL,
+                doc_category TEXT NOT NULL,
+                report_form TEXT NOT NULL DEFAULT '',
+                local_path TEXT NOT NULL DEFAULT '',
+                sha256 TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT '',
+                download_status TEXT NOT NULL DEFAULT 'pending',
+                download_error TEXT NOT NULL DEFAULT '',
+                downloaded_at INTEGER NOT NULL DEFAULT 0,
+                upload_status TEXT NOT NULL DEFAULT 'pending',
+                upload_error TEXT NOT NULL DEFAULT '',
+                media_id TEXT NOT NULL DEFAULT '',
+                uploaded_at INTEGER NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        ann_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM announcements ORDER BY id"
+            ).fetchall()
+        ]
+        conn.executemany(
+            "INSERT INTO announcement_sources(announcement_id, source_url, market, "
+            "doc_category, download_status, upload_status, retry_count) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                (ann_ids[0], "url", "CN", "financial_report", "failed", "pending", 2),
+                (ann_ids[1], "url", "CN", "financial_report", "downloaded", "uploaded", 1),
+            ],
+        )
+    init_db(str(db_path))
+    init_db(str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT download_status, upload_status, download_retry_count, "
+            "upload_retry_count FROM announcement_sources ORDER BY announcement_id"
+        ).fetchall()
+    assert rows == [
+        ("failed", "pending", 2, 0),
+        ("downloaded", "uploaded", 0, 1),
+    ]
+
+
+def test_sec_resolution_failure_is_retryable_not_permanently_skipped(tmp_path):
+    db_path = tmp_path / "monitor.db"
+    source_root = tmp_path / "sources"
+    _seed_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM announcements")
+        conn.execute(
+            "INSERT INTO announcements(snapshot_id, stock_code, ann_title, ann_date, ann_link) "
+            "VALUES ((SELECT MAX(id) FROM crawl_snapshots), 'NVDA.US', "
+            "'10-Q Quarterly report', ?, 'https://xueqiu.com/S/NVDA')",
+            (_timestamp("2026-10-02"),),
+        )
+
+    resolver_calls = []
+
+    def failing_resolver(title, stock_code):
+        resolver_calls.append((title, stock_code))
+        return ""
+
+    for _ in range(3):
+        summary = archive_day(
+            db_path,
+            source_root,
+            "2026-10-02",
+            us_resolver=failing_resolver,
+        )
+    stopped = archive_day(
+        db_path,
+        source_root,
+        "2026-10-02",
+        us_resolver=failing_resolver,
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT download_status, upload_status, download_retry_count, "
+            "upload_retry_count, download_error FROM announcement_sources"
+        ).fetchone()
+
+    assert summary.failed == 1
+    assert stopped.selected == 0
+    assert len(resolver_calls) == 3
+    assert row[:4] == ("failed", "skipped", 3, 0)
+    assert "SEC source resolution failed" in row[4]
+
+
+def test_fetch_bytes_rejects_oversized_content_before_download(monkeypatch):
+    class Response:
+        headers = {
+            "Content-Length": str(MAX_DOWNLOAD_BYTES + 1),
+            "Content-Type": "application/pdf",
+        }
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("oversized response must not be read")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: Response()
+    )
+    with pytest.raises(DownloadTooLargeError):
+        _fetch_bytes("https://example.com/report.pdf")
+
+
+def test_upload_retries_use_independent_counter_and_stop_at_limit(tmp_path):
+    db_path = tmp_path / "monitor.db"
+    source_root = tmp_path / "sources"
+    _seed_db(db_path)
+    archive_day(
+        db_path,
+        source_root,
+        "2026-10-02",
+        fetch_bytes=lambda url: (b"%PDF-1.4 test", "application/pdf"),
+    )
+
+    def failing_upload(path, kb, folder, title):
+        raise RuntimeError("ima unavailable")
+
+    for _ in range(3):
+        summary = upload_pending(
+            db_path,
+            source_root,
+            upload_file=failing_upload,
+        )
+    stopped = upload_pending(
+        db_path,
+        source_root,
+        upload_file=failing_upload,
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT upload_status, download_retry_count, upload_retry_count "
+            "FROM announcement_sources WHERE download_status='downloaded'"
+        ).fetchone()
+
+    assert summary.failed == 1
+    assert stopped.selected == 0
+    assert row == ("failed", 0, 3)
+
+
+def test_no_source_is_permanently_skipped_and_not_retried(tmp_path):
+    db_path = tmp_path / "monitor.db"
+    source_root = tmp_path / "sources"
+    _seed_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM announcements")
+        conn.execute(
+            "INSERT INTO announcements(snapshot_id, stock_code, ann_title, ann_date, ann_link) "
+            "VALUES ((SELECT MAX(id) FROM crawl_snapshots), '600519.SH', "
+            "'关于回购公司股份的公告', ?, '')",
+            (_timestamp("2026-10-02"),),
+        )
+
+    first = archive_day(
+        db_path,
+        source_root,
+        "2026-10-02",
+        fetch_bytes=lambda url: (b"%PDF-1.4 test", "application/pdf"),
+    )
+    second = archive_day(
+        db_path,
+        source_root,
+        "2026-10-02",
+        fetch_bytes=lambda url: (b"%PDF-1.4 test", "application/pdf"),
+    )
+    dry_run = upload_pending(
+        db_path,
+        source_root,
+        upload_file=lambda path, kb, folder, title: "media-dry",
+        dry_run=True,
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT download_status, upload_status, download_retry_count, "
+            "upload_retry_count FROM announcement_sources"
+        ).fetchone()
+
+    assert (first.skipped, second.selected, dry_run.skipped) == (1, 0, 0)
+    assert row == ("skipped", "skipped", 0, 0)
+
+
+def test_dry_run_does_not_mutate_missing_file_state(tmp_path):
+    db_path = tmp_path / "monitor.db"
+    source_root = tmp_path / "sources"
+    _seed_db(db_path)
+    archive_day(
+        db_path,
+        source_root,
+        "2026-10-02",
+        fetch_bytes=lambda url: (b"%PDF-1.4 test", "application/pdf"),
+    )
+    with sqlite3.connect(db_path) as conn:
+        relative = conn.execute(
+            "SELECT local_path FROM announcement_sources "
+            "WHERE download_status='downloaded'"
+        ).fetchone()[0]
+    (source_root / relative).unlink()
+
+    summary = upload_pending(
+        db_path,
+        source_root,
+        upload_file=lambda path, kb, folder, title: "media-dry",
+        dry_run=True,
+    )
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT upload_status, upload_error, upload_retry_count "
+            "FROM announcement_sources WHERE download_status='downloaded'"
+        ).fetchone()
+
+    assert (summary.selected, summary.skipped, summary.failed) == (1, 1, 0)
+    assert row == ("pending", "", 0)
