@@ -43,6 +43,8 @@ jobs:
 
       - name: Run tests
         env:
+          # 相对时间测试按生产时区解释；UTC 凌晨会把“2小时前”落到前一天。
+          TZ: Asia/Shanghai
           # 显式指向 sibling checkout；pip install -e 之后其实已可 import，
           # 这里再钉一次，避免将来装包方式变化时静默走错路径。
           XUEQIU_ANALYZER_PATH: ${{ github.workspace }}/_deps/xueqiu-analyzer-skill/src
