@@ -53,6 +53,7 @@ LLM_CALL_TIMEOUT       = 300.0
 SENTIMENT_TOTAL_TIMEOUT = 300.0  # thread-level cap for entire sentiment call
 
 _client: Any | None = None
+_client_unavailable_reason: str = ""
 
 # ── News keyword matching ────────────────────────────────────
 _BULLISH_PAT = re.compile(
@@ -120,7 +121,7 @@ def _load_ark_env_config() -> tuple[str, str]:
 
 
 def _get_client() -> Any | None:
-    global _client
+    global _client, _client_unavailable_reason
     if _client is not None:
         return _client
 
@@ -137,6 +138,7 @@ def _get_client() -> Any | None:
     if not api_key:
         logger.warning("ARK_API_KEY/ARKCODE_API_KEY 未设置，sentiment 返回 0.0")
         _client = None
+        _client_unavailable_reason = "ARK_API_KEY/ARKCODE_API_KEY 未配置"
         return None
 
     try:
@@ -148,14 +150,28 @@ def _get_client() -> Any | None:
             timeout=LLM_CLIENT_TIMEOUT,
         )
         logger.info(f"Sentiment LLM ready: base_url={base_url}, timeout={LLM_CLIENT_TIMEOUT}s")
+        _client_unavailable_reason = ""
         return _client
     except ImportError:
         logger.warning("openai 未安装")
         _client = None
+        _client_unavailable_reason = "openai 依赖未安装"
     except Exception as e:
         logger.error(f"LLM client init failed: {e}")
         _client = None
+        _client_unavailable_reason = f"LLM client 初始化失败: {e}"
     return None
+
+
+def get_client_status() -> dict[str, Any]:
+    """Return whether LLM sentiment is available and why it may be neutral."""
+    client = _get_client()
+    if client is not None:
+        return {"available": True, "reason": ""}
+    return {
+        "available": False,
+        "reason": _client_unavailable_reason or "LLM client 不可用",
+    }
 
 
 # ════════════════════════════════════════════════════════

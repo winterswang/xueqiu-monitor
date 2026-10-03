@@ -578,6 +578,8 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     summary["crawl_health"] = crawl_health
     if crawl_health.get("status") == "degraded":
         summary["error"] = "crawl_health_degraded"
+    if crawl_health.get("sentiment_degraded"):
+        _record_sentiment_degradation(db_path, crawl_health)
 
     logger.info(f"Pipeline完成: {json.dumps(summary, ensure_ascii=False)}")
 
@@ -695,6 +697,9 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
             "news_coverage": 1.0,
             "news_error_rate": 0.0,
             "news_error_codes": [],
+            "sentiment_degraded": 0,
+            "sentiment_degraded_codes": [],
+            "sentiment_degraded_reasons": [],
         }
 
     success_with_posts = [
@@ -732,6 +737,13 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
         elif news_error_rate > 0.20 and status == "healthy":
             status = "warn"
 
+    sentiment_degraded = [
+        r for r in crawl_results
+        if r.get("diagnostic", {}).get("sentiment_status") == "degraded"
+    ]
+    if sentiment_degraded and status == "healthy":
+        status = "warn"
+
     return {
         "status": status,
         "total": total,
@@ -749,7 +761,40 @@ def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
         "news_coverage": news_coverage,
         "news_error_rate": news_error_rate,
         "news_error_codes": [r.get("stock_code", "?") for r in news_errors],
+        "sentiment_degraded": len(sentiment_degraded),
+        "sentiment_degraded_codes": [
+            r.get("stock_code", "?") for r in sentiment_degraded
+        ],
+        "sentiment_degraded_reasons": sorted({
+            reason
+            for r in sentiment_degraded
+            if (reason := r.get("diagnostic", {}).get("sentiment_reason"))
+        }),
     }
+
+
+def _record_sentiment_degradation(db_path: str, health: dict) -> None:
+    """Persist same-day sentiment degradation for the 19:00 report."""
+    date_str = time.strftime("%Y-%m-%d")
+    key = f"sentiment_degraded:{date_str}"
+    existing: dict = {}
+    raw = db.get_meta(db_path, key)
+    if raw:
+        try:
+            existing = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            existing = {}
+    merged = {
+        "date": date_str,
+        "runs": int(existing.get("runs", 0)) + 1,
+        "codes": sorted(set(existing.get("codes", [])) | set(
+            health.get("sentiment_degraded_codes", [])
+        )),
+        "reasons": sorted(set(existing.get("reasons", [])) | set(
+            health.get("sentiment_degraded_reasons", [])
+        )),
+    }
+    db.set_meta(db_path, key, json.dumps(merged, ensure_ascii=False))
 
 
 def _log_crawl_health(
@@ -787,8 +832,13 @@ def _log_crawl_health(
             f"异常: {health['news_errors']} | "
             f"news_healthy={health['news_error_rate'] <= 0.20}"
         )
-        if health.get("news_error_codes"):
-            logger.warning(f"⚠ 资讯抓取异常的标的: {health['news_error_codes']}")
+    if health.get("news_error_codes"):
+        logger.warning(f"⚠ 资讯抓取异常的标的: {health['news_error_codes']}")
+    if health.get("sentiment_degraded"):
+        logger.warning(
+            f"⚠ 情绪模型降级: {health['sentiment_degraded']} 只标的返回中性值；"
+            f"原因: {'；'.join(health.get('sentiment_degraded_reasons') or ['未知'])}"
+        )
 
     # ── 2. Coverage gate ──
     if health["status"] == "degraded":
