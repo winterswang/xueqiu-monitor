@@ -84,6 +84,23 @@ def init_db(db_path: str, schema_path: str | None = None) -> None:
         conn.close()
 
 
+def set_meta(db_path: str, key: str, value: str) -> None:
+    """Upsert a metadata value."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def get_meta(db_path: str, key: str) -> str | None:
+    """Read a metadata value."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM db_meta WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     """Idempotent schema migrations for legacy databases.
 

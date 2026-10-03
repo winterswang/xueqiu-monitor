@@ -388,6 +388,17 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
 
         # ── LLM Sentiment Analysis (batch, per stock) ──
         if posts:
+            client_status = sentiment.get_client_status()
+            has_llm_posts = any(
+                (post.get("type") or "discussion") in {"discussion", "article"}
+                for post in posts
+            )
+            result["diagnostic"]["sentiment_status"] = (
+                "degraded" if has_llm_posts and not client_status["available"] else "ok"
+            )
+            result["diagnostic"]["sentiment_reason"] = (
+                client_status["reason"] if has_llm_posts else ""
+            )
             try:
                 scores = sentiment.analyze_sentiment_batch(posts)
                 for j, s in enumerate(scores):

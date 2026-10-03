@@ -425,11 +425,8 @@ def _fetch_url_reader(url: str) -> dict:
 # 通道 2: 智谱 web-search-pro (背景补充 / 乱码降级)
 # ════════════════════════════════════════════════════════
 
-def search_context(query: str) -> str:
-    """搜索并拼接前几条结果摘要, 用于公告标题的背景补充 (乱码降级通道)。
-
-    返回拼接文本 (每条一段), 失败返回空串 —— 调用方以空串为"无背景"。
-    """
+def search_context_with_status(query: str) -> tuple[str, Optional[str]]:
+    """返回 (背景文本, 错误原因); 无结果时为 ("", None)。"""
     try:
         rsp = _post_json(
             f"{_ZHIPU_BASE}{_TOOLS_PATH}",
@@ -441,20 +438,25 @@ def search_context(query: str) -> str:
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             json.JSONDecodeError, RuntimeError) as e:
         logger.warning(f"[detail] search 失败 {query[:40]}: {e}")
-        return ""
+        return "", str(e)
 
     # 响应结构: choices[0].message.tool_calls[].search_result[].content
     try:
         calls = rsp["choices"][0]["message"]["tool_calls"] or []
-    except (KeyError, IndexError, TypeError):
-        return ""
+    except (KeyError, IndexError, TypeError) as e:
+        return "", f"响应结构异常: {type(e).__name__}"
     chunks: list[str] = []
     for call in calls:
         for item in (call.get("search_result") or [])[:3]:
             piece = (item.get("content") or "").strip()
             if piece:
                 chunks.append(piece[:1000])
-    return "\n".join(chunks)[:DETAIL_MAX_CHARS]
+    return "\n".join(chunks)[:DETAIL_MAX_CHARS], None
+
+
+def search_context(query: str) -> str:
+    """兼容旧调用：只返回背景文本。"""
+    return search_context_with_status(query)[0]
 
 
 # ════════════════════════════════════════════════════════
@@ -709,11 +711,15 @@ def fetch_announcement_detail(
         if text:
             logger.info(f"[detail] sec_edgar → ok: {stock_code} {title[:50]}")
             return f"[SEC EDGAR 原文]\n{text}"
-        bg = search_context(f"{stock_code.split('.')[0]} {title}")
+        bg, search_error = search_context_with_status(
+            f"{stock_code.split('.')[0]} {title}"
+        )
         if bg:
             from . import db as dbmod
             dbmod.insert_detail_fetch(db_path, url, "search_fallback", title, bg)
             return f"[EDGAR 原文不可得, 以下为新闻解读]\n{bg[:5000]}"
+        if search_error:
+            return f"[EDGAR 原文不可得; 背景搜索失败: {search_error}]"
         return ""
 
     detail = fetch_detail_cached(db_path, url)
@@ -721,12 +727,14 @@ def fetch_announcement_detail(
         return detail["content"][:5000]
     # 原文拿不到 (编码损坏 / 扫描件 / 下载失败) → 标题搜索给新闻解读。
     # 走到这里的一定是高权重公告 (调用方已过滤), 每日量级个位数。
-    bg = search_context(f"{title} 公告 解读")
+    bg, search_error = search_context_with_status(f"{title} 公告 解读")
     if bg:
         from . import db as dbmod
         dbmod.insert_detail_fetch(db_path, url, "search_fallback", title, bg)
         logger.info(f"[detail] search_fallback → ok ({detail['status']}): {title[:50]}")
         return f"[原文不可得({detail['status']}), 以下为新闻解读]\n{bg[:5000]}"
+    if search_error:
+        return f"[原文不可得({detail['status']}); 背景搜索失败: {search_error}]"
     return ""
 
 

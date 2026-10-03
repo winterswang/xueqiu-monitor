@@ -1457,6 +1457,23 @@ def enrich_details(
     return news_details, n_news, n_ann
 
 
+def _sentiment_degradation_note(db_path: str, date_str: str) -> str:
+    """Render same-day sentiment degradation in the report footer."""
+    degradation_raw = db.get_meta(db_path, f"sentiment_degraded:{date_str}")
+    if not degradation_raw:
+        return ""
+    try:
+        degradation = json.loads(degradation_raw)
+        reasons = "；".join(degradation.get("reasons") or ["未知原因"])
+        codes = degradation.get("codes") or []
+        return (
+            f"⚠ 情绪模型曾降级：{reasons}；讨论/文章情感分按 0.0 中性处理，"
+            f"当日涉及 {len(codes)} 只标的。"
+        )
+    except (TypeError, json.JSONDecodeError):
+        return "⚠ 情绪模型曾降级，但降级记录不可解析。"
+
+
 def generate_daily_report(
     config_path: str = "etc/config.report.json",
     date_str: Optional[str] = None,
@@ -1607,6 +1624,7 @@ def generate_daily_report(
 
     # ── 尾注 ──
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sentiment_degradation_note = _sentiment_degradation_note(db_path, date_str)
     notes = [
         (
             "今日口径: "
@@ -1629,6 +1647,8 @@ def generate_daily_report(
         f"news/公告详情来源: 本地浏览器 + PDF 本地解析 + SEC EDGAR（智谱 reader 仅兜底），"
         f"今日注入 {sum(len(v) for v in news_details.values())} 条 news 全文；主线与热词来自 TF-IDF。",
     ]
+    if sentiment_degradation_note:
+        notes.append(sentiment_degradation_note)
     notes_md = "\n".join(f"- {n}" for n in notes)
 
     report = f"""# 📊 自选股舆情日报 {date_str}
