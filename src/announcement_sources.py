@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sqlite3
 import time
@@ -26,6 +25,7 @@ UPLOAD_UPLOADED = "uploaded"
 UPLOAD_SKIPPED = "skipped"
 UPLOAD_FAILED = "failed"
 MAX_RETRIES = 3
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 _FINANCIAL_REPORT_PATTERNS = (
     (re.compile(r"中期报告|半年度报告|半年报|中期业绩公告", re.I), "interim"),
@@ -38,6 +38,10 @@ _US_FINANCIAL_REPORT_PAT = re.compile(
 )
 _US_FORM_RE = re.compile(r"^\s*(\d+(?:-[A-Z])?)\b")
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z_.-]+")
+
+
+class DownloadTooLargeError(ValueError):
+    """Download exceeded the in-memory source-file guard."""
 
 
 @dataclass(frozen=True)
@@ -143,7 +147,25 @@ def _fetch_bytes(url: str, timeout: int = 60) -> tuple[bytes, str]:
         },
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = response.read()
+        content_length = response.headers.get("Content-Length", "")
+        if content_length.isdigit() and int(content_length) > MAX_DOWNLOAD_BYTES:
+            raise DownloadTooLargeError(
+                f"content-length {int(content_length):,} exceeds "
+                f"{MAX_DOWNLOAD_BYTES:,} bytes"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_DOWNLOAD_BYTES:
+                raise DownloadTooLargeError(
+                    f"download exceeded {MAX_DOWNLOAD_BYTES:,} bytes"
+                )
+            chunks.append(chunk)
+        data = b"".join(chunks)
         content_type = response.headers.get("Content-Type", "")
     mime = content_type.split(";", 1)[0].strip().lower()
     return data, mime or _mime_for_content(data, url)
@@ -208,16 +230,20 @@ def _write_record(
                announcement_id, source_url, market, doc_category, report_form,
                local_path, sha256, mime_type, download_status, download_error,
                downloaded_at, upload_status, upload_error, media_id,
-               uploaded_at, retry_count
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+               uploaded_at, download_retry_count, upload_retry_count
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
            ON CONFLICT(announcement_id) DO UPDATE SET
                source_url=excluded.source_url,
                market=excluded.market,
                doc_category=excluded.doc_category,
                report_form=excluded.report_form,
-               local_path=CASE WHEN excluded.local_path != '' THEN excluded.local_path ELSE announcement_sources.local_path END,
-              sha256=CASE WHEN excluded.sha256 != '' THEN excluded.sha256 ELSE announcement_sources.sha256 END,
-              mime_type=CASE WHEN excluded.mime_type != '' THEN excluded.mime_type ELSE announcement_sources.mime_type END,
+              local_path=CASE WHEN excluded.local_path != '' THEN excluded.local_path ELSE announcement_sources.local_path END,
+              sha256=CASE
+                  WHEN excluded.sha256 != '' THEN excluded.sha256
+                  ELSE announcement_sources.sha256 END,
+              mime_type=CASE
+                  WHEN excluded.mime_type != '' THEN excluded.mime_type
+                  ELSE announcement_sources.mime_type END,
               download_status=excluded.download_status,
               download_error=excluded.download_error,
               downloaded_at=excluded.downloaded_at,
@@ -225,7 +251,9 @@ def _write_record(
               upload_error='',
               media_id='',
               uploaded_at=0,
-              retry_count=CASE WHEN excluded.download_status='downloaded' THEN 0 ELSE announcement_sources.retry_count END""",
+              download_retry_count=CASE
+                  WHEN excluded.download_status='downloaded' THEN 0
+                  ELSE announcement_sources.download_retry_count END""",
         (
             announcement_id,
             source_url,
@@ -271,17 +299,20 @@ def archive_day(
     try:
         rows = conn.execute(
             """SELECT a.*, s.download_status, s.local_path, s.sha256,
-                      s.retry_count AS source_retry_count
+                      s.download_retry_count AS source_retry_count
                FROM announcements a
                LEFT JOIN announcement_sources s
                  ON s.announcement_id = a.id
                WHERE a.ann_date >= ? AND a.ann_date < ?
                  AND (
                        s.announcement_id IS NULL
-                       OR s.download_status IN ('pending', 'failed', 'downloaded')
+                       OR (
+                           s.download_status IN ('pending', 'failed', 'downloaded')
+                           AND s.download_retry_count < ?
+                       )
                    )
                ORDER BY a.id""",
-            (day_start, day_end),
+            (day_start, day_end, max_retries),
         ).fetchall()
         summary.selected = len(rows)
 
@@ -305,8 +336,37 @@ def archive_day(
                 continue
 
             market = market_from_stock_code(row["stock_code"])
-            source_url = _resolve_source_url(row, plan, us_resolver)
+            try:
+                source_url = _resolve_source_url(row, plan, us_resolver)
+            except Exception as exc:
+                _mark_download_failed(
+                    conn,
+                    row["id"],
+                    row["ann_link"] or "",
+                    market,
+                    plan,
+                    f"source resolution failed: {exc}",
+                )
+                summary.failed += 1
+                conn.commit()
+                continue
             if not source_url:
+                original_link = (row["ann_link"] or "").strip()
+                if (
+                    market == "US"
+                    and "/S/" in original_link
+                ):
+                    _mark_download_failed(
+                        conn,
+                        row["id"],
+                        original_link,
+                        market,
+                        plan,
+                        "SEC source resolution failed",
+                    )
+                    summary.failed += 1
+                    conn.commit()
+                    continue
                 _write_record(
                     conn,
                     row["id"],
@@ -361,6 +421,11 @@ def archive_day(
                 data, mime = fetch_bytes(source_url)
                 if not data:
                     raise ValueError("empty download")
+                if len(data) > MAX_DOWNLOAD_BYTES:
+                    raise DownloadTooLargeError(
+                        f"download returned {len(data):,} bytes, exceeding "
+                        f"{MAX_DOWNLOAD_BYTES:,} bytes"
+                    )
                 if mime == "application/pdf" and not data.startswith(b"%PDF"):
                     raise ValueError("non-pdf response")
                 digest = hashlib.sha256(data).hexdigest()
@@ -409,12 +474,12 @@ def _mark_download_failed(
         source_url,
         market,
         plan,
-                    download_status=DOWNLOAD_FAILED,
-                    download_error=error[:1000],
-                    upload_status=UPLOAD_SKIPPED,
-                )
+        download_status=DOWNLOAD_FAILED,
+        download_error=error[:1000],
+        upload_status=UPLOAD_SKIPPED,
+    )
     conn.execute(
-        "UPDATE announcement_sources SET retry_count=retry_count+1 "
+        "UPDATE announcement_sources SET download_retry_count=download_retry_count+1 "
         "WHERE announcement_id=?",
         (announcement_id,),
     )
@@ -478,7 +543,7 @@ def upload_pending(
             JOIN announcements a ON a.id = s.announcement_id
             WHERE s.download_status = ?
               AND s.upload_status != ?
-              AND s.retry_count < ?
+              AND s.upload_retry_count < ?
               {date_filter}
             ORDER BY a.ann_date, s.announcement_id
             LIMIT ?
@@ -487,10 +552,14 @@ def upload_pending(
         summary.selected = len(rows)
         for row in rows:
             local_path = root / row["local_path"]
+            if dry_run:
+                summary.skipped += 1
+                continue
             if not local_path.is_file():
                 conn.execute(
                     """UPDATE announcement_sources
-                       SET upload_status=?, upload_error=?, retry_count=retry_count+1
+                       SET upload_status=?, upload_error=?,
+                           upload_retry_count=upload_retry_count+1
                        WHERE announcement_id=?""",
                     (UPLOAD_FAILED, "local file missing", row["announcement_id"]),
                 )
@@ -498,9 +567,6 @@ def upload_pending(
                 summary.failed += 1
                 continue
 
-            if dry_run:
-                summary.skipped += 1
-                continue
             try:
                 knowledge_base_id, folder_id = ima_target(row)
                 media_id = upload_file(
@@ -525,7 +591,8 @@ def upload_pending(
             except Exception as exc:
                 conn.execute(
                     """UPDATE announcement_sources
-                       SET upload_status=?, upload_error=?, retry_count=retry_count+1
+                       SET upload_status=?, upload_error=?,
+                           upload_retry_count=upload_retry_count+1
                        WHERE announcement_id=?""",
                     (
                         UPLOAD_FAILED,

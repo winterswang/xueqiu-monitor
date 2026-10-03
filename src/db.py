@@ -132,13 +132,41 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             upload_error    TEXT    NOT NULL DEFAULT '',
             media_id        TEXT    NOT NULL DEFAULT '',
             uploaded_at     INTEGER NOT NULL DEFAULT 0,
-            retry_count     INTEGER NOT NULL DEFAULT 0,
+            download_retry_count INTEGER NOT NULL DEFAULT 0,
+            upload_retry_count   INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (announcement_id) REFERENCES announcements(id)
         )"""
     )
+    source_cols = conn.execute(
+        "PRAGMA table_info(announcement_sources)"
+    ).fetchall()
+    source_col_names = {column[1] for column in source_cols}
+    if "download_retry_count" not in source_col_names:
+        conn.execute(
+            "ALTER TABLE announcement_sources "
+            "ADD COLUMN download_retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "upload_retry_count" not in source_col_names:
+        conn.execute(
+            "ALTER TABLE announcement_sources "
+            "ADD COLUMN upload_retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "retry_count" in source_col_names:
+        conn.execute(
+            """UPDATE announcement_sources SET
+                   download_retry_count=CASE
+                       WHEN download_status='failed' THEN retry_count
+                       ELSE download_retry_count END,
+                   upload_retry_count=CASE
+                       WHEN upload_status IN ('failed', 'uploaded')
+                        THEN retry_count
+                       ELSE upload_retry_count END
+               WHERE retry_count > 0"""
+        )
     conn.execute(
-        """CREATE INDEX IF NOT EXISTS idx_ann_sources_download
-           ON announcement_sources(download_status, upload_status, retry_count)"""
+        """CREATE INDEX IF NOT EXISTS idx_ann_sources_retry_states
+           ON announcement_sources(download_status, upload_status,
+                                   download_retry_count, upload_retry_count)"""
     )
 
     # v0.7 F4: purge generic/noise words from hot_word_dict. Before v0.7 the
