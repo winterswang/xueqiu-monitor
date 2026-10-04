@@ -126,6 +126,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
 
     Returns summary dict with stats.
     """
+    os.environ["XUEQIU_CALL_SOURCE"] = f"xueqiu-monitor:pipeline:{Path(config_path).stem}"
     cfg = Config.from_file(config_path)
     db_path = cfg.db_path
     os.makedirs(Path(db_path).parent, exist_ok=True)
