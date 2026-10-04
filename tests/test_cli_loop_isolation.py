@@ -50,6 +50,11 @@ def temp_config(tmp_path):
             "whitelist": [],
             "xueqiu_analyzer_path": "/dev/null/nonexistent",
             "morning_brief_db": "/dev/null/nonexistent",
+            # run_pipeline 在处理每条爬取结果时，会**绕过 crawl_watchlist** 直连
+            # opencli 资讯接口（cli.py 的 fetch_news_with_status 快路径）。本用例
+            # mock 的是 crawl_watchlist，覆盖不到那条路 —— 不关掉它，mock 出来的
+            # 假代码 FAIL/OK 会被真的拿去请求雪球（实测 2 次 × 17s，且会触发风控）。
+            "fetch_news": False,
         },
     }
     config_path = str(tmp_path / "config.json")
