@@ -13,7 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .detail_fetcher import classify_announcement
+from .detail_fetcher import _SEC_UA, classify_announcement
+
+# 非 SEC 站点（雪球/巨潮等）用浏览器样式 UA。
+# SEC 例外，见 _fetch_bytes 里的说明。
+_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) xueqiu-monitor/1.0"
 
 
 DOWNLOAD_PENDING = "pending"
@@ -137,15 +141,16 @@ def _mime_for_content(data: bytes, source_url: str) -> str:
 def _fetch_bytes(url: str, timeout: int = 60) -> tuple[bytes, str]:
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "xueqiu-monitor/1.0"
-            )
-        },
-    )
+    # SEC 按 UA 判定「未声明的自动化工具」，且**在 TLS 层就掐断**：
+    # 浏览器样式 UA 会被拒，表现为 confusing 的 SSL UNEXPECTED_EOF ——
+    # detail_fetcher._sec_get 的注释把它记成了「urllib 对 sec.gov 的 TLS 怪癖」，
+    # 实际原因是 UA 里没有联系方式。2026-10-04 实测同一个 URL：
+    #   Mozilla/5.0 (Macintosh…)                       → SSL UNEXPECTED_EOF
+    #   Mozilla/5.0 … xueqiu-monitor/1.0               → HTTP 403
+    #   xueqiu-monitor/1.0 paradox0504@gmail.com       → HTTP 200
+    # 所以 sec.gov 必须用项目里已合规的 _SEC_UA。
+    user_agent = _SEC_UA if "sec.gov" in url else _BROWSER_UA
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         content_length = response.headers.get("Content-Length", "")
         if content_length.isdigit() and int(content_length) > MAX_DOWNLOAD_BYTES:

@@ -426,3 +426,53 @@ def test_dry_run_does_not_mutate_missing_file_state(tmp_path):
 
     assert (summary.selected, summary.skipped, summary.failed) == (1, 1, 0)
     assert row == ("pending", "", 0)
+
+
+# ── SEC User-Agent ────────────────────────────────────────────────────────
+
+
+def test_sec_urls_use_the_declared_sec_user_agent(monkeypatch):
+    """sec.gov 必须用带联系方式的 UA。
+
+    回归：归档代码曾自己写了个浏览器样式 UA，结果**每一条美股公告都下不下来**。
+    SEC 对「未声明的自动化工具」在 TLS 层就掐断，表现为 SSL UNEXPECTED_EOF，
+    很容易被误判成 TLS 怪癖（detail_fetcher 的注释就这么记的）。2026-10-04
+    实测同一 URL：浏览器 UA → SSL EOF / 403，_SEC_UA → 200。
+    """
+    from src import announcement_sources as mod
+
+    seen: dict[str, str] = {}
+
+    class _Resp:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __init__(self):
+            self._payload = b"<html>ok</html>"
+            self._sent = False
+
+        def read(self, size=None):
+            # 真实现按 1MB 分块读，这里忽略 size，只保证「读完返回空」的约定
+            if self._sent:
+                return b""
+            self._sent = True
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        seen[request.full_url] = request.get_header("User-agent")
+        return _Resp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+
+    sec_url = "https://www.sec.gov/Archives/edgar/data/1318605/1/tsla.htm"
+    assert mod._fetch_bytes(sec_url)[0] == b"<html>ok</html>"
+    assert seen[sec_url] == mod._SEC_UA
+
+    other_url = "https://example.com/report.pdf"
+    mod._fetch_bytes(other_url)
+    assert seen[other_url] == mod._BROWSER_UA
