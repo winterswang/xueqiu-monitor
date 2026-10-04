@@ -1492,6 +1492,10 @@ def generate_daily_report(
         Markdown content of the report.
     """
     cfg = load_report_config(config_path)
+    os.environ.setdefault(
+        "XUEQIU_CALL_SOURCE",
+        f"xueqiu-monitor:report:{Path(config_path).stem}",
+    )
     db_path = cfg["db_path"]
     stocks_cfg = cfg["stocks"]
     date_str = date_str or datetime.now().strftime("%Y-%m-%d")
