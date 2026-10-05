@@ -108,6 +108,27 @@ def _select_reply_candidates(
     return selected
 
 
+def _prewarm_details(db_path: str, cfg: Config) -> dict[str, int]:
+    """Fetch report details incrementally after each configured pipeline."""
+    if not cfg.detail.get("prewarm", False):
+        return {"enabled": False, "news": 0, "announcements": 0}
+    from . import report_generator
+
+    date_str = time.strftime("%Y-%m-%d")
+    try:
+        _, n_news, n_announcements = report_generator.enrich_details(
+            db_path, date_str, cfg.__dict__
+        )
+    except Exception as exc:
+        logger.warning(f"详情预热失败(不影响 pipeline): {exc}")
+        return {"enabled": True, "news": 0, "announcements": 0, "error": str(exc)}
+    return {
+        "enabled": True,
+        "news": n_news,
+        "announcements": n_announcements,
+    }
+
+
 def _source_integrity_section(since_ts: float) -> str:
     # 汇总本次运行的源级抓取失败，产出日报末尾的「数据完整性」段落。
     # 数据来自 fetcher_opencli 落盘的 logs/source_failures.jsonl。
@@ -584,6 +605,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     report_path.write_text(report)
     logger.info(f"日报已保存: {report_path}")
 
+    detail_prewarm = (
+        _prewarm_details(db_path, cfg) if not dry_run
+        else {"enabled": False, "news": 0, "announcements": 0}
+    )
+
     summary = {
         "crawled": sum(1 for r in crawl_results if r["status"] == "success"),
         "failed": sum(1 for r in crawl_results if r["status"] != "success"),
@@ -595,6 +621,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         "filtered": sum(1 for a in all_alerts if a.filtered),
         "elapsed_seconds": crawl_elapsed,
         "report": str(report_path),
+        "detail_prewarm": detail_prewarm,
     }
     # ── Crawl Health Report ──
     crawl_health = _log_crawl_health(crawl_results, summary, logger)

@@ -22,7 +22,7 @@ def test_opencli_browser_commands_are_throttled_and_logged(
     slots = []
     records = []
 
-    def fake_slot(_source):
+    def fake_slot(_source, _args):
         slot = {"enabled": True, "waited_seconds": 1.0, "reserved_seconds": 2.0}
         slots.append(slot)
         return slot

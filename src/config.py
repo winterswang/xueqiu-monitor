@@ -75,6 +75,11 @@ DEFAULT_CONFIG = {
     "schedule": {
         "interval_hours": 4,
     },
+    "detail": {
+        "prewarm": False,
+        "concurrency": 1,
+        "news_per_stock": 5,
+    },
 }
 
 
@@ -89,6 +94,7 @@ class Config:
     notification: dict = field(default_factory=lambda: DEFAULT_CONFIG["notification"].copy())
     cold_start: dict = field(default_factory=lambda: DEFAULT_CONFIG["cold_start"].copy())
     schedule: dict = field(default_factory=lambda: DEFAULT_CONFIG["schedule"].copy())
+    detail: dict = field(default_factory=lambda: DEFAULT_CONFIG["detail"].copy())
 
     @classmethod
     def from_file(cls, path: str) -> Config:

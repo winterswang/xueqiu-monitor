@@ -33,5 +33,10 @@
     "enabled": true,
     "days": 7,
     "min_data_points": 7
+  },
+  "detail": {
+    "prewarm": true,
+    "concurrency": 1,
+    "news_per_stock": 5
   }
 }

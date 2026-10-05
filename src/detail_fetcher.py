@@ -258,7 +258,7 @@ _MAX_BODY_LINKS = 80         # body 兜底时链接过多 = 首页/频道页, �
 def _opencli(*args: str, timeout: int = 40) -> Optional[dict]:
     """跑一条 opencli browser 命令, 返回解析后的 JSON (失败 None)."""
     cmd = ["opencli", "browser", _opencli_session(), *args]
-    slot = acquire_opencli_slot(" ".join(args[:2]))
+    slot = acquire_opencli_slot(" ".join(args[:2]), cmd)
     started_at = time.time()
     try:
         r = subprocess.run(
