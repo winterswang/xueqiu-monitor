@@ -185,7 +185,7 @@
   },
   "detail": {
     "enabled": true,
-    "concurrency": 5,
+    "concurrency": 1,
     "news_per_stock": 5
   },
   "tier": {

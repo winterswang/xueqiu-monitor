@@ -32,9 +32,13 @@ import os
 import re
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
+
+from xueqiu_analyzer.opencli_call_logger import record_opencli_call
+from xueqiu_analyzer.opencli_rate_limiter import acquire_opencli_slot
 
 logger = logging.getLogger(__name__)
 
@@ -254,11 +258,19 @@ _MAX_BODY_LINKS = 80         # body 兜底时链接过多 = 首页/频道页, �
 def _opencli(*args: str, timeout: int = 40) -> Optional[dict]:
     """跑一条 opencli browser 命令, 返回解析后的 JSON (失败 None)."""
     cmd = ["opencli", "browser", _opencli_session(), *args]
+    slot = acquire_opencli_slot(" ".join(args[:2]))
+    started_at = time.time()
     try:
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout
         )
+        record_opencli_call(
+            cmd, started_at, result=r, caller="_opencli", throttle=slot
+        )
     except (subprocess.TimeoutExpired, OSError) as e:
+        record_opencli_call(
+            cmd, started_at, error=e, caller="_opencli", throttle=slot
+        )
         logger.warning(f"[detail] opencli 超时/失败: {' '.join(args[:2])} {e}")
         return None
     out = "\n".join(
