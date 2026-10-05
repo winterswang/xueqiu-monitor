@@ -11,6 +11,44 @@ not here.
 from src import detail_fetcher as df
 
 
+def test_opencli_browser_commands_are_throttled_and_logged(
+    tmp_path, monkeypatch
+):
+    import subprocess
+
+    log_path = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("XUEQIU_OPENCLI_LOG", str(log_path))
+    monkeypatch.setenv("XUEQIU_CALL_SOURCE", "test:detail")
+    slots = []
+    records = []
+
+    def fake_slot(_source):
+        slot = {"enabled": True, "waited_seconds": 1.0, "reserved_seconds": 2.0}
+        slots.append(slot)
+        return slot
+
+    def fake_record(*args, **kwargs):
+        records.append((args, kwargs))
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"page":"abc"}', stderr=""
+        )
+
+    monkeypatch.setattr(df, "acquire_opencli_slot", fake_slot)
+    monkeypatch.setattr(df, "record_opencli_call", fake_record)
+    monkeypatch.setattr(df.subprocess, "run", fake_run)
+
+    result = df._opencli("open", "https://xueqiu.com/a")
+
+    assert result == {"page": "abc"}
+    assert slots == [
+        {"enabled": True, "waited_seconds": 1.0, "reserved_seconds": 2.0}
+    ]
+    assert len(records) == 1
+    assert records[0][0][0][:3] == ["opencli", "browser", "detailfetch0"]
+
+
 class TestFilterNewsPosts:
     """news 三道过滤闸: 时效 → 噪音 → 限量."""
 

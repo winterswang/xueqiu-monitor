@@ -82,6 +82,32 @@ def _phase(name: str, start: bool = True) -> float | None:
 
 
 
+def _select_reply_candidates(
+    posts: list[dict], existing: set[str], per_stock: int, min_comments: int
+) -> list[str]:
+    """Select reply URLs once, excluding DB history and feed duplicates."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    candidates = sorted(
+        (
+            post for post in posts
+            if (post.get("type") or "discussion") == "discussion"
+            and (post.get("link") or post.get("post_id") or "").startswith("https://xueqiu.com/")
+            and int(post.get("comment_count") or 0) >= min_comments
+        ),
+        key=lambda post: -int(post.get("comment_count") or 0),
+    )
+    for post in candidates:
+        url = post.get("link") or post.get("post_id")
+        if not url or url in existing or url in seen:
+            continue
+        seen.add(url)
+        selected.append(url)
+        if len(selected) >= per_stock:
+            break
+    return selected
+
+
 def _source_integrity_section(since_ts: float) -> str:
     # 汇总本次运行的源级抓取失败，产出日报末尾的「数据完整性」段落。
     # 数据来自 fetcher_opencli 落盘的 logs/source_failures.jsonl。
@@ -274,17 +300,13 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     if per > 0:
                         sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
                         from xueqiu_analyzer.fetcher_opencli import fetch_replies
-                        have = db.existing_reply_post_ids(db_path, stock_code)
-                        cands = sorted(
-                            (p2 for p2 in cr["posts_data"]
-                             if (p2.get("type") or "discussion") == "discussion"
-                             and (p2.get("link") or p2.get("post_id") or "").startswith("https://xueqiu.com/")
-                             and int(p2.get("comment_count") or 0) >= min_c),
-                            key=lambda x: -int(x.get("comment_count") or 0))[:per]
+                        have = db.existing_reply_post_ids(db_path)
+                        cands = _select_reply_candidates(
+                            cr["posts_data"], have, per, min_c
+                        )
                         n_posts = n_replies = 0
                         now_r = int(time.time())
-                        for p2 in cands:
-                            url = p2.get("link") or p2.get("post_id")
+                        for url in cands:
                             if url in have:
                                 continue  # 幂等: 已抓过
                             rows = fetch_replies(url, rlimit)

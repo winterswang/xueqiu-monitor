@@ -1368,7 +1368,7 @@ def enrich_details(
       detail_fetch_log 当日缓存, 失败标记防重试
     - 公告: classify_announcement=='high' 且有 http 链接 → 本地 PDF 解析 /
       SEC EDGAR / 均失败则标题搜索, 结果持久化到 announcements.ann_detail
-    - 并发 detail.concurrency (默认 5); 单条失败不阻塞 —— 全程 try 守护,
+    - 并发 detail.concurrency (默认 1, 降低 opencli 峰值); 单条失败不阻塞 —— 全程 try 守护,
       enrich 失败绝不影响日报生成。
 
     Returns: ({stock_code: {link: full_text}}, n_news, n_ann)
@@ -1376,7 +1376,7 @@ def enrich_details(
     from . import detail_fetcher
 
     detail_cfg = config.get("detail", {})
-    concurrency = int(detail_cfg.get("concurrency", 5))
+    concurrency = int(detail_cfg.get("concurrency", 1))
     news_limit = int(detail_cfg.get("news_per_stock", 5))
     # 确保迁移到位 (ann_detail 列 / detail_fetch_log 表; 幂等)
     db.init_db(db_path)
