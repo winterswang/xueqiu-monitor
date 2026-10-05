@@ -255,8 +255,14 @@ _MIN_ARTICLE_CHARS = 300     # 短于此视为"容器没命中", 继续往下试
 _MAX_BODY_LINKS = 80         # body 兜底时链接过多 = 首页/频道页, 不是文章
 
 
-def _opencli(*args: str, timeout: int = 40) -> Optional[dict]:
-    """跑一条 opencli browser 命令, 返回解析后的 JSON (失败 None)."""
+def _opencli(
+    *args: str, timeout: int = 40, expect_miss: bool = False
+) -> Optional[dict]:
+    """跑一条 opencli browser 命令, 返回解析后的 JSON (失败 None).
+
+    ``expect_miss`` 透传给台账，用于声明「这条命令属于探针序列，未命中是
+    预期结果」。台账仍会如实记下退出码，只是不再把它算作失败。
+    """
     cmd = ["opencli", "browser", _opencli_session(), *args]
     slot = acquire_opencli_slot(" ".join(args[:2]), cmd)
     started_at = time.time()
@@ -265,11 +271,21 @@ def _opencli(*args: str, timeout: int = 40) -> Optional[dict]:
             cmd, capture_output=True, text=True, timeout=timeout
         )
         record_opencli_call(
-            cmd, started_at, result=r, caller="_opencli", throttle=slot
+            cmd,
+            started_at,
+            result=r,
+            caller="_opencli",
+            throttle=slot,
+            expect_miss=expect_miss,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         record_opencli_call(
-            cmd, started_at, error=e, caller="_opencli", throttle=slot
+            cmd,
+            started_at,
+            error=e,
+            caller="_opencli",
+            throttle=slot,
+            expect_miss=expect_miss,
         )
         logger.warning(f"[detail] opencli 超时/失败: {' '.join(args[:2])} {e}")
         return None
@@ -324,7 +340,10 @@ def fetch_page_opencli(url: str) -> dict:
     best_sel = ""
     title = ""
     for sel in _ARTICLE_SELECTORS:
-        ext = _opencli("extract", "--selector", sel, timeout=30)
+        # expect_miss: 这是探针循环 —— 选择器不中就会走 continue，属正常控制流。
+        # 不声明的话，台账会把每次探测未命中都记成失败：2026-10-05 实测两个页面
+        # 各探 3 次才命中，于是 browser:extract 显示「75% 失败率」，而抓取全成功。
+        ext = _opencli("extract", "--selector", sel, timeout=30, expect_miss=True)
         if not ext:
             continue
         content = (ext.get("content") or "").strip()
