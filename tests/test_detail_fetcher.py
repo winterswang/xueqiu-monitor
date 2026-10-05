@@ -286,7 +286,7 @@ class TestOpencliPageSelection:
 
     @staticmethod
     def _fake(canned: dict):
-        def fake(*args, timeout=40):
+        def fake(*args, timeout=40, expect_miss=False):
             if args[0] == "open":
                 return {"page": "P1"}
             if args[0] == "close":
@@ -301,15 +301,39 @@ class TestOpencliPageSelection:
         calls = []
         fake = self._fake(canned)
 
-        def spy(*args, timeout=40):
-            calls.append(args)
-            return fake(*args, timeout=timeout)
+        def spy(*args, timeout=40, expect_miss=False):
+            calls.append((args, expect_miss))
+            return fake(*args, timeout=timeout, expect_miss=expect_miss)
 
         monkeypatch.setattr(df, "_opencli", spy)
         r = df.fetch_page_opencli("https://finance.sina.com.cn/a.shtml")
         assert r["status"] == "ok"
         assert r["content"].startswith("正文内容")
-        assert not any(len(a) > 2 and a[2] == "body" for a in calls)
+        assert not any(a[2] == "body" for a, _ in calls if len(a) > 2)
+
+    def test_probe_extracts_are_marked_expect_miss(self, monkeypatch):
+        """正文探测必须带 expect_miss，open/close 不带。
+
+        回归（2026-10-05）：探针未命中被台账记成失败，browser:extract 显示
+        「75% 失败率」，而每次抓取其实都成功了。标记就是给台账区分用的。
+        """
+        canned = {"div.article": "正文内容。" * 100}
+        calls = []
+        fake = self._fake(canned)
+
+        def spy(*args, timeout=40, expect_miss=False):
+            calls.append((args[0], expect_miss))
+            return fake(*args, timeout=timeout, expect_miss=expect_miss)
+
+        monkeypatch.setattr(df, "_opencli", spy)
+        df.fetch_page_opencli("https://finance.sina.com.cn/a.shtml")
+
+        assert calls, "应当至少调用过一次 opencli"
+        for verb, expect_miss in calls:
+            if verb == "extract":
+                assert expect_miss is True, "正文探测必须声明 expect_miss"
+            else:
+                assert expect_miss is False, f"{verb} 不该被标成探针"
 
     def test_falls_back_to_body_when_no_container(self, monkeypatch):
         canned = {"body": "只有 body 有内容。" * 50}
