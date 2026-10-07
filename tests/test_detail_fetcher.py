@@ -167,6 +167,35 @@ class TestClassifyAnnouncement:
             "144 Report of proposed sale of securities"
         ) == "other"
 
+    def test_hk_buyback_wording_is_high(self):
+        # 港股术语是「股份购回」, A 股/中文才写「回购」。只匹配后者会让港股每日
+        # 回购披露全部落到「翌日披露」的 routine —— 2026-10-07 复盘实测: 含
+        # 「购回」634 条有 605 条被误判, 含「回购」的 81 条则全部命中。
+        assert df.classify_announcement(
+            "腾讯控股 翌日披露报表 - [股份购回] 翌日披露报表"
+        ) == "high"
+        assert df.classify_announcement(
+            "美的集团 翌日披露报表 - [股份购回] 翌日披露报表"
+        ) == "high"
+
+    def test_schedule_13d_is_high_but_13g_is_not(self):
+        # 13D 是持股超 5% 且带主动意图 (举牌/积极股东); 13G 是被动机构持仓,
+        # 收之无益。两种形态都要认: EDGAR 直出, 和雪球帖子转载 (form 被
+        # "其他\n$TICKER$ " 前缀挡住, 旧实现只认开头所以一律取不到)。
+        d13 = (
+            "SCHEDULE 13D/A [Amend] General Statement of Acquisition of "
+            "Beneficial Ownership Accession Number: 0001193125-26-123456"
+        )
+        g13 = (
+            "SCHEDULE 13G Statement of Beneficial Ownership by Certain "
+            "Investors Accession Number: 0001193125-26-123456"
+        )
+        assert df.classify_announcement(d13) == "high"
+        assert df.classify_announcement(
+            "其他\n$Cerebras Systems(CBRS)$ " + d13
+        ) == "high"
+        assert df.classify_announcement(g13) == "other"
+
 
 class TestGarbledDetection:
     """巨潮 PDF 乱码启发式."""
