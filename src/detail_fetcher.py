@@ -74,6 +74,9 @@ _ROUTINE_ANN_PAT = re.compile(
     r"翌日披露|月报表|董事会会议|持续督导|保荐|法律意见|更正|澄清|"
     r"海外监管公告|翻译版本|报章|通告|通函|表決|表格"
 )
+# 每日例行披露格式 (港股「翌日披露报表」一天一份: 回购/股份变动)。归档值得,
+# P1 推送不值得 —— 见 is_push_worthy 的分工说明。
+_DAILY_DISCLOSURE_PAT = re.compile(r"翌日披露")
 
 
 # ════════════════════════════════════════════════════════
@@ -609,6 +612,25 @@ def classify_announcement(title: str) -> str:
     if _ROUTINE_ANN_PAT.search(t):
         return "routine"
     return "other"
+
+
+def is_push_worthy(title: str) -> bool:
+    """值得升 P1 汇总推送吗: high, 但排除每日例行披露。
+
+    归档门 (announcement_sources.classify_source) 用 classify_announcement 判
+    「值不值得存」, P1 门 (filter.py) 判「值不值得现在就打扰」—— 两件事。港股
+    「翌日披露报表 - [股份购回]」一天一份: 值得归档入库、进 IMA 累积成回购
+    序列, 但升 P1 就让腾讯这类高频例行件和 FDA 审批同级, P1 通道被淹没
+    (2026-09-20 的分级设计已如此约定)。故推送上单独降档。
+
+    只按「翌日披露」这一个格式词降档, 不用 _ROUTINE_ANN_PAT —— 后者含「通告」,
+    会连带把港股「公告及通告 - [股息或分派]」这类高价值派息件一起降档。
+    """
+    t = title or ""
+    return (
+        classify_announcement(t) == "high"
+        and not _DAILY_DISCLOSURE_PAT.search(t)
+    )
 
 
 # ════════════════════════════════════════════════════════

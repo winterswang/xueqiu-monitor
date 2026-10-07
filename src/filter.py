@@ -156,18 +156,18 @@ def filter_alerts(
     # Step 1: assign priority
     for alert in alerts:
         # Announcements are informational events, not statistical anomalies.
-        # v2 Phase 2 (2026-09-20): 高权重公告(财报/收购/回购/审批等,
-        # detail_fetcher.classify_announcement)升 P1 进汇总推送; 例行披露
-        # (翌日披露/督导/更正)仍 P2 静默 —— 否则腾讯每日购回报表这类
-        # 高频例行件与 FDA 审批同级, P1 通道被淹没。
+        # v2 Phase 2 (2026-09-20): 高权重公告(财报/收购/回购/审批等)升 P1 进
+        # 汇总推送; 例行披露(翌日披露/督导/更正)仍 P2 静默 —— 否则腾讯每日
+        # 购回报表这类高频例行件与 FDA 审批同级, P1 通道被淹没。
+        # 用 is_push_worthy 而不是 classify_announcement == "high": 后者是归档门
+        # 的口径(值不值得存), 2026-10-07 起港股「翌日披露报表-[股份购回]」也归
+        # high(值得归档进 IMA), 但它仍是每日例行件, 不该升 P1。
         if alert.alert_type == "new_announcement":
             try:
-                from .detail_fetcher import classify_announcement
+                from .detail_fetcher import is_push_worthy
                 title = (alert.detail or {}).get("title", "") if isinstance(
                     alert.detail, dict) else ""
-                alert.priority = (
-                    "P1" if classify_announcement(title) == "high" else "P2"
-                )
+                alert.priority = "P1" if is_push_worthy(title) else "P2"
             except Exception:
                 alert.priority = "P2"
         else:

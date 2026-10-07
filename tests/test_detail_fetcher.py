@@ -196,6 +196,22 @@ class TestClassifyAnnouncement:
         ) == "high"
         assert df.classify_announcement(g13) == "other"
 
+    def test_daily_disclosure_is_archived_but_not_pushed(self):
+        # 归档门 (classify_announcement) 判「值不值得存」: 港股每日回购披露要存,
+        # 好进 IMA 累积成回购序列。P1 门 (is_push_worthy) 判「值不值得现在打扰」:
+        # 它是每日例行件, 升 P1 会把通道淹掉 (filter.py 的 2026-09-20 约定)。
+        tencent = "腾讯控股 翌日披露报表 - [股份购回] 翌日披露报表"
+        assert df.classify_announcement(tencent) == "high"
+        assert not df.is_push_worthy(tencent)
+
+    def test_push_worthy_keeps_real_events(self):
+        # 降档只认「翌日披露」这一个格式词: 港股派息件标题里带「公告及通告」,
+        # 若按 _ROUTINE_ANN_PAT 降档会被误伤 (那是最大的 high∩routine 群)。
+        assert df.is_push_worthy(
+            "公告及通告 - [股息或分派] 截至2026年6月30日止六个月之中期股息"
+        )
+        assert df.is_push_worthy("关于回购公司股份的进展公告")
+
 
 class TestGarbledDetection:
     """巨潮 PDF 乱码启发式."""
