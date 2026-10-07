@@ -113,15 +113,26 @@ def _safe_component(value: str) -> str:
     return value.strip("._-")[:60] or "unknown"
 
 
+# 归档名后缀取自源 URL 的扩展名。SEC 的 SCHEDULE 13D 主文档路径以 .xml 结尾,
+# 但实际返回的是渲染后的 XHTML —— 兜底成 .pdf 会让 IMA 按 PDF 解析而失败
+# (2026-10-07 实测 BABA 13D: 响应是 XHTML, 却被命名为 .pdf)。
+_SUFFIX_BY_EXT = {
+    ".pdf": ".pdf",
+    ".htm": ".html",
+    ".html": ".html",
+    ".xml": ".html",
+    ".txt": ".txt",
+}
+
+
 def build_filename(
     stock_code: str,
     announced_on: str,
     plan: SourcePlan,
     source_url: str,
 ) -> str:
-    suffix = ".html" if source_url.lower().rstrip("?").endswith(
-        (".htm", ".html")
-    ) else ".pdf"
+    ext = Path(source_url.split("?", 1)[0].rstrip("/")).suffix.lower()
+    suffix = _SUFFIX_BY_EXT.get(ext, ".pdf")
     kind = plan.report_form or plan.doc_category
     digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:8]
     return (

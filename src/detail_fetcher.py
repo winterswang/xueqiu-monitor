@@ -60,9 +60,13 @@ _NOISE_TITLE_PAT = re.compile(
 )
 
 # 公告分级: 高权重(事件驱动, 抓详情) vs 例行(只留标题)
+# 「回购」与「购回」都要写: 港股术语是「股份购回」(标题形如「翌日披露报表 -
+# [股份购回]」), A 股/中文才用「回购」。只写后者会让港股回购披露全部落到
+# _ROUTINE_ANN_PAT 的「翌日披露」上 —— 2026-10-07 复盘实测: 含「购回」634 条
+# 有 605 条被误判为 routine, 含「回购」的 81 条则全部命中。
 _HIGH_VALUE_ANN_PAT = re.compile(
     r"年度报告|中期报告|季度报告|业绩预告|盈利警告|正面盈利|预增|预亏|"
-    r"收购|出售|合并|回购|增持|减持|配售|供股|合股|"
+    r"收购|出售|合并|回购|购回|增持|减持|配售|供股|合股|"
     r"FDA|审批|获批|临床|上市申请|招股|"
     r"重大合同|合作协议|中标|公司债|可转债|股东大会|派息|股息|分红"
 )
@@ -70,6 +74,9 @@ _ROUTINE_ANN_PAT = re.compile(
     r"翌日披露|月报表|董事会会议|持续督导|保荐|法律意见|更正|澄清|"
     r"海外监管公告|翻译版本|报章|通告|通函|表決|表格"
 )
+# 每日例行披露格式 (港股「翌日披露报表」一天一份: 回购/股份变动)。归档值得,
+# P1 推送不值得 —— 见 is_push_worthy 的分工说明。
+_DAILY_DISCLOSURE_PAT = re.compile(r"翌日披露")
 
 
 # ════════════════════════════════════════════════════════
@@ -573,8 +580,20 @@ def filter_news_posts(
 # ════════════════════════════════════════════════════════
 
 def _form_of_title(title: str) -> str:
-    """取公告标题开头的表格代号 (美股 SEC form: 6-K / 20-F / 144/A …)。"""
-    m = re.match(r"^([A-Z\d]+(?:[-/][A-Z\d]+)?)\s", title or "")
+    """取公告标题里的表格代号 (美股 SEC form: 6-K / 20-F / SCHEDULE 13D/A …)。
+
+    标题有两种形态: EDGAR 直出的 ``8-K - ...`` (form 在开头), 和雪球帖子转载的
+    ``其他\\n$TICKER$ SCHEDULE 13D ...`` (form 被前缀挡住)。只认开头会让后者一律
+    取不到 form; 且 ``SCHEDULE 13D/A`` 会被前缀正则截成 ``SCHEDULE`` —— 2026-10-07
+    复盘实测 21 条 13D (举牌/积极股东) 因此全部漏收。
+    """
+    t = title or ""
+    # 修正案后缀 (/A) 不算另一种 form: 13D/A 仍是 13D; 调用方只做集合判定,
+    # 返回基号才能命中。
+    m = re.search(r"\bSCHEDULE\s+(\d+[A-Z]?)\b", t)
+    if m:
+        return m.group(1)
+    m = re.match(r"^([A-Z\d]+(?:[-/][A-Z\d]+)?)\s", t)
     return m.group(1) if m else ""
 
 
@@ -593,6 +612,25 @@ def classify_announcement(title: str) -> str:
     if _ROUTINE_ANN_PAT.search(t):
         return "routine"
     return "other"
+
+
+def is_push_worthy(title: str) -> bool:
+    """值得升 P1 汇总推送吗: high, 但排除每日例行披露。
+
+    归档门 (announcement_sources.classify_source) 用 classify_announcement 判
+    「值不值得存」, P1 门 (filter.py) 判「值不值得现在就打扰」—— 两件事。港股
+    「翌日披露报表 - [股份购回]」一天一份: 值得归档入库、进 IMA 累积成回购
+    序列, 但升 P1 就让腾讯这类高频例行件和 FDA 审批同级, P1 通道被淹没
+    (2026-09-20 的分级设计已如此约定)。故推送上单独降档。
+
+    只按「翌日披露」这一个格式词降档, 不用 _ROUTINE_ANN_PAT —— 后者含「通告」,
+    会连带把港股「公告及通告 - [股息或分派]」这类高价值派息件一起降档。
+    """
+    t = title or ""
+    return (
+        classify_announcement(t) == "high"
+        and not _DAILY_DISCLOSURE_PAT.search(t)
+    )
 
 
 # ════════════════════════════════════════════════════════
@@ -634,7 +672,10 @@ def fetch_detail_cached(db_path: str, url: str) -> dict:
 _ACCESSION_RE = re.compile(r"Accession\s+Number:\s*(\d{10}-\d{2}-\d{6})")
 # 值得拉 EDGAR 全文的美股 form (定期报告 + 重大事项; Form 4/144 等内部人
 # 持股变动只有表格数字, 不拉)
-_US_FULLTEXT_FORMS = frozenset({"6-K", "8-K", "10-K", "10-Q", "20-F", "40-F"})
+# 13D 收、13G 不收: 13D 是持股超 5% 且带主动意图 (举牌/积极股东), 全库两个
+# 月仅 21 条; 13G 是被动机构持仓, 96 条且集中在少数几天爆发 (2026-08-08 单日
+# 30 条), 收进来是噪音。
+_US_FULLTEXT_FORMS = frozenset({"6-K", "8-K", "10-K", "10-Q", "20-F", "40-F", "13D"})
 # SEC 要求 UA 形如 "应用名/版本 邮箱" —— 缺邮箱或用 noreply 域会被 403
 # (www.sec.gov 尤其严格, data.sec.gov 宽松; 2026-09-20 实测多组 UA)
 _SEC_UA = "xueqiu-monitor/1.0 paradox0504@gmail.com"

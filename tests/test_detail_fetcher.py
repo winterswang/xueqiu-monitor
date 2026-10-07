@@ -167,6 +167,51 @@ class TestClassifyAnnouncement:
             "144 Report of proposed sale of securities"
         ) == "other"
 
+    def test_hk_buyback_wording_is_high(self):
+        # 港股术语是「股份购回」, A 股/中文才写「回购」。只匹配后者会让港股每日
+        # 回购披露全部落到「翌日披露」的 routine —— 2026-10-07 复盘实测: 含
+        # 「购回」634 条有 605 条被误判, 含「回购」的 81 条则全部命中。
+        assert df.classify_announcement(
+            "腾讯控股 翌日披露报表 - [股份购回] 翌日披露报表"
+        ) == "high"
+        assert df.classify_announcement(
+            "美的集团 翌日披露报表 - [股份购回] 翌日披露报表"
+        ) == "high"
+
+    def test_schedule_13d_is_high_but_13g_is_not(self):
+        # 13D 是持股超 5% 且带主动意图 (举牌/积极股东); 13G 是被动机构持仓,
+        # 收之无益。两种形态都要认: EDGAR 直出, 和雪球帖子转载 (form 被
+        # "其他\n$TICKER$ " 前缀挡住, 旧实现只认开头所以一律取不到)。
+        d13 = (
+            "SCHEDULE 13D/A [Amend] General Statement of Acquisition of "
+            "Beneficial Ownership Accession Number: 0001193125-26-123456"
+        )
+        g13 = (
+            "SCHEDULE 13G Statement of Beneficial Ownership by Certain "
+            "Investors Accession Number: 0001193125-26-123456"
+        )
+        assert df.classify_announcement(d13) == "high"
+        assert df.classify_announcement(
+            "其他\n$Cerebras Systems(CBRS)$ " + d13
+        ) == "high"
+        assert df.classify_announcement(g13) == "other"
+
+    def test_daily_disclosure_is_archived_but_not_pushed(self):
+        # 归档门 (classify_announcement) 判「值不值得存」: 港股每日回购披露要存,
+        # 好进 IMA 累积成回购序列。P1 门 (is_push_worthy) 判「值不值得现在打扰」:
+        # 它是每日例行件, 升 P1 会把通道淹掉 (filter.py 的 2026-09-20 约定)。
+        tencent = "腾讯控股 翌日披露报表 - [股份购回] 翌日披露报表"
+        assert df.classify_announcement(tencent) == "high"
+        assert not df.is_push_worthy(tencent)
+
+    def test_push_worthy_keeps_real_events(self):
+        # 降档只认「翌日披露」这一个格式词: 港股派息件标题里带「公告及通告」,
+        # 若按 _ROUTINE_ANN_PAT 降档会被误伤 (那是最大的 high∩routine 群)。
+        assert df.is_push_worthy(
+            "公告及通告 - [股息或分派] 截至2026年6月30日止六个月之中期股息"
+        )
+        assert df.is_push_worthy("关于回购公司股份的进展公告")
+
 
 class TestGarbledDetection:
     """巨潮 PDF 乱码启发式."""

@@ -6,12 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# detail_fetcher 顶层导入 xueqiu_analyzer,必须在导入 src.* 前先注入 analyzer 路径
+ANALYZER_PATH = os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(PROJECT_ROOT.parent / "xueqiu-analyzer-skill" / "src"),
+)
+if ANALYZER_PATH not in sys.path:
+    sys.path.insert(0, ANALYZER_PATH)
 
 from src.announcement_sources import archive_day  # noqa: E402
 from src.detail_fetcher import resolve_us_filing_url  # noqa: E402

@@ -14,6 +14,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# detail_fetcher 顶层导入 xueqiu_analyzer,必须在导入 src.* 前先注入 analyzer 路径
+ANALYZER_PATH = os.environ.get(
+    "XUEQIU_ANALYZER_PATH",
+    str(PROJECT_ROOT.parent / "xueqiu-analyzer-skill" / "src"),
+)
+if ANALYZER_PATH not in sys.path:
+    sys.path.insert(0, ANALYZER_PATH)
+
 from src.announcement_sources import upload_pending  # noqa: E402
 from src.db import init_db  # noqa: E402
 

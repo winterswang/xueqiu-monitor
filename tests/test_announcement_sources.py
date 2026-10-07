@@ -77,6 +77,29 @@ def test_classification_routes_financial_and_event_announcements():
     ) == SourcePlan("other_announcement", "6-K")
     assert classify_source("4 Statement of changes in beneficial ownership") is None
     assert classify_source("翌日披露报表") is None
+    # 港股「股份购回」措辞与 A 股「回购」不同, 归档门必须一并认 (2026-10-07 复盘)
+    assert classify_source(
+        "腾讯控股 翌日披露报表 - [股份购回] 翌日披露报表"
+    ) == SourcePlan("other_announcement", "")
+
+
+def test_build_filename_uses_source_url_extension():
+    # SEC 的 SCHEDULE 13D 主文档是渲染后的 XHTML, 但路径以 .xml 结尾: 一律
+    # 兜底 .pdf 会让 IMA 按 PDF 解析而失败 (2026-10-07 实测 BABA 13D)。
+    plan = SourcePlan("other_announcement", "")
+    assert build_filename(
+        "BABA.US",
+        "2026-09-22",
+        plan,
+        "https://www.sec.gov/Archives/edgar/data/1577552/000110465926109479/"
+        "xslSCHEDULE_13D_X02/primary_doc.xml",
+    ).endswith(".html")
+    assert build_filename(
+        "700.HK",
+        "2026-10-02",
+        plan,
+        "https://stockn.xueqiu.com/00700/20261002812243.pdf",
+    ).endswith(".pdf")
 
 
 def test_market_and_ima_routing():
