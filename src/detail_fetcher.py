@@ -262,6 +262,36 @@ _MIN_ARTICLE_CHARS = 300     # 短于此视为"容器没命中", 继续往下试
 _MAX_BODY_LINKS = 80         # body 兜底时链接过多 = 首页/频道页, 不是文章
 
 
+# opencli 的升级提示在命令输出**之后**由退出钩子打印（update-check.js），
+# 两种形态各占两行：
+#     "  Update available: v1.8.8 → v1.8.9" / "  Run: npm install -g @jackwener/opencli"
+#     "  Extension update available: ..."     / "  Download: https://..."
+_UPDATE_NOTICE_HEADS = ("Update available", "Extension update available")
+_UPDATE_NOTICE_COMMANDS = ("Run:", "Download:")
+
+
+def _strip_opencli_notice(stdout: str) -> str:
+    """去掉 opencli 的升级提示.
+
+    必须**按行首锚定**，不能按子串匹配 —— JSON 里正文是单独一行，正文中出现
+    "Update available" 字样时，子串过滤会把那一行一起丢掉，JSON 截断后就整篇
+    静默变成空内容（monitor 侧表现为白白多走一次 reader 兜底）。
+    """
+    kept: list[str] = []
+    drop_command_line = False
+    for line in stdout.splitlines():
+        head = line.lstrip()
+        if head.startswith(_UPDATE_NOTICE_HEADS):
+            drop_command_line = True
+            continue
+        if drop_command_line and head.startswith(_UPDATE_NOTICE_COMMANDS):
+            drop_command_line = False
+            continue
+        drop_command_line = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _opencli(
     *args: str, timeout: int = 40, expect_miss: bool = False
 ) -> Optional[dict]:
@@ -296,10 +326,7 @@ def _opencli(
         )
         logger.warning(f"[detail] opencli 超时/失败: {' '.join(args[:2])} {e}")
         return None
-    out = "\n".join(
-        line for line in r.stdout.splitlines()
-        if "Update available" not in line and not line.strip().startswith("Run:")
-    )
+    out = _strip_opencli_notice(r.stdout)
     try:
         return json.loads(out)
     except (ValueError, TypeError):
@@ -332,8 +359,12 @@ def _looks_like_junk_page(
     return selector == "body" and content.count("](http") > _MAX_BODY_LINKS
 
 
-def fetch_page_opencli(url: str) -> dict:
-    """opencli 本地浏览器抓页面正文 (主通道; 需 Chrome 扩展在线).
+def _fetch_page_opencli_legacy(url: str) -> dict:
+    """回退路径：逐选择器探针的 browser 直连序列。
+
+    2026-10-08 起不再是主通道 —— 主通道换成了 `opencli web article`
+    （opencli-adapters/article.js，与 xueqiu-crawler 共用同一份实现）。
+    这里只在适配器命令未注册（插件丢失）时才会走到。
 
     实测 (2026-09-20): 新浪 finance 页 selector=div.article 精准提取
     843 字正文, 无菜单噪音, 优于 zhipu reader 的全页输出。
@@ -370,6 +401,106 @@ def fetch_page_opencli(url: str) -> dict:
         "title": title, "content": best[:DETAIL_MAX_CHARS], "status": "ok",
         "channel": "opencli",
     }
+
+
+def _article_adapter_available() -> bool:
+    """`opencli web article` 是否注册（本地探测, 不发站点请求; 进程内缓存）.
+
+    判定"命令不可用"用 --help，**不能**靠"调用失败就回退"：一条坏页面报错不该
+    悄悄把整条链路切回旧的 browser 探针序列。
+    """
+    global _ARTICLE_ADAPTER_OK
+    if _ARTICLE_ADAPTER_OK is not None:
+        return _ARTICLE_ADAPTER_OK
+    try:
+        r = subprocess.run(
+            ["opencli", "web", "article", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        _ARTICLE_ADAPTER_OK = r.returncode == 0 and "article" in (r.stdout or "")
+    except (subprocess.TimeoutExpired, OSError):
+        _ARTICLE_ADAPTER_OK = False
+    return _ARTICLE_ADAPTER_OK
+
+
+_ARTICLE_ADAPTER_OK: Optional[bool] = None
+
+
+def _opencli_article(url: str) -> Optional[dict]:
+    """跑 `opencli web article <url> -f json`，返回单行 dict；失败 None.
+
+    与 `_opencli` 的两点差别：命令形态是 `web article`（不是 browser 子命令），
+    以及错误只出现在 stderr。
+
+    风控会用专属错误码 BLOCKED_WAF 报出来，这里只把它**单独记一条告警** ——
+    两种失败最终都是 `status="error"`：下游 fetch_url_detail 对 error 走 reader
+    兜底，而 reader 是服务端抓取、不受本地风控影响，正是不该重试时该走的路。
+    分开记是为了排查时一眼看出「是被拦了」而不是「页面坏了」。
+    """
+    cmd = ["opencli", "web", "article", url, "-f", "json"]
+    slot = acquire_opencli_slot("web article", cmd)
+    started_at = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        record_opencli_call(
+            cmd, started_at, result=r, caller="_opencli_article", throttle=slot
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        record_opencli_call(
+            cmd, started_at, error=e, caller="_opencli_article", throttle=slot
+        )
+        logger.warning(f"[detail] web article 超时/失败: {url[:60]} {e}")
+        return None
+    if r.returncode != 0:
+        stderr = r.stderr or ""
+        if "BLOCKED_WAF" in stderr:
+            logger.warning(f"[detail] web article 撞风控页: {url[:60]}")
+        else:
+            logger.warning(
+                f"[detail] web article 失败: {url[:60]} {stderr.strip()[:160]}"
+            )
+        return None
+    out = _strip_opencli_notice(r.stdout)
+    try:
+        rows = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(rows, list):
+        return rows[0] if rows else None
+    return rows if isinstance(rows, dict) else None
+
+
+def _fetch_page_opencli_adapter(url: str) -> dict:
+    """适配器通道 → 与 legacy 同形的四态返回 (ok/empty/error/junk)."""
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
+    row = _opencli_article(url)
+    if not row:
+        return {"title": "", "content": "", "status": "error", "channel": "opencli"}
+    title = str(row.get("title") or "").strip()
+    # 顺序与 legacy 一致：先去菜单噪音，再判废页（legacy 的 :368 在 :371 之前）
+    content = _strip_menu_junk(str(row.get("content") or "").strip())
+    if not content:
+        return {"title": title, "content": "", "status": "empty", "channel": "opencli"}
+    if _looks_like_junk_page(content, title, str(row.get("selector") or "")):
+        logger.info(f"[detail] web article 拿到占位/首页内容, 弃用 {url[:60]}")
+        return {"title": title, "content": "", "status": "junk", "channel": "opencli"}
+    return {
+        "title": title, "content": content[:DETAIL_MAX_CHARS], "status": "ok",
+        "channel": "opencli",
+    }
+
+
+def fetch_page_opencli(url: str) -> dict:
+    """opencli 本地浏览器抓页面正文 (主通道; 需 Chrome 扩展在线).
+
+    主通道是 `opencli web article`（opencli-adapters/article.js）—— 与
+    xueqiu-crawler 共用同一份实现，且我们**不再需要**逐选择器探针，所以台账里
+    那些 browser:extract 探针噪声也随之消失。命令未注册时回退 legacy 序列。
+    """
+    if _article_adapter_available():
+        return _fetch_page_opencli_adapter(url)
+    return _fetch_page_opencli_legacy(url)
 
 
 def fetch_url_detail(url: str) -> dict:

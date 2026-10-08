@@ -10,6 +10,10 @@ not here.
 
 from src import detail_fetcher as df
 
+import logging
+
+import pytest
+
 
 def test_opencli_browser_commands_are_throttled_and_logged(
     tmp_path, monkeypatch
@@ -329,6 +333,16 @@ class TestJunkPageDetection:
 class TestOpencliPageSelection:
     """正文容器按精确度优先取, 不再"取最长" (长 = 整站菜单堆)."""
 
+    @pytest.fixture(autouse=True)
+    def _force_legacy(self, monkeypatch):
+        """本组钉的是 legacy 回退路径（探针序列 + expect_miss）.
+
+        fetch_page_opencli 现在的默认走法是 `opencli web article`；必须把适配器
+        探测钉成不可用，这些用例才测得到那串 browser 探针。适配器路径另有
+        TestOpencliArticleAdapter。
+        """
+        monkeypatch.setattr(df, "_article_adapter_available", lambda: False)
+
     @staticmethod
     def _fake(canned: dict):
         def fake(*args, timeout=40, expect_miss=False):
@@ -393,6 +407,146 @@ class TestOpencliPageSelection:
         monkeypatch.setattr(df, "_opencli", self._fake(canned))
         r = df.fetch_page_opencli("https://x.com/a")
         assert r["status"] == "junk" and r["content"] == ""
+
+
+class TestOpencliArticleAdapter:
+    """主通道 `opencli web article`：四态映射，以及风控必须与普通失败分开."""
+
+    @staticmethod
+    def _arm(monkeypatch, *, returncode=0, stdout="", stderr=""):
+        import subprocess
+
+        monkeypatch.setattr(
+            df,
+            "acquire_opencli_slot",
+            lambda *_a, **_k: {
+                "enabled": False, "waited_seconds": 0.0, "reserved_seconds": 0.0,
+            },
+        )
+        monkeypatch.setattr(df, "record_opencli_call", lambda *_a, **_k: None)
+        monkeypatch.setattr(df, "_article_adapter_available", lambda: True)
+        monkeypatch.setattr(
+            df.subprocess,
+            "run",
+            lambda *_a, **_k: subprocess.CompletedProcess(
+                args=[], returncode=returncode, stdout=stdout, stderr=stderr
+            ),
+        )
+
+    @staticmethod
+    def _rows(**row):
+        import json
+
+        base = {
+            "url": "https://x.com/a",
+            "title": "标题",
+            "content": "",
+            "selector": "article",
+            "chars": 0,
+        }
+        base.update(row)
+        return json.dumps([base])
+
+    def test_ok_maps_content_and_channel(self, monkeypatch):
+        self._arm(monkeypatch, stdout=self._rows(content="正文" * 50))
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "ok"
+        assert r["channel"] == "opencli"
+        assert r["content"].startswith("正文")
+        assert r["title"] == "标题"
+
+    def test_empty_content_is_empty(self, monkeypatch):
+        self._arm(monkeypatch, stdout=self._rows(content=""))
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "empty" and r["content"] == ""
+
+    def test_body_menu_pile_is_junk(self, monkeypatch):
+        pile = "".join(f"[新闻{i}](https://x.com/{i})\n" for i in range(200))
+        self._arm(monkeypatch, stdout=self._rows(content=pile, selector="body"))
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "junk" and r["content"] == ""
+
+    def test_blocked_waf_is_error_and_logged_distinctly(self, monkeypatch, caplog):
+        """风控 → error（下游走 reader 兜底），且日志要能跟普通失败区分开.
+
+        只断言 status 是不够的 —— 任何非零退出码都产生 error，那样删掉
+        BLOCKED_WAF 分支测试照样通过。加上日志断言才钉得住这个分支。
+        """
+        self._arm(
+            monkeypatch,
+            returncode=1,
+            stderr="error:\n  code: BLOCKED_WAF\n  message: 风控验证页",
+        )
+        with caplog.at_level(logging.WARNING, logger="src.detail_fetcher"):
+            r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "error"
+        assert any("风控" in rec.getMessage() for rec in caplog.records)
+
+    def test_other_failure_does_not_claim_waf(self, monkeypatch, caplog):
+        """普通抓取失败不能被打成风控 —— 排查时会把方向带偏。"""
+        self._arm(monkeypatch, returncode=1, stderr="error:\n  code: COMMAND_EXEC")
+        with caplog.at_level(logging.WARNING, logger="src.detail_fetcher"):
+            r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "error"
+        assert not any("风控" in rec.getMessage() for rec in caplog.records)
+
+    def test_notice_phrase_in_body_does_not_truncate_payload(self, monkeypatch):
+        """正文里出现 "Update available" 时必须仍能解析.
+
+        回归：旧的子串过滤会把含该字样的正文行一起丢掉 → JSON 截断 → status
+        变成 error，整篇静默丢失、还白走一次 reader 兜底。
+        """
+        body = "Chrome 提示 Update available 时该怎么办"
+        stdout = self._rows(content=body) + (
+            "\n  Update available: v1.8.8 → v1.8.9\n"
+            "  Run: npm install -g @jackwener/opencli\n"
+        )
+        self._arm(monkeypatch, stdout=stdout)
+
+        r = df.fetch_page_opencli("https://x.com/a")
+
+        assert r["status"] == "ok"
+        assert body in r["content"]
+
+    def test_unparsable_stdout_is_error(self, monkeypatch):
+        self._arm(monkeypatch, stdout="not json at all")
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "error"
+
+    def test_content_truncated_to_detail_max_chars(self, monkeypatch):
+        self._arm(
+            monkeypatch, stdout=self._rows(content="字" * (df.DETAIL_MAX_CHARS + 500))
+        )
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "ok"
+        assert len(r["content"]) == df.DETAIL_MAX_CHARS
+
+    def test_http_url_is_upgraded_to_https(self, monkeypatch):
+        seen = []
+        self._arm(monkeypatch, stdout=self._rows(content="正文" * 50))
+        monkeypatch.setattr(
+            df.subprocess,
+            "run",
+            lambda cmd, **_k: seen.append(cmd)
+            or df.subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=self._rows(content="正文" * 50), stderr=""
+            ),
+        )
+        df.fetch_page_opencli("http://x.com/a")
+        assert seen[0][:4] == ["opencli", "web", "article", "https://x.com/a"]
+        assert seen[0][-2:] == ["-f", "json"]
+
+    def test_falls_back_to_legacy_when_adapter_missing(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(df, "_article_adapter_available", lambda: False)
+        monkeypatch.setattr(
+            df,
+            "_fetch_page_opencli_legacy",
+            lambda url: called.append(url)
+            or {"title": "", "content": "", "status": "error", "channel": "opencli"},
+        )
+        df.fetch_page_opencli("https://x.com/a")
+        assert called == ["https://x.com/a"]
 
 
 class TestHtmlToText:
