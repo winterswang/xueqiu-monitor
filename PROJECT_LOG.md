@@ -11,8 +11,8 @@
 | 属性 | 内容 |
 |------|------|
 | 项目名称 | xueqiu-monitor |
-| 项目简介 | 自选股雪球舆情持续监控系统。爬取雪球帖子、资讯、公告，通过 MiniMax LLM 情感分析 + Z-score 统计检测自动发现舆情变化，分级推送到飞书。 |
-| 技术栈 | Python 3.11+, SQLite, MiniMax LLM, scikit-learn, Playwright, lark CLI |
+| 项目简介 | 自选股雪球舆情持续监控系统。爬取雪球帖子、资讯、公告，通过 LLM 情感分析 + Z-score 统计检测自动发现舆情变化，分级推送到飞书。 |
+| 技术栈 | Python 3.11+, SQLite, 字节 coding plan LLM (DeepSeek-V4.1-Flash), scikit-learn, Playwright, lark CLI |
 | 仓库地址 | https://github.com/winterswang/xueqiu-monitor |
 | 主要负责人 | winterswang |
 
@@ -94,6 +94,7 @@ cron (07:00)
 | ADR-003 | 2026-05-30 | `.env` 文件管理敏感配置 | 环境变量不可追踪，shell 容易泄漏 | python-dotenv 在 `__init__.py` 加载 | shell env / config.json | 全局 |
 | ADR-004 | 2026-05-30 | requests 直连 Longbridge API 替代 Rust SDK | SDK Rust 类无法从 Python 构造，OAuthBuilder 有本地回调端口 bug | HTTP requests + OAuth refresh_token | Rust SDK | sync_watchlist.py |
 | ADR-005 | 2026-06-01 | `crawl()` 增加 `days=1` 增量参数 | 全量爬取 64 只耗时 24h，cron 窗口期不够 | xueqiu-analyzer 的 `crawl(days=1)` 参数 | max_pages=50 全量 | crawler.py |
+| ADR-006 | 2026-10-08 | 分析模型切到字节 coding plan DeepSeek-V4.1-Flash，并把模型 id 收口到单一来源 | ① MiniMax-M3 已旧；② 模型 id 散在 `etc/config.report.json`、`report_generator` 两处代码兜底、`sentiment.py` 的 `SENTIMENT_LLM_MODEL` 环境变量，换模型必漏改，兜底值还会静默启用旧模型（价值投资日报 PROJECT_LOG D-009 同款教训） | `etc/config.report.json` 的 `llm.model` 为唯一来源，经 `src/llm_config.py` 解析；删除代码兜底与环境变量来源，缺配置直接抛错 | 保留 MiniMax-M3 / 换 Kimi-K2 / 维持多处各改一次 | src/llm_config.py, src/sentiment.py, src/report_generator.py, etc/config.report.json |
 
 ---
 

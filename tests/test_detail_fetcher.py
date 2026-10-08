@@ -8,11 +8,14 @@ live-verified 2026-09-19/20 and are exercised end-to-end by the daily cron,
 not here.
 """
 
-from src import detail_fetcher as df
-
 import logging
+import sqlite3
+import time
 
 import pytest
+
+from src import db as dbmod
+from src import detail_fetcher as df
 
 
 def test_opencli_browser_commands_are_throttled_and_logged(
@@ -128,6 +131,125 @@ class TestFilterNewsPosts:
         assert len(kept) == 5
         # 互动量高的排前
         assert kept[0]["title"] == "事件新闻0"
+
+    def test_post_time_is_authoritative_over_url_date(self):
+        """2026-10-08 修: URL 日期新、但帖子发布时间是旧闻 → 丢弃。
+
+        雪球站内资讯链接 (xueqiu.com/S/<sym>/<id>) 不带日期, 只看 URL 的时效
+        闸会整条失效 (10-07 实测 194 条候选只有 8 条是当天的)。
+        """
+        stale_time = [{"title": "两周前的旧闻", "content": "x",
+                       "time": "2026-09-05",
+                       "link": "https://xueqiu.com/S/SZ000933/410143037"}]
+        assert df.filter_news_posts(stale_time, "2026-09-19") == []
+
+        fresh_time = [{"title": "今日发布", "content": "x",
+                       "time": "2026-09-19",
+                       "link": "https://xueqiu.com/S/SZ000933/410143037"}]
+        assert len(df.filter_news_posts(fresh_time, "2026-09-19")) == 1
+
+    def test_post_time_kept_even_when_url_date_is_old(self):
+        # 发布时间在老 URL 形态里也可能被判新: 以帖子时间为主, 不再误杀
+        posts = [{"title": "今日转载", "content": "x", "time": "2026-09-19",
+                  "link": "https://finance.eastmoney.com/a/202604133703112215.html"}]
+        assert len(df.filter_news_posts(posts, "2026-09-19")) == 1
+
+    def test_window_widens_with_max_age_days(self):
+        # 低流量股日报会回退 7 日窗口, 详情闸必须跟着放宽
+        posts = [{"title": "五天前的事", "content": "x", "time": "2026-09-14",
+                  "link": "https://xueqiu.com/S/SZ000933/410143037"}]
+        assert df.filter_news_posts(posts, "2026-09-19") == []
+        assert len(df.filter_news_posts(posts, "2026-09-19", max_age_days=7)) == 1
+
+    def test_limit_prefers_newest_over_long_old_blurb(self):
+        # 限量闸: 同窗口内先取新的 —— 旧闻正文再长也不该挤掉当天资讯
+        posts = [
+            {"title": "三天前长文", "content": "x" * 500, "like_count": 99,
+             "time": "2026-09-16", "link": "https://xueqiu.com/S/X/1"},
+            {"title": "今日短讯", "content": "y" * 10, "time": "2026-09-19",
+             "link": "https://xueqiu.com/S/X/2"},
+        ]
+        kept = df.filter_news_posts(posts, "2026-09-19", per_stock_limit=1)
+        assert [p["title"] for p in kept] == ["今日短讯"]
+
+
+class TestDetailFetchCacheTTL:
+    """2026-10-08: TTL 参数化 —— 资讯正文用长 TTL, 公告保持 24h。"""
+
+    def test_cache_ttl_parametrised(self, tmp_path):
+        db_path = str(tmp_path / "monitor.db")
+        dbmod.init_db(db_path)
+        dbmod.insert_detail_fetch(db_path, "https://xueqiu.com/S/X/1",
+                                  "ok", "t", "BODY")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE detail_fetch_log SET fetched_at=? WHERE link=?",
+            (int(time.time()) - 3 * 86400, "https://xueqiu.com/S/X/1"),
+        )
+        conn.commit()
+        conn.close()
+
+        # 默认 24h → 三天前的缓存已过期 (公告路径行为不变)
+        assert dbmod.get_detail_fetch(db_path, "https://xueqiu.com/S/X/1") is None
+        # 长 TTL → 命中, 不再重开浏览器
+        got = dbmod.get_detail_fetch(
+            db_path, "https://xueqiu.com/S/X/1", max_age_seconds=30 * 86400
+        )
+        assert got is not None and got["content"] == "BODY"
+
+    def test_fetch_detail_cached_passes_ttl_through(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "monitor.db")
+        dbmod.init_db(db_path)
+        dbmod.insert_detail_fetch(db_path, "https://xueqiu.com/S/X/2",
+                                  "ok", "t", "OLD")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE detail_fetch_log SET fetched_at=? WHERE link=?",
+            (int(time.time()) - 10 * 86400, "https://xueqiu.com/S/X/2"),
+        )
+        conn.commit()
+        conn.close()
+
+        called = []
+        monkeypatch.setattr(
+            df, "fetch_url_detail",
+            lambda url: called.append(url) or {
+                "status": "ok", "title": "t", "content": "NEW", "channel": "test"
+            },
+        )
+        cached = df.fetch_detail_cached(
+            db_path, "https://xueqiu.com/S/X/2", max_age_seconds=30 * 86400
+        )
+        assert cached["content"] == "OLD" and cached["channel"] == "cache"
+        assert called == []  # 长 TTL 命中 → 没有真实抓取
+
+    def test_failure_mark_not_pinned_by_long_ttl(self, tmp_path, monkeypatch):
+        """长 TTL 只保抓取成功的正文; 失败标记仍 24h 过期, 次日会重试。"""
+        db_path = str(tmp_path / "monitor.db")
+        dbmod.init_db(db_path)
+        dbmod.insert_detail_fetch(db_path, "https://xueqiu.com/S/X/3",
+                                  "error", "", "")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE detail_fetch_log SET fetched_at=? WHERE link=?",
+            (int(time.time()) - 3 * 86400, "https://xueqiu.com/S/X/3"),
+        )
+        conn.commit()
+        conn.close()
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            df, "fetch_url_detail",
+            lambda url: called.append(url) or {
+                "status": "ok", "title": "t", "content": "RECOVERED",
+                "channel": "test",
+            },
+        )
+        detail = df.fetch_detail_cached(
+            db_path, "https://xueqiu.com/S/X/3", max_age_seconds=30 * 86400
+        )
+        assert called == ["https://xueqiu.com/S/X/3"]
+        assert detail["content"] == "RECOVERED"
 
 
 class TestClassifyAnnouncement:

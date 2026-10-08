@@ -1,17 +1,20 @@
-"""xueqiu-monitor: LLM sentiment analysis (MiniMax M2.7, per-type batching)
+"""xueqiu-monitor: LLM sentiment analysis (per-type batching)
 
 Groups posts by type (discussions / articles / news), then makes
 batched LLM calls. Discussions and articles use LLM;
 news uses keyword matching (no API cost).
 
+模型 id 的唯一来源是 etc/config.report.json 的 llm.model
+(经 src/llm_config.py 解析, 不读环境变量)。
+
 Batch strategy:
-  - Discussions: sub-batch of 80 items max (avoids MiniMax timeout on
+  - Discussions: sub-batch of 80 items max (avoids gateway timeout on
     400+ item groups). Each sub-batch = one compact LLM call.
   - Articles (up to 30 items):   single call, max_tokens=16384
   - News:                        keyword-based (0 calls)
 
 Key design decisions:
-  - MiniMax M2.7 thinking blocks expand with input complexity;
+  - 思考型模型的 reasoning 会随输入复杂度膨胀;
     the tight prompt ("NO analysis") minimises thinking waste.
   - When thinking overflows the output budget → retry at 2× tokens.
   - Client timeout raised to 300s to allow server-side processing of
@@ -27,6 +30,8 @@ import re
 import time
 from typing import Any
 
+from .llm_config import resolve_model
+
 logger = logging.getLogger(__name__)
 
 # ── Batch sizing ─────────────────────────────────────────────
@@ -35,7 +40,7 @@ logger = logging.getLogger(__name__)
 DISCUSSION_BATCH_SIZE = 80
 
 # ── Per-call token budgets ───────────────────────────────────
-# minimax-m3 是 1M 上下文模型，实测 coding plan 接受 ≥30000 输出 token。
+# coding plan 上的长上下文模型实测接受 ≥30000 输出 token。
 # sentiment 输出紧凑 JSON 数组，16384 为原作者调优值，对 ≤80 条批量足够。
 # For discussions (sub-batch ≤80 items): moderate budget
 MAX_TOKENS_DISCUSSION   = 16384
@@ -46,7 +51,7 @@ MAX_TOKENS_ARTICLE      = 16384
 MAX_TOKENS_ARTICLE_R    = 16384
 
 # ── Timeout overrides ────────────────────────────────────────
-# MiniMax can take 2-5 min for large batches; 300s gives enough
+# 大批量 (80+ 条) 实测要 2-5 min; 300s gives enough
 # headroom while catching true hangs.
 LLM_CLIENT_TIMEOUT     = 300.0
 LLM_CALL_TIMEOUT       = 300.0
@@ -69,7 +74,8 @@ _BEARISH_PAT = re.compile(
 def _extract_text(response: Any) -> str:
     """Extract text from OpenAI-compatible response.
 
-    coding plan minimax-m3 返回 OpenAI 格式；content 为空时回退 reasoning_content。
+    coding plan 返回 OpenAI 格式；content 为空时回退 reasoning_content
+    (思考型模型在小 max_tokens 下会把内容全放进 reasoning)。
     """
     try:
         choice = response.choices[0] if getattr(response, "choices", None) else None
@@ -324,7 +330,10 @@ def _analyze_group(
     for attempt, mt in enumerate([max_tokens, max_tokens_retry]):
         try:
             t0 = time.time()
-            model_name = os.environ.get("SENTIMENT_LLM_MODEL", "minimax-m3")
+            # 模型 id 唯一来源: etc/config.report.json 的 llm.model
+            # (曾经用 SENTIMENT_LLM_MODEL 覆盖 —— 残留的旧值会静默压过仓库
+            #  配置, 2026-10-08 换模型时删除该第二来源)
+            model_name = resolve_model()
             response = client.chat.completions.create(
                 model=model_name,
                 max_tokens=mt,

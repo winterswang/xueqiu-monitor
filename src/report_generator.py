@@ -1,8 +1,9 @@
 """Daily report generator — 自选股舆情日报.
 
 Aggregates one day of crawled posts for all monitored stocks, runs one LLM
-analysis per stock (full post content, leveraging minimax-m3's 1M context),
-and assembles a structured Markdown daily report.
+analysis per stock (full post content, leveraging the model's long context),
+and assembles a structured Markdown daily report. 模型 id 见
+etc/config.report.json 的 llm.model (唯一来源: src/llm_config.py)。
 
 Pipeline:
   1. SQL fetch: posts_data + sentiment + alerts + hot_words from monitor.db
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import db
+from .llm_config import resolve_model
 
 logger = logging.getLogger(__name__)
 
@@ -922,7 +924,7 @@ def analyze_stock(
 
     try:
         client = _get_llm_client()
-        model = config.get("llm", {}).get("model", "minimax-m3")
+        model = resolve_model(config)
         t0 = time.time()
         response = client.chat.completions.create(
             model=model,
@@ -1252,7 +1254,7 @@ def _build_highlights_section(
     )
     try:
         client = _get_llm_client()
-        model = config.get("llm", {}).get("model", "minimax-m3")
+        model = resolve_model(config)
         rsp = client.chat.completions.create(
             model=model, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}], temperature=0.2,
@@ -1358,6 +1360,26 @@ def _build_mainlines_section(
     return "\n".join(lines) + "\n"
 
 
+def _report_window_days(
+    db_path: str, stock_code: str, date_str: str, config: dict
+) -> int:
+    """日报取帖会用的窗口天数 (与 analyze_stock 同口径)。
+
+    当日窗口 (max_age_days=1) 过滤后无帖时, analyze_stock 会回退
+    FALLBACK_MAX_AGE_DAYS 日窗口。详情闸必须跟着放宽, 否则这些股票在日报里
+    只剩摘要, 而抓来的全文全落在日报用不到的旧闻上 (2026-10-08 修)。
+    """
+    llm_cfg = config.get("llm", {}) or {}
+    posts = fetch_stock_posts(
+        db_path,
+        stock_code,
+        date_str,
+        min_length=llm_cfg.get("min_post_length", 30),
+        content_caps=llm_cfg.get("content_caps"),
+    )
+    return 1 if posts else FALLBACK_MAX_AGE_DAYS
+
+
 def enrich_details(
     db_path: str, date_str: str, config: dict
 ) -> tuple[dict[str, dict[str, str]], int, int]:
@@ -1365,11 +1387,15 @@ def enrich_details(
 
     - news: 当日并集 → filter_news_posts 三道闸(时效/噪音/限量) → opencli
       本地浏览器抓全文 (零 API 成本; 详见 detail_fetcher 模块注释),
-      detail_fetch_log 当日缓存, 失败标记防重试
+      detail_fetch_log 缓存 (资讯正文长 TTL, 2026-10-08), 失败标记防重试
     - 公告: classify_announcement=='high' 且有 http 链接 → 本地 PDF 解析 /
       SEC EDGAR / 均失败则标题搜索, 结果持久化到 announcements.ann_detail
     - 并发 detail.concurrency (默认 1, 降低 opencli 峰值); 单条失败不阻塞 —— 全程 try 守护,
       enrich 失败绝不影响日报生成。
+
+    2026-10-08 修: 时效闸口径与日报取帖对齐 —— 每只股票按它当天实际会用到的
+    窗口取候选 (当日窗口无帖的股票, 日报会回退 7 日窗口, 这里同步放宽), 否则
+    会出现"抓了一堆旧闻全文, 进 prompt 的当天资讯反而只有摘要"。
 
     Returns: ({stock_code: {link: full_text}}, n_news, n_ann)
     """
@@ -1378,6 +1404,8 @@ def enrich_details(
     detail_cfg = config.get("detail", {})
     concurrency = int(detail_cfg.get("concurrency", 1))
     news_limit = int(detail_cfg.get("news_per_stock", 5))
+    # 资讯正文基本不变 → 缓存给长 TTL (天), 避免每天重复打开同一批链接
+    news_cache_seconds = int(float(detail_cfg.get("news_cache_days", 30)) * 86400)
     # 确保迁移到位 (ann_detail 列 / detail_fetch_log 表; 幂等)
     db.init_db(db_path)
     union = db.fetch_day_posts_union(db_path, date_str)
@@ -1388,8 +1416,12 @@ def enrich_details(
         news_posts = [p for p in posts if (p.get("type") or "") == "news"]
         if not news_posts:
             continue
+        window_days = _report_window_days(db_path, code, date_str, config)
         for p in detail_fetcher.filter_news_posts(
-            news_posts, date_str, per_stock_limit=news_limit
+            news_posts,
+            date_str,
+            max_age_days=window_days,
+            per_stock_limit=news_limit,
         ):
             link = (p.get("link") or "").strip()
             if link.startswith("http"):
@@ -1425,7 +1457,9 @@ def enrich_details(
     def _fetch_news(task: tuple[str, str]) -> tuple[str, str, str]:
         code, link = task
         try:
-            d = detail_fetcher.fetch_detail_cached(db_path, link)
+            d = detail_fetcher.fetch_detail_cached(
+                db_path, link, max_age_seconds=news_cache_seconds
+            )
         except Exception as e:  # 单条失败不拖垮其余任务 (pool.map 会整体抛出)
             logger.warning(f"[detail] news 抓取异常 {link[:60]}: {e}")
             return code, link, ""
@@ -1502,9 +1536,13 @@ def generate_daily_report(
     output_dir = Path(cfg.get("report_output_dir", "data/daily_reports"))
     prev_summary = load_prev_summary(output_dir, date_str)
 
+    # 模型 id 唯一来源: etc/config.report.json 的 llm.model (src/llm_config.py)。
+    # 这里先解析一次是刻意的 fail-fast —— 缺配置时立刻报错, 而不是让 41 个
+    # 个股分析各失败一次、最后产出一份全是"分析异常"的报告。
+    llm_model = resolve_model(cfg)
     logger.info(
         f"=== 自选股舆情日报 v2 生成开始 {date_str} "
-        f"(昨日summary: {'有' if prev_summary else '无'}) ==="
+        f"(昨日summary: {'有' if prev_summary else '无'}, 模型: {llm_model}) ==="
     )
 
     # 板块映射注入 config (analyze_stock 的 header 标注用, 不入配置文件)
@@ -1683,7 +1721,7 @@ def generate_daily_report(
 
 {notes_md}
 
-*本报告由 xueqiu-monitor v2 自动生成，数据来源：雪球。LLM 分析模型：MiniMax-M3（经火山方舟 coding plan）。*
+*本报告由 xueqiu-monitor v2 自动生成，数据来源：雪球。LLM 分析模型：{llm_model}（经火山方舟 coding plan，id 见 etc/config.report.json）。*
 """
 
     # Save report + cross-day summary (v2)
