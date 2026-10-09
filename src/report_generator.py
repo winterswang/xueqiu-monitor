@@ -1099,17 +1099,29 @@ def _build_thermometer_v2(
     prev: Optional[dict],
     stocks_cfg: dict,
     deep_set: set[str],
+    date_str: str = "",
 ) -> tuple[str, list[dict]]:
     """温度计 v2: 只写变化 (全场锚点 + 转暖/转冷榜), 平稳股一行列举.
 
-    Returns (markdown, rows) — rows 带 delta 供要点节候选复用。
-    """
+   Returns (markdown, rows) — rows 带 delta 供要点节候选复用。
+   """
     rows: list[dict] = []
+    # 基准如实标注(20261009 P1): 断更后回看 2-3 天的 summary 仍写「较昨日」
+    # 会夸大转暖/转冷幅度。gap>1 时改为「较N天前」。
+    basis = "较昨日"
+    if prev and prev.get("date") and date_str:
+        try:
+            gap = (datetime.strptime(date_str, "%Y-%m-%d")
+                   - datetime.strptime(prev["date"], "%Y-%m-%d")).days
+            if gap > 1:
+                basis = f"较{gap}天前"
+        except ValueError:
+            pass
     for t in thermometer:
         code = t["stock_code"]
         name = stocks_cfg.get(code, {}).get("name", code)
         delta = _sentiment_delta(t.get("sentiment_weighted", t["sentiment"]), prev, code)
-        rows.append({**t, "name": name, "delta": delta})
+        rows.append({**t, "name": name, "delta": delta, "basis": basis})
 
     warming = sorted(
         [r for r in rows if r["delta"] is not None and r["delta"] >= 0.15],
@@ -1147,7 +1159,7 @@ def _build_thermometer_v2(
         if not group:
             return
         lines.append(f"\n### {title}\n")
-        lines.append("| 股票 | 名称 | 帖数 | 情感(加权) | 较昨日 | 深读 |")
+        lines.append(f"| 股票 | 名称 | 帖数 | 情感(加权) | {basis} | 深读 |")
         lines.append("|------|------|------|-----------|--------|------|")
         for r in group:
             posts_disp = f"{r['posts']}+" if r["posts"] >= 100 else str(r["posts"])
@@ -1234,7 +1246,7 @@ def _build_highlights_section(
         if r["delta"] is not None and abs(r["delta"]) >= 0.15:
             arrow = "转暖" if r["delta"] > 0 else "转冷"
             candidates.append(
-                f"- [情绪{arrow}] {r['name']}: 加权情感较昨日 {r['delta']:+.2f}"
+                f"- [情绪{arrow}] {r['name']}: 加权情感{r.get('basis', '较昨日')} {r['delta']:+.2f}"
             )
     for t in takeaways[:8]:
         candidates.append(f"- [观点] {t[:120]}")
@@ -1601,7 +1613,7 @@ def generate_daily_report(
 
     # ── Thermometer render (需要 deep_set, 故在分析后) ──
     thermo_md, thermo_rows = _build_thermometer_v2(
-        thermometer, prev_summary, stocks_cfg, deep_set
+            thermometer, prev_summary, stocks_cfg, deep_set, date_str
     )
 
     # ── Section 1: 今日要点 (LLM 一次调用, 候选来自告警/公告/Δ/观点) ──
