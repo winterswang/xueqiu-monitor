@@ -24,6 +24,7 @@ from . import crawler
 from . import detector
 from . import filter as rule_filter
 from . import notifier
+from .trading_days import filter_trading_day_stats, market_of
 from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordEvent, PushHistory, Comment, Announcement,
@@ -385,6 +386,18 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # ── Detection ──
             # Get historical stats
             hist_stats = db.get_historical_stats(db_path, stock_code, cfg.detector["z_score_window_days"])
+            # P1(20261009) 休市日感知: 基线按交易日采样 — 假期 0 样本日稀释
+            # 基线、节后补涨被误判为突变。宽取一倍日历窗再按市场交易日过滤,
+            # 日历源不可用 → None → 回退日历日旧行为。
+            sampled = filter_trading_day_stats(
+                db.get_historical_stats(
+                    db_path, stock_code, cfg.detector["z_score_window_days"] * 2 + 10
+                ),
+                market_of(stock_code),
+                cfg.detector["z_score_window_days"],
+            )
+            if sampled is not None:
+                hist_stats = sampled
             all_hist = db.get_all_historical_stats(db_path, stock_code)
     
             # Cold start check
