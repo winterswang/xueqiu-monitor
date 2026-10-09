@@ -125,6 +125,12 @@ def assign_priority(alert: ChangeAlert, config: dict | None = None) -> str:
     P1: 2.0 < Z <= 3.0
     P2: Z <= 2.0
     """
+    # 两期直阈触发(20261009 P1): detector Trigger 1 的 z_score 是占位 0,
+    # 走 Z 阈值会恒 P2 → 永不推送。按 shift 自身量纲分级: |Δ|>=0.4 → P0, 否则 P1。
+    trig = (alert.detail or {}).get("trigger")
+    if trig == "two_period":
+        shift = abs((alert.detail or {}).get("shift", 0))
+        return "P0" if shift >= 0.4 else "P1"
     p0 = config.get("p0_z_threshold", P0_Z_THRESHOLD) if config else P0_Z_THRESHOLD
     p1 = config.get("p1_z_threshold", P1_Z_THRESHOLD) if config else P1_Z_THRESHOLD
     if abs(alert.z_score) > p0:
