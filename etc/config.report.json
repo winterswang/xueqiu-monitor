@@ -78,10 +78,6 @@
       "name": "特斯拉",
       "sector": "汽车"
     },
-    "PLTR.US": {
-      "name": "Palantir",
-      "sector": "AI/科技"
-    },
     "UBER.US": {
       "name": "Uber",
       "sector": "出行/酒旅"
@@ -165,10 +161,46 @@
     "300866.SZ": {
       "name": "安克创新",
       "sector": "消费/科技"
+    },
+    "META.US": {
+      "name": "Meta",
+      "sector": "互联网/社交"
+    },
+    "CRWV.US": {
+      "name": "CoreWeave",
+      "sector": "AI/算力"
+    },
+    "CBRS.US": {
+      "name": "Cerebras",
+      "sector": "半导体"
+    },
+    "ASML.US": {
+      "name": "阿斯麦",
+      "sector": "半导体/设备"
+    },
+    "TCOM.US": {
+      "name": "携程",
+      "sector": "出行/酒旅"
+    },
+    "APP.US": {
+      "name": "AppLovin",
+      "sector": "互联网/广告"
+    },
+    "NVO.US": {
+      "name": "诺和诺德",
+      "sector": "医药"
+    },
+    "DIS.US": {
+      "name": "迪士尼",
+      "sector": "互联网/文娱"
+    },
+    "TEM.US": {
+      "name": "Tempus AI",
+      "sector": "医疗/AI"
     }
   },
   "llm": {
-    "model": "minimax-m3",
+    "model": "deepseek-v4-1-flash-260910",
     "concurrency": 5,
     "min_post_length": 30,
     "timeout_seconds": 300,
@@ -186,7 +218,8 @@
   "detail": {
     "enabled": true,
     "concurrency": 1,
-    "news_per_stock": 5
+    "news_per_stock": 5,
+    "news_cache_days": 30
   },
   "tier": {
     "deep_all": true,

@@ -21,6 +21,11 @@ news 三道过滤闸 (filter_news_posts) 是抓取/注入的前置 —— 2026-0
 965 条去重样本: 当日新闻仅 2%, 68% 为 >7 天旧闻(最旧 10 个月), 且存在股票
 代码误配 (CRCL=Circle 配到锂业公司新闻)。新浪流是"相关推荐"而非时间线,
 不过滤直接进 LLM 会注入大量噪音。
+
+2026-10-08 复核: 过滤闸原来只看 URL 里的日期, 而 10-01 起资讯链接改为雪球
+站内形态 (xueqiu.com/S/<sym>/<id>, 无日期) → 闸门失效, 10-07 挑出的 194 条
+候选里只有 8 条是当天发布, 其余是 1~70 天前旧闻, 且因缓存只有 24h 而被每天
+重抓。现时效闸改用帖子发布时间 (与日报取帖同口径), 资讯正文缓存改用长 TTL。
 """
 
 from __future__ import annotations
@@ -673,37 +678,78 @@ def filter_news_posts(
     date_str: str,
     max_age_days: int = 1,
     per_stock_limit: int = 5,
+    ref_ts: Optional[float] = None,
 ) -> list[dict]:
     """news 三道过滤闸: 时效 → 噪音 → 限量。
 
-    ① 时效闸: URL 内日期距 date_str 超过 max_age_days 的旧闻丢弃
-       (68% 的存量会被滤掉; URL 无日期的不受此闸限制, 交由噪音闸+LLM 甄别)
+    ① 时效闸 (2026-10-08 修): **以帖子自身发布时间为准**, 窗口与日报取帖
+       (report_generator.fetch_stock_posts) 同口径 ——
+       [date_str-(max_age_days-1), date_str+1)。
+       原来只看 URL 里的日期, 而 2026-10-01 起资讯链接全变成雪球站内形态
+       (xueqiu.com/S/<sym>/<id>, 不带日期) → 时效闸整条失效, 实测 10-07 挑出
+       的 194 条候选里只有 8 条是当天的, 96% 是 1~70 天前的旧闻, 于是每天
+       重复抓同一批旧文。发布时间解析不出来时才退回 URL 日期判断 (fail-open,
+       与旧行为一致)。
     ② 噪音闸: 融资播报/衍生权证/行情快讯类标题丢弃
-    ③ 限量闸: 过滤后按 (互动量, 标题长度) 排序取前 per_stock_limit 条
+    ③ 限量闸: 过滤后先取新的, 再比互动量与正文长度, 取前 per_stock_limit 条
 
     输入为一股的 news 帖列表, 输出可进 LLM / 抓详情的子集。纯函数。
+
+    ref_ts: 相对时间串 ("3小时前"/"昨天 18:20") 的参照时刻, 默认当前时间。
     """
-    passed: list[dict] = []
+    now = time.time() if ref_ts is None else ref_ts
+    # 与日报同口径的发布时间窗口 (parse 失败 → ts=0, 退回 URL 日期闸)
+    from datetime import datetime, timedelta
+
+    try:
+        from .crawler import _parse_post_time
+    except Exception:  # pragma: no cover - 循环导入兜底, 退回 URL 日期闸
+        _parse_post_time = None
+
+    try:
+        day_start = datetime.strptime(date_str, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        # 非法日期不该让整轮详情补全崩掉 —— 退化成旧的 URL 日期闸
+        logger.warning(
+            f"filter_news_posts: 非法 date_str={date_str!r}, 时效闸退化为 URL 日期"
+        )
+        day_start = None
+    if day_start is not None:
+        window_start = int((day_start - timedelta(days=max_age_days - 1)).timestamp())
+        window_end = int((day_start + timedelta(days=1)).timestamp())
+    else:
+        window_start = window_end = 0
+
+    scored: list[tuple[tuple, dict]] = []
     for p in posts:
         title = p.get("title") or ""
         # ② 噪音闸 (先做, 便宜)
         if _NOISE_TITLE_PAT.search(title):
             continue
         # ① 时效闸
-        stale = news_staleness_days(p.get("link") or "", date_str)
-        if stale is not None and stale > max_age_days:
-            continue
+        posted_ts = 0.0
+        if _parse_post_time is not None:
+            try:
+                posted_ts = _parse_post_time(p.get("time") or "", now)
+            except Exception:  # pragma: no cover - 解析异常按"时间未知"处理
+                posted_ts = 0.0
+        if posted_ts > 0 and day_start is not None:
+            if not (window_start <= posted_ts < window_end):
+                continue
+        else:
+            stale = news_staleness_days(p.get("link") or "", date_str)
+            if stale is not None and stale > max_age_days:
+                continue
         # 公告转载 (新浪 AIGC 的港股公告流) 与 announcements 表重叠, 丢弃
         if "公告及通告" in title or "海外监管公告" in title:
             continue
-        passed.append(p)
-    # ③ 限量闸: 互动量优先, 无互动的按内容长短排 (有摘要的优先)
-    def _rank(p: dict) -> tuple:
         eng = (int(p.get("like_count") or 0) + int(p.get("comment_count") or 0)
                + int(p.get("forward_count") or 0))
-        return (eng, len(p.get("content") or ""))
-    passed.sort(key=_rank, reverse=True)
-    return passed[:per_stock_limit]
+        # ③ 限量闸排序键: 新的优先 (日报正文里当天资讯价值最高), 同刻比互动量,
+        #    再比正文长度 (有摘要的优先); 时间未知的排最后
+        scored.append(((-posted_ts, -eng, -len(p.get("content") or "")), p))
+    scored.sort(key=lambda kv: kv[0])
+    return [p for _, p in scored[:per_stock_limit]]
 
 
 # ════════════════════════════════════════════════════════
@@ -768,18 +814,24 @@ def is_push_worthy(title: str) -> bool:
 # 抓取编排 (带 detail_fetch_log 缓存)
 # ════════════════════════════════════════════════════════
 
-def fetch_detail_cached(db_path: str, url: str) -> dict:
-    """带缓存的详情抓取: detail_fetch_log 命中(当日)直接返回, 否则抓取并落缓存。
+def fetch_detail_cached(
+    db_path: str, url: str, max_age_seconds: int = 86400
+) -> dict:
+    """带缓存的详情抓取: detail_fetch_log 命中且未过期时直接返回。
 
-    error 状态当天不重试 (失败标记也是缓存); 缓存按 (link, 当日) 生效,
-    次日自然过期 —— 每股每天最多 5+N 次真实调用, 量可控。
+    error 状态不重试 (失败标记也是缓存); 缓存按 (link, max_age_seconds) 生效。
+    默认 24h 给公告 (解读可能次日更新); **资讯正文传长 TTL** —— 正文基本不变,
+    24h 过期会让同一条旧资讯每天重新开一次浏览器 (2026-10-08 修)。
+
+    长 TTL 只对抓取成功的正文生效: 失败/空/乱码标记仍只保 24h, 否则一次
+    偶发失败会被长 TTL 钉死到过期为止 (次日不再重试)。
     """
     from . import db as dbmod
 
-    cached = dbmod.get_detail_fetch(db_path, url)
+    cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=max_age_seconds)
+    if cached is not None and cached["status"] != "ok":
+        cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=86400)
     if cached is not None:
-        # fetched_at 当日的缓存有效 (跨日重抓, 帖子详情基本不变, 但公告
-        # 解读可能更新; 成本可接受)
         return {
             "title": cached["title"],
             "content": cached["content"],

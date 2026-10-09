@@ -807,8 +807,16 @@ def set_ann_detail(db_path: str, ann_id: int, detail: str) -> None:
 # detail_fetch_log (v2 Phase 2)
 # ════════════════════════════════════════════════════════
 
-def get_detail_fetch(db_path: str, link: str) -> dict | None:
-    """当日有效的详情抓取缓存; 跨日返回 None (公告解读允许次日更新)."""
+def get_detail_fetch(
+    db_path: str, link: str, max_age_seconds: int = 86400
+) -> dict | None:
+    """详情抓取缓存; 超过 max_age_seconds 视为过期 (返回 None).
+
+    TTL 参数化 (2026-10-08): 默认 24h 是给公告留的 (公告解读可能次日更新),
+    但资讯正文基本不变 —— 固定 24h 会让同一条旧资讯每天被重新打开一次
+    浏览器 (实测 10-07 的 194 条候选里 177 条前一天已抓过)。资讯通道改为
+    传长 TTL, 见 detail_fetcher.fetch_detail_cached 的调用方。
+    """
     with _connect(db_path) as conn:
         row = conn.execute(
             "SELECT status, title, content, fetched_at FROM detail_fetch_log WHERE link=?",
@@ -816,7 +824,7 @@ def get_detail_fetch(db_path: str, link: str) -> dict | None:
         ).fetchone()
         if not row:
             return None
-        if int(row["fetched_at"]) < time.time() - 86400:
+        if int(row["fetched_at"]) < time.time() - max_age_seconds:
             return None
         return {
             "status": row["status"], "title": row["title"], "content": row["content"]
