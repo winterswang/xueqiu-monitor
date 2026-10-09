@@ -39,6 +39,22 @@ def _get_latest_log() -> Path | None:
     return None
 
 
+def _get_todays_logs() -> list[Path]:
+    """当天有写入的全部批次日志,按 mtime 升序(最旧先查)。
+
+    盲区修复(20261009): 旧逻辑只盯 mtime 最新的一个日志,当天多批次组里
+    除最新外全部不可见(~5/6 盲区,某组挂掉整晚无人发现)。"""
+    today = datetime.date.today()
+    out: list[Path] = []
+    for f in list(LOG_DIR.glob("run_*.log")) + list(LOG_DIR.glob("pipeline*.log")):
+        if f.stat().st_size == 0:
+            continue
+        if datetime.date.fromtimestamp(f.stat().st_mtime) == today:
+            out.append(f)
+    out.sort(key=lambda f: f.stat().st_mtime)
+    return out
+
+
 def _load_monitor_whitelist() -> set[str] | None:
     """Union of crawler.whitelist across all group configs (etc/config*.json).
 
@@ -161,42 +177,54 @@ def check():
         results.append({"check": "db_exists", "status": FAIL, "detail": "data/monitor.db not found"})
         errors.append("db_missing")
 
-    # ── 2. Check latest log for [SUMMARY] ──
-    log = _get_latest_log()
+    # ── 2. Check TODAY's pipeline logs for [SUMMARY] ──
+    logs = _get_todays_logs()
+    if not logs:
+        log = _get_latest_log()
+        logs = [log] if log else []
     # 默认窗口 (None, None)：没有可用日志时，下面 3.5 会退回老的「当天」口径。
     # 必须先赋值 —— _get_latest_log() 可能返回 None，否则 3.5 会 NameError。
     source_window: tuple[datetime.datetime | None, datetime.datetime | None] = (None, None)
-    if log:
-        text = log.read_text(encoding="utf-8", errors="replace")
-        source_window = _latest_pipeline_window(text)
-        summary_match = re.search(r"\[SUMMARY\] (.+)", text)
-        phase_end = re.findall(r"\[PHASE\] (\w+) end elapsed=([\d.]+)s", text)
+    if logs:
+        pipeline_active = _is_pipeline_running()
+        now_ts = datetime.datetime.now().timestamp()
+        with_summary, without_summary = [], []
+        total_skip = total_err = 0
+        for idx, lg in enumerate(logs):
+            text = lg.read_text(encoding="utf-8", errors="replace")
+            if idx == len(logs) - 1:
+                source_window = _latest_pipeline_window(text)
+            summary_match = re.search(r"\[SUMMARY\] (.+)", text)
+            if summary_match:
+                with_summary.append(f"{lg.name}:{summary_match.group(1)[:36]}")
+                continue
+            recent = (now_ts - lg.stat().st_mtime) < 3600
+            if pipeline_active and recent:
+                without_summary.append(f"{lg.name}(运行中)")
+            else:
+                without_summary.append(lg.name)
+            total_skip += len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
+            total_err += len(re.findall(r"\[ABORT\]|\[DETECT_ERR\]|CRITICAL", text))
 
-        if summary_match:
-            results.append({"check": "pipeline_completed", "status": OK, "detail": summary_match.group(1)})
-        elif _is_pipeline_running():
-            results.append({"check": "pipeline_completed", "status": OK, "detail": "Pipeline still running — check back later"})
-        else:
-            results.append({"check": "pipeline_completed", "status": WARN, "detail": "No [SUMMARY] entry found — pipeline may have failed"})
+        if without_summary:
+            results.append({
+                "check": "pipeline_completed", "status": WARN,
+                "detail": f"{len(without_summary)}/{len(logs)} 当日批次无 [SUMMARY]: " + ", ".join(without_summary),
+            })
             errors.append("no_summary")
-
-        # Phase durations
-        phases = {name: float(elapsed) for name, elapsed in phase_end}
-        if phases:
-            elapsed_total = sum(phases.values())
-            results.append({"check": "phase_times", "status": OK, "detail": json.dumps(phases, ensure_ascii=False)})
-
-        # Check for failures
-        fail_count = len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
-        if fail_count > 0:
-            results.append({"check": "crawl_failures", "status": WARN, "detail": f"{fail_count} stocks skipped"})
-            if fail_count > 5:
+        else:
+            results.append({
+                "check": "pipeline_completed", "status": OK,
+                "detail": f"{len(with_summary)}/{len(logs)} 当日批次全部有 SUMMARY",
+            })
+        if total_skip > 0:
+            results.append({"check": "crawl_failures", "status": WARN,
+                            "detail": f"{total_skip} stocks skipped(当日累计)"})
+            if total_skip > 5:
                 errors.append("high_failure_rate")
-
-        # Check for errors
-        error_count = len(re.findall(r"\[ABORT\]|\[DETECT_ERR\]|CRITICAL", text))
-        if error_count > 0:
-            results.append({"check": "detect_errors", "status": WARN, "detail": f"{error_count} errors"})
+        if total_err > 0:
+            results.append({"check": "detect_errors", "status": WARN,
+                            "detail": f"{total_err} errors(当日累计)"})
             errors.append("detect_errors")
     else:
         results.append({"check": "log_exists", "status": WARN, "detail": "No run log found"})
