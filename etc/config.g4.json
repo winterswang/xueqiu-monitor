@@ -7,7 +7,6 @@
     "concurrency": 1,
     "whitelist": [
       "TSLA.US",
-      "PLTR.US",
       "1179.HK",
       "1030.HK",
       "1138.HK",

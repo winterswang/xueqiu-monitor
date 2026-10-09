@@ -78,10 +78,6 @@
       "name": "特斯拉",
       "sector": "汽车"
     },
-    "PLTR.US": {
-      "name": "Palantir",
-      "sector": "AI/科技"
-    },
     "UBER.US": {
       "name": "Uber",
       "sector": "出行/酒旅"
@@ -197,10 +193,6 @@
     "DIS.US": {
       "name": "迪士尼",
       "sector": "互联网/文娱"
-    },
-    "FISV.US": {
-      "name": "Fiserv",
-      "sector": "金融科技"
     },
     "TEM.US": {
       "name": "Tempus AI",
