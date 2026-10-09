@@ -476,6 +476,7 @@ def detect_new_announcement(
     db_path: str | None = None,
     z_threshold: float = 2.0,
     max_alerts: int = 50,
+    cold_start: bool = False,
 ) -> list[ChangeAlert]:
     """Detect new announcements with DB-level dedup and real Z-score.
 
@@ -499,6 +500,16 @@ def detect_new_announcement(
     """
     if not curr_announcements:
         return []
+
+    # 冷启动门(20261009 P1): 首次覆盖时 prev 基线为空,当日全部公告都会判「新」
+    # → 单股至多 max_alerts(50) 条洪泛。开启后只放行 ≤3 条 push-worthy 高权重
+    # 公告,其余静默——本轮快照落地为下一轮基线,真正的新公告次日照常告警。
+    cold_gate = cold_start and not prev_announcements
+    cold_gate_emitted = 0
+    if cold_gate:
+        logger.info(
+            f"  {stock_code}: 冷启动门开启(首次覆盖无公告基线,限 3 条高权重)"
+        )
 
     prev_titles = {_normalize_title(p.get("title", "")) for p in prev_announcements}
     # Dedup within the current batch — crawler can return duplicate titles
@@ -526,6 +537,19 @@ def detect_new_announcement(
         norm = _normalize_title(title)
         if not norm or len(norm) < 4:
             continue
+        if cold_gate:
+            try:
+                from .detail_fetcher import is_push_worthy
+                if not is_push_worthy(title):
+                    continue
+            except Exception:
+                continue
+            if cold_gate_emitted >= 3:
+                logger.info(
+                    f"  {stock_code}: 冷启动门 — 高权重公告超 3 条,其余静默建基线"
+                )
+                break
+            cold_gate_emitted += 1
 
         # Stage 0: within-batch dedup (same title+normalized-date seen earlier).
         # Key includes a normalized announcement date so that legitimately
@@ -567,6 +591,7 @@ def detect_new_announcement(
             magnitude=float(len(curr_announcements)),  # total new announcements today
             detail={
                 "title": title,
+                "cold_start_gate": cold_gate,
                 "dedup_hash": dedup_hash,
                 "time": ann_time_raw,
                 "ann_date": ann_date,
@@ -616,6 +641,7 @@ def detect_changes(
         stock_code, curr_posts_texts, historical_events))
 
     alerts.extend(detect_new_announcement(
-        stock_code, curr_announcements, prev_announcements, db_path))
+        stock_code, curr_announcements, prev_announcements, db_path,
+        cold_start=cold_start))
 
     return alerts
