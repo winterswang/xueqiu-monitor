@@ -189,6 +189,15 @@ def write_pending_messages(messages: list[str], output_path: str) -> str:
         "messages": messages,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    # 合并而非覆写(20261009 P1): 外部调度器未消费时,下一轮覆写会把未发消息冲掉。
+    try:
+        with open(output_path, encoding="utf-8") as f:
+            old = json.load(f)
+        prev = [m for m in old.get("messages", []) if m not in messages]
+        if prev:
+            payload["messages"] = prev + messages
+    except (OSError, ValueError):
+        pass  # 首次写入或旧文件损坏,直接覆盖
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"待发送消息已写入: {output_path} ({len(messages)} 条)")
