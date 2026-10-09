@@ -488,6 +488,16 @@ def insert_sentiment_stat(db_path: str, stat: SentimentStat) -> int:
     d = stat.to_dict()
     del d["id"]
     with _connect(db_path) as conn:
+        # P0-4(20261009) 基线保护: 降级/空抓(0帖)不得把当日真实统计行替换成
+        # posts_count=0/sentiment=0;同日二次运行经增量水位过滤只剩的小样本
+        # 批次同样不得反向覆盖样本更多的日汇总行 —— 两个方向都污染 14 天基线。
+        existing = conn.execute(
+            "SELECT id, posts_count FROM sentiment_stats "
+            "WHERE stock_code=:s AND stat_date=:dt",
+            {"s": d["stock_code"], "dt": d["stat_date"]},
+        ).fetchone()
+        if existing and (d.get("posts_count") or 0) <= (existing["posts_count"] or 0):
+            return existing["id"]
         # Ensure unique constraint exists (idempotent — safe for both new and existing databases)
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_senti_unique "

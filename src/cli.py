@@ -426,16 +426,28 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
             max_z = max((a.z_score for a in signal_alerts), default=0.0)
             today_start = now // 86400 * 86400
-            stat = SentimentStat(
-                stock_code=stock_code,
-                stat_date=today_start,
-                posts_count=cr["posts_count"],
-                sentiment_mean=cr["sentiment_avg"],
-                sentiment_std=computed_std,
-                z_score=max_z,
-                z_alert=1 if signal_alerts else 0,
+            cr_degraded = (cr.get("status") != "success") or (
+                (cr.get("diagnostic") or {}).get("sentiment_status") == "degraded"
             )
-            db.insert_sentiment_stat(db_path, stat)
+            if not cr.get("posts_count") or cr_degraded:
+                # P0-4(20261009): 空抓/降级打 quarantine——不落 stat,防污染 14 天 Z 基线
+                logger.info(
+                    f"[quarantine] {stock_code} 空抓或降级"
+                    f"(status={cr.get('status')}, posts={cr.get('posts_count')}, "
+                    f"sentiment={(cr.get('diagnostic') or {}).get('sentiment_status')}) "
+                    "→ 跳过 sentiment_stats 落库"
+                )
+            else:
+                stat = SentimentStat(
+                    stock_code=stock_code,
+                    stat_date=today_start,
+                    posts_count=cr["posts_count"],
+                    sentiment_mean=cr["sentiment_avg"],
+                    sentiment_std=computed_std,
+                    z_score=max_z,
+                    z_alert=1 if signal_alerts else 0,
+                )
+                db.insert_sentiment_stat(db_path, stat)
     
             # ── TF-IDF hot words ──
             # 2026-09-20 修: 热词输入排除 news —— 资讯标题是"信源语言"
@@ -545,31 +557,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "trigger_time": extra.get("trigger_time", ""),
             }
 
-        # P0: format immediate alert messages (one per alert)
-        for alert in p0_alerts:
-            msg = notifier.format_immediate_alert_message(alert, _key_data_for(alert))
-            pending_messages.append(msg)
-            db.insert_push(db_path, PushHistory(
-                stock_code=alert.stock_code,
-                alert_id=alert.id or 0,
-                priority="P0",
-                content=f"Z={alert.z_score:.2f} {alert.alert_type}",
-                status="sent",
-            ))
-
-        # P1: format digest message
-        if p1_alerts:
-            msg = notifier.format_digest_message(p1_alerts)
-            if msg:
-                pending_messages.append(msg)
-            for alert in p1_alerts:
-                db.insert_push(db_path, PushHistory(
-                    stock_code=alert.stock_code,
-                    alert_id=alert.id or 0,
-                    priority="P1",
-                    content="digest",
-                    status="sent",
-                ))
 
         # P2: write push_history for tracking (no message push for P2 volume)
         for alert in p2_alerts:
@@ -581,15 +568,44 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 status="logged",
             ))
 
-        # Dispatch messages via lark-cli or file fallback
+        # P0: format immediate alert messages (one per alert)
+        # 台账在 dispatch 后按实际通道回写(P0-3, 20261009: 此前先记 sent 再投递,失败也显示已发)
+        p0_msgs: list[tuple[object, str]] = []
+        for alert in p0_alerts:
+            p0_msgs.append((alert, notifier.format_immediate_alert_message(alert, _key_data_for(alert))))
+        pending_messages.extend(msg for _, msg in p0_msgs)
+
+        # P1: format digest message
+        p1_digest = notifier.format_digest_message(p1_alerts) if p1_alerts else None
+        if p1_digest:
+            pending_messages.append(p1_digest)
+        # Dispatch via lark-cli or file fallback; 台账按实际通道回写(lark→sent, file→fallback)
         if pending_messages:
-            notifier.dispatch_messages(
+            channels = notifier.dispatch_messages_tracked(
                 pending_messages, pending_path,
                 mode=cfg.notification.get("mode", "auto"),
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
                 push_timeout=cfg.notification.get("push_timeout", 30),
                 max_retries=cfg.notification.get("max_retries", 0),
             )
+            for i, (alert, _msg) in enumerate(p0_msgs):
+                db.insert_push(db_path, PushHistory(
+                    stock_code=alert.stock_code,
+                    alert_id=alert.id or 0,
+                    priority="P0",
+                    content=f"Z={alert.z_score:.2f} {alert.alert_type}",
+                    status="sent" if channels[i] == "lark" else "fallback",
+                ))
+            if p1_digest:
+                digest_status = "sent" if channels[len(p0_msgs)] == "lark" else "fallback"
+                for alert in p1_alerts:
+                    db.insert_push(db_path, PushHistory(
+                        stock_code=alert.stock_code,
+                        alert_id=alert.id or 0,
+                        priority="P1",
+                        content="digest",
+                        status=digest_status,
+                    ))
 
     # ── Daily report ──
     # Build posts_data_map for report

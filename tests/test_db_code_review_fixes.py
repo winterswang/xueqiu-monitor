@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import time
 
 import pytest
 
@@ -90,3 +91,70 @@ class TestDbConnectionClose:
             closed = True
 
         assert closed, "Connection should be closed after with-block exits"
+
+
+class TestSentimentStatOverwriteGuard:
+    """P0-4(20261009): sentiment_stats 覆写方向闸门。
+
+    sentiment_stats 的语义是「当日汇总」。降级/空抓产出 0 帖行、同日二次运行
+    经增量水位过滤产出 2-3 帖小样本行,都不许反向覆盖样本更多的已有行 ——
+    两个方向都会把 14 天 Z 基线污染成假的情感突变。
+    """
+
+    TODAY = int(time.time()) // 86400 * 86400
+
+    def _stat(self, stock: str, posts_count: int, mean: float):
+        from src.models import SentimentStat
+
+        return SentimentStat(
+            stock_code=stock,
+            stat_date=self.TODAY,
+            posts_count=posts_count,
+            sentiment_mean=mean,
+        )
+
+    def test_zero_post_never_overwrites_real_row(self, tmp_path):
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        real_id = db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 50, -0.3))
+
+        again_id = db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 0, 0.0))
+        assert again_id == real_id
+        row = db_mod.get_historical_stats(db_path, "TEST.HK", days=1)[0]
+        assert row.posts_count == 50
+        assert row.sentiment_mean == -0.3
+
+    def test_small_batch_never_overwrites_day_summary(self, tmp_path):
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 50, -0.3))
+
+        db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 2, 0.9))
+        row = db_mod.get_historical_stats(db_path, "TEST.HK", days=1)[0]
+        assert row.posts_count == 50
+        assert row.sentiment_mean == -0.3
+
+    def test_larger_batch_updates_row(self, tmp_path):
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 50, -0.3))
+
+        db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 60, 0.2))
+        row = db_mod.get_historical_stats(db_path, "TEST.HK", days=1)[0]
+        assert row.posts_count == 60
+        assert row.sentiment_mean == 0.2
+
+    def test_first_zero_post_row_still_inserts(self, tmp_path):
+        """空行首插不归本闸门管(cli 层 quarantine 负责不送 0 帖进来)。"""
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        row_id = db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 0, 0.0))
+        assert row_id is not None and row_id > 0
