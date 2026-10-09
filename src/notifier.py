@@ -302,16 +302,61 @@ def dispatch_messages(
         if not lark_chat_id:
             logger.warning("lark_cli 模式需要 lark_chat_id，回退文件模式")
         else:
-            sent = 0
-            for msg in messages:
-                if _send_via_lark_cli(msg, lark_chat_id,
-                                      push_timeout=push_timeout, max_retries=max_retries):
-                    sent += 1
-            return sent
+            results = dispatch_messages_tracked(
+                messages, pending_path, mode="lark_cli", lark_chat_id=lark_chat_id,
+                push_timeout=push_timeout, max_retries=max_retries,
+            )
+            return len(results)
 
     # Fallback: write to file
     write_pending_messages(messages, pending_path)
     return len(messages)
+
+
+def dispatch_messages_tracked(
+    messages: list[str],
+    pending_path: str,
+    mode: str = "auto",
+    lark_chat_id: str | None = None,
+    push_timeout: int = 30,
+    max_retries: int = 0,
+) -> list[str]:
+    """逐条投递,返回与 messages 对齐的通道标记("lark"|"file")。
+
+    P0-3(20261009): lark 发送失败的条目落回 pending 文件兜底,不再静默丢弃。
+    调用方按标记回写台账(lark→sent, file→fallback),先记 sent 再投递的模式已废弃。
+    """
+    results: list[str] = []
+    if not messages:
+        return results
+
+    use_lark = False
+    if mode == "lark_cli":
+        use_lark = True
+    elif mode == "auto":
+        avail, reason = _lark_cli_available()
+        use_lark = avail
+        if not avail:
+            logger.info(f"lark-cli 不可用 ({reason}) → 回退文件模式")
+
+    if use_lark and lark_chat_id:
+        unsent: list[str] = []
+        for msg in messages:
+            ok = _send_via_lark_cli(msg, lark_chat_id,
+                                    push_timeout=push_timeout, max_retries=max_retries)
+            if ok:
+                results.append("lark")
+            else:
+                unsent.append(msg)
+                results.append("file")
+        if unsent:
+            logger.warning(f"{len(unsent)} 条消息 lark 发送失败 → 落回文件兜底 {pending_path}")
+            write_pending_messages(unsent, pending_path)
+        return results
+
+    # 文件兜底通道: 整批落盘
+    write_pending_messages(messages, pending_path)
+    return ["file"] * len(messages)
 
 # ════════════════════════════════════════════════════════
 # Daily report
