@@ -255,10 +255,11 @@ def fetch_stock_alerts(
     try:
         rows = conn.execute(
             """SELECT alert_type, priority, z_score, detail
-               FROM change_alert
-               WHERE stock_code=? AND date(alert_time,'unixepoch','localtime')=?
-               AND alert_type != 'new_announcement'
-               ORDER BY z_score DESC LIMIT 5""",
+                FROM change_alert
+                WHERE stock_code=? AND date(alert_time,'unixepoch','localtime')=?
+                AND alert_type != 'new_announcement'
+                 AND COALESCE(filtered,0)=0
+                ORDER BY z_score DESC LIMIT 5""",
             (stock_code, date_str),
         ).fetchall()
         return [
@@ -1189,9 +1190,10 @@ def fetch_day_alerts(db_path: str, date_str: str) -> list[dict]:
     try:
         rows = conn.execute(
             """SELECT stock_code, alert_type, priority, z_score, detail
-               FROM change_alert
-               WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
-               ORDER BY z_score DESC LIMIT 20""",
+                FROM change_alert
+                WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
+                 AND COALESCE(filtered,0)=0
+                ORDER BY z_score DESC LIMIT 20""",
             (date_str,),
         ).fetchall()
         return [
