@@ -159,7 +159,7 @@ def _read_source_failures_in_window(
     return rows
 
 
-def check(require_daily_report: bool = False):
+def check(require_daily_report: bool = False) -> None:
     results = []
     errors = []
 

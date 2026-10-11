@@ -53,7 +53,11 @@ def escape_cell(value: object) -> str:
 
 
 def render(report: dict) -> dict:
-    checks = report.get("checks") if isinstance(report.get("checks"), list) else []
+    # 只接受 dict 元素：本脚本是告警链路的最后兜底,遇到畸形 checks
+    # (如字符串元素)也必须渲染出卡片,而不是抛 AttributeError 崩掉 ——
+    # 崩了连 --text 回退一起失败,只剩硬编码文案。
+    raw_checks = report.get("checks")
+    checks = [c for c in raw_checks if isinstance(c, dict)] if isinstance(raw_checks, list) else []
     overall = str(report.get("status", "fail")).lower()
     failed = [c for c in checks if c.get("status") == "fail"]
     warned = [c for c in checks if c.get("status") == "warn"]
@@ -84,7 +88,8 @@ def render(report: dict) -> dict:
             state = STATUS.get(item.get("status", ""), "❔ 未知")
             detail = str(item.get("detail", "无详情")).strip()
             issue_lines.append("**%s %s**  " % (state, name))
-            issue_lines.append(detail)
+            # detail 来自日志/异常文本,可能含 | 或换行,不转义会破坏卡片版式。
+            issue_lines.append(escape_cell(detail))
             issue_lines.append("建议：" + guidance(key, detail))
             issue_lines.append("")
 
