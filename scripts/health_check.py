@@ -2,9 +2,10 @@
 """Nightly health check: verify the last run completed successfully.
 
 Checks:
-  1. Last cron.log has [SUMMARY] entry → pipeline finished
-  2. Crawl success rate >= 90%
-  3. Dectect anomalies (zero posts, high failure rate)
+  1. Today's scheduled pipeline logs all have [SUMMARY]
+  2. With --require-daily-report: today's sentiment report exists and is non-empty
+  3. Watchlist, disk usage, source failures, and crawl freshness
+  4. Detect data anomalies (time parsing failures and stale-post pileup)
 
 Output: JSON to stdout, suitable for cron log monitoring.
 
@@ -14,7 +15,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 import re
 import subprocess
 import sys
@@ -159,7 +159,7 @@ def _read_source_failures_in_window(
     return rows
 
 
-def check():
+def check(require_daily_report: bool = False):
     results = []
     errors = []
 
@@ -228,6 +228,28 @@ def check():
             errors.append("detect_errors")
     else:
         results.append({"check": "log_exists", "status": WARN, "detail": "No run log found"})
+
+    # ── 2.5 End-of-day check only (the pre-report gate must not require it) ──
+    if require_daily_report:
+        report_path = PROJECT_ROOT / "data" / "daily_reports" / (
+            datetime.date.today().isoformat() + "-sentiment.md"
+        )
+        try:
+            if report_path.is_file() and report_path.stat().st_size > 0:
+                results.append({"check": "daily_report", "status": OK,
+                                "detail": "%s (%d bytes)" % (report_path.name, report_path.stat().st_size)})
+            elif report_path.is_file():
+                results.append({"check": "daily_report", "status": FAIL,
+                                "detail": "%s 为空" % report_path.name})
+                errors.append("daily_report_invalid")
+            else:
+                results.append({"check": "daily_report", "status": FAIL,
+                                "detail": "未生成今日文件 %s" % report_path.name})
+                errors.append("daily_report_missing")
+        except OSError as exc:
+            results.append({"check": "daily_report", "status": FAIL,
+                            "detail": "读取失败: %s" % exc})
+            errors.append("daily_report_invalid")
 
     # ── 3. Check watchlist ──
     if WATCHLIST_PATH.exists():
@@ -400,7 +422,9 @@ def check():
             conn.close()
 
     # ── Output ──
-    status = FAIL if any(e in ["db_missing", "watchlist_missing", "stale_last_crawl_time", "high_time_parse_failure"] for e in errors) else \
+    status = FAIL if any(e in ["db_missing", "watchlist_missing", "daily_report_missing",
+                               "daily_report_invalid", "stale_last_crawl_time",
+                               "high_time_parse_failure"] for e in errors) else \
              WARN if errors else OK
 
     report = {
@@ -413,4 +437,8 @@ def check():
 
 
 if __name__ == "__main__":
-    check()
+    import argparse
+    parser = argparse.ArgumentParser(description="xueqiu-monitor daily health check")
+    parser.add_argument("--require-daily-report", action="store_true",
+                        help="require today's sentiment report (end-of-day check only)")
+    check(require_daily_report=parser.parse_args().require_daily_report)
