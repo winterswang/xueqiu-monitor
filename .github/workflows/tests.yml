@@ -37,7 +37,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: winterswang/opencli-adapters
-          ref: b9a3196260363d70be03e0d7fd653931dc8afc52
+          # 2026-10-13 升 ref：6ed6c56 移除了 xiaohongshu search 覆盖（插件命令 7 → 6 条）。
+          ref: 6ed6c5676e8d95787da749998c0461e5c7b05563
           path: _deps/opencli-adapters
 
       - uses: actions/setup-python@v5
