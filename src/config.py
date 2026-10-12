@@ -44,6 +44,10 @@ DEFAULT_CONFIG = {
         "replies_per_stock": 5,      # 每股取评论数 top-N 帖抓回复
         "replies_min_comments": 5,   # 评论数低于此值的帖不抓回复
         "replies_limit": 20,         # 每帖取回复数(第 1 页)
+        # opencli 每个**循环阶段**的墙钟预算（秒）；<=0 表示不限。
+        # 预取（讨论+公告+失败重试）与回复正文（最多 replies_per_stock 次）各自一份。
+        # 单次调用不需要它 —— 各自有 120s 超时兜底。见 src/opencli_budget.py。
+        "opencli_budget_seconds": 120,
     },
     "detector": {
         "z_score_window_days": 14,

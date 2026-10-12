@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 from .db import get_existing_post_ids, get_last_crawl_time, update_last_crawl_time
+from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import sentiment
 
 # Add xueqiu-analyzer to path (configurable via XUEQIU_ANALYZER_PATH env var)
@@ -126,7 +127,8 @@ def load_watchlist(config: dict) -> list[dict]:
 # ════════════════════════════════════════════════════════
 
 def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None = None,
-                       max_retries: int = 0) -> dict:
+                       max_retries: int = 0,
+                       opencli_budget_seconds: float | None = None) -> dict:
     """Crawl a single stock using xueqiu-analyzer.
 
     Returns:
@@ -174,6 +176,13 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
             if _ocli_ok():
                 logger.info(f"  opencli: 预取 {stock_code}")
+                # 预取阶段（讨论 + 公告 + 失败重试）整体受预算约束：单次最坏 87s，
+                # 三次叠起来足以顶穿一只股票的合理耗时（见 src/opencli_budget.py）。
+                budget = OpencliBudget(
+                    DEFAULT_OPENCLI_BUDGET_SECONDS
+                    if opencli_budget_seconds is None
+                    else opencli_budget_seconds
+                )
 
                 def _extend_discussions(items: list) -> None:
                     for item in (items or []):
@@ -200,22 +209,33 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                     logger.info(f"  opencli: {len(_opencli_posts)} 条讨论")
                 except Exception as e:
                     logger.warning(f"  opencli 讨论失败: {e}")
-                try:
-                    for item in (_ocli_notices(stock_code, limit=50) or []):
-                        _opencli_notices.append({
-                            "title": item.get("title", ""),
-                            "time": item.get("created_at", ""),
-                            "notice_type": item.get("type", ""),
-                            "link": item.get("url", ""),
-                        })
-                    logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
-                except Exception as e:
-                    logger.warning(f"  opencli 公告失败: {e}")
+                if budget.expired():
+                    logger.warning(
+                        f"  opencli: 预取预算 {budget.seconds:.0f}s 已用尽"
+                        f"（已花 {budget.spent():.0f}s），跳过公告预取"
+                    )
+                else:
+                    try:
+                        for item in (_ocli_notices(stock_code, limit=50) or []):
+                            _opencli_notices.append({
+                                "title": item.get("title", ""),
+                                "time": item.get("created_at", ""),
+                                "notice_type": item.get("type", ""),
+                                "link": item.get("url", ""),
+                            })
+                        logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
+                    except Exception as e:
+                        logger.warning(f"  opencli 公告失败: {e}")
                 # 2026-09-24: comments 限流形态兜底 —— 讨论空但公告正常, 说明是
                 # comments 接口被限流而非整站故障(981.HK 9/23、2423/300866 9/22-23
                 # 连续 failed 且快照不落库)。sleep 30s 后重试一次, 仍空才接受。
                 # 两路都空时不重试, 维持 Playwright 回退语义。
-                if not _opencli_posts and _opencli_notices:
+                if budget.expired() and not _opencli_posts and _opencli_notices:
+                    logger.warning(
+                        f"  opencli: 预取预算已用尽（已花 {budget.spent():.0f}s），"
+                        "跳过「讨论空→30s 后重试」"
+                    )
+                elif not _opencli_posts and _opencli_notices:
                     logger.info("  opencli: 讨论空但公告正常(疑似限流), 30s 后重试一次")
                     time.sleep(30)
                     try:
@@ -431,7 +451,8 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
 
 
 def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None,
-                    concurrency: int = 1, max_retries: int = 0) -> list[dict]:
+                    concurrency: int = 1, max_retries: int = 0,
+                    opencli_budget_seconds: float | None = None) -> list[dict]:
     """Crawl all stocks with configurable concurrency.
 
     Sequential mode (concurrency=1): simple for-loop.
@@ -441,19 +462,25 @@ def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None =
     Returns list of crawl result dicts (order may differ from input when parallel).
     """
     if concurrency <= 1:
-        return _crawl_sequential(stocks, timeout, db_path, max_retries)
-    return _crawl_parallel(stocks, timeout, db_path, concurrency, max_retries)
+        return _crawl_sequential(stocks, timeout, db_path, max_retries, opencli_budget_seconds)
+    return _crawl_parallel(
+        stocks, timeout, db_path, concurrency, max_retries, opencli_budget_seconds
+    )
 
 
 def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None,
-                      max_retries: int = 0) -> list[dict]:
+                      max_retries: int = 0,
+                      opencli_budget_seconds: float | None = None) -> list[dict]:
     results = []
     total = len(stocks)
     for i, s in enumerate(stocks):
         code = s["stock_code"]
         logger.info(f"[{i+1}/{total}] 爬取 {code} ...")
         start = time.time()
-        r = crawl_single_stock(code, timeout, db_path, max_retries=max_retries)
+        r = crawl_single_stock(
+            code, timeout, db_path, max_retries=max_retries,
+            opencli_budget_seconds=opencli_budget_seconds,
+        )
         elapsed = time.time() - start
         r["_elapsed"] = round(elapsed, 1)
         results.append(r)
@@ -464,7 +491,8 @@ def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None,
 
 
 def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
-                   concurrency: int, max_retries: int = 0) -> list[dict]:
+                   concurrency: int, max_retries: int = 0,
+                   opencli_budget_seconds: float | None = None) -> list[dict]:
     import concurrent.futures
     results = []
     total = len(stocks)
@@ -473,7 +501,8 @@ def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
         future_map: dict[concurrent.futures.Future, str] = {}
         for s in stocks:
             f = executor.submit(crawl_single_stock, s["stock_code"], timeout, db_path,
-                                max_retries=max_retries)
+                                max_retries=max_retries,
+                                opencli_budget_seconds=opencli_budget_seconds)
             future_map[f] = s["stock_code"]
         for f in concurrent.futures.as_completed(future_map):
             code = future_map[f]

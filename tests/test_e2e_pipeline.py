@@ -225,6 +225,69 @@ def temp_db(tmp_path):
 # Tests
 # ═══════════════════════════════════════════════════════════════
 
+class TestRepliesBudget:
+    """回复正文阶段受 per-stock 预算约束（`run_pipeline` 里的那处守卫）。
+
+    此前这条守卫**零测试覆盖** —— 它在 `run_pipeline` 的 per-stock 循环里，现有测试入口
+    都过不去（review 指出）。把预算协作者换成恒超时替身即可钉住它；真实类由
+    `tests/test_opencli_budget.py` 覆盖。
+
+    对照组是 `TestPipelineE2E.test_full_pipeline`：**同一批 fixtures**、预算未超时，
+    它会断言 `post_replies` 落 6 条 —— 所以这里断言「一次都没抓」不会被误读成
+    「本来就没有候选」。
+    """
+
+    def test_replies_are_not_fetched_when_budget_expired(
+        self, temp_db, mock_crawl_result, mock_stocks, monkeypatch
+    ):
+        import json
+        import sys
+        import tempfile
+        from unittest.mock import MagicMock
+
+        from src import cli
+        from src import crawler as crawler_mod
+
+        calls: list[str] = []
+        fake = MagicMock()
+        fake.fetch_news = lambda code, limit=30: []
+        fake.fetch_news_with_status = lambda code, limit=30: ([], None)
+        fake.fetch_replies = lambda url, limit=20: (calls.append(url), [])[1]
+        monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake)
+
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(
+            crawler_mod, "crawl_watchlist", lambda *_args, **_kwargs: mock_crawl_result
+        )
+
+        class _AlwaysExpired:
+            def __init__(self, *_args, **_kwargs):
+                self.seconds = 0.01
+
+            def limited(self):
+                return True
+
+            def expired(self):
+                return True
+
+            def spent(self):
+                return 999.0
+
+            def remaining(self):
+                return 0.0
+
+        monkeypatch.setattr(cli, "OpencliBudget", _AlwaysExpired)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as handle:
+            json.dump(temp_db.__dict__, handle)
+            config_path = handle.name
+
+        summary = cli.run_pipeline(config_path, dry_run=True)
+
+        assert summary["crawled"] == 2, f"预算超时不该影响主流程: {summary}"
+        assert calls == [], f"预算已超时仍发了 {len(calls)} 次 fetch_replies"
+
+
 class TestPipelineE2E:
     """End-to-end pipeline test with mocked crawler."""
 

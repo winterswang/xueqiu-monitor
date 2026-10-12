@@ -179,3 +179,103 @@ class TestRateLimitRetry:
 
         assert result["status"] == "failed"
         assert sleeps == [30]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 预取阶段的 opencli 预算
+# ═══════════════════════════════════════════════════════════════
+
+class _FakeBudget:
+    """预算替身：第 `free_checks` 次 `expired()` 之前返回 False，之后恒 True。
+
+    这个 harness 会把 `time.sleep` 全局打桩，没法「真的睡到预算耗尽」，所以直接替换
+    协作者（真实类由 tests/test_opencli_budget.py 覆盖）。
+    """
+
+    free_checks = 0
+
+    def __init__(self, *_args, **_kwargs):
+        self.seconds = 0.01
+        self._checks = 0
+
+    def limited(self):
+        return True
+
+    def expired(self):
+        self._checks += 1
+        return self._checks > self.free_checks
+
+    def spent(self):
+        return 999.0
+
+    def remaining(self):
+        return 0.0
+
+
+class _AlwaysExpiredBudget(_FakeBudget):
+    """一上来就超时：用来验证「公告被跳过」。"""
+
+    free_checks = 0
+
+
+class _ExpiredAfterFirstCheck(_FakeBudget):
+    """第一次检查放行、之后超时 —— 复现真实形态。
+
+    预取里有**两处**守卫：公告前、限流重试前。若替身一上来就超时，公告会被跳过 →
+    公告为空 → 「讨论空但公告正常」这个前提不成立 → 重试分支天然不走，于是
+    「重试守卫真的会跳过」这件事**根本没被测到**（review 指出的假覆盖）。
+    让第一次检查放行，公告就抓到了，第二次检查才超时 —— 这才是要覆盖的分支。
+    """
+
+    free_checks = 1
+
+
+class TestPrefetchBudget:
+    """预取阶段（讨论 + 公告 + 限流重试）受 per-stock 预算约束。
+
+    不设上界时这几步最坏叠起来 ≈390s（单次最坏 87s），而 crawler.timeout_seconds 管不到
+    opencli 预取 —— 一组 8 只串行时会顶穿 1 小时的 cron 窗口、与下一组重叠。
+    """
+
+    def test_notices_are_skipped_when_budget_exhausted(self, monkeypatch):
+        fake = _fake_opencli_module([[], [_DISC_ITEM]], [[_NOTICE_ITEM]])
+        sleeps: list = []
+        _install(monkeypatch, fake, sleeps)
+        monkeypatch.setattr(crawler_mod, "OpencliBudget", _AlwaysExpiredBudget)
+
+        crawler_mod.crawl_single_stock(
+            "300866.SZ", timeout=30, db_path=None, opencli_budget_seconds=0.01
+        )
+
+        assert fake.fetch_notices.call_count == 0, "预算已用尽仍去抓了公告"
+        assert fake.fetch_discussions.call_count == 1, "预算是「跳过剩下的」，不是一开始就不抓"
+        assert sleeps == []
+
+    def test_retry_is_skipped_when_budget_expires_after_notices(self, monkeypatch):
+        """公告抓到了、随后预算用尽 → 不做那个 30s sleep + 重试（这才是最费时间的一步）。"""
+        fake = _fake_opencli_module([[], [_DISC_ITEM]], [[_NOTICE_ITEM]])
+        sleeps: list = []
+        _install(monkeypatch, fake, sleeps)
+        monkeypatch.setattr(crawler_mod, "OpencliBudget", _ExpiredAfterFirstCheck)
+
+        crawler_mod.crawl_single_stock(
+            "300866.SZ", timeout=30, db_path=None, opencli_budget_seconds=0.01
+        )
+
+        assert fake.fetch_notices.call_count == 1, "第一次检查应放行，公告要抓到"
+        assert sleeps == [], "预算用尽后不该再 sleep 30s 去重试"
+        assert fake.fetch_discussions.call_count == 1, "重试那次讨论调用不该发生"
+
+    def test_budget_disabled_keeps_previous_behaviour(self, monkeypatch):
+        """`opencli_budget_seconds=0` 表示不限 → 公告照抓、重试照做（旧行为）。"""
+        fake = _fake_opencli_module([[], [_DISC_ITEM]], [[_NOTICE_ITEM]])
+        sleeps: list = []
+        _install(monkeypatch, fake, sleeps)
+
+        result = crawler_mod.crawl_single_stock(
+            "300866.SZ", timeout=30, db_path=None, opencli_budget_seconds=0
+        )
+
+        assert fake.fetch_notices.call_count == 1, "不限预算时公告必须照抓"
+        assert sleeps == [30], "不限预算时该重试仍要重试"
+        assert result["posts_count"] == 1
