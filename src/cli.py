@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from .config import Config
+from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import db
 from . import crawler
 from . import detector
@@ -211,9 +212,13 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     max_retries = cfg.crawler.get("max_retries", 0)
     logger.info(f"开始爬取 {len(stocks)} 只自选股 (concurrency={concurrency}, max_retries={max_retries}) ...")
     start_time = time.time()
+    opencli_budget_seconds = cfg.crawler.get(
+        "opencli_budget_seconds", DEFAULT_OPENCLI_BUDGET_SECONDS
+    )
     crawl_results = crawler.crawl_watchlist(
         stocks, cfg.crawler["timeout_seconds"], cfg.db_path,
         concurrency=concurrency, max_retries=max_retries,
+        opencli_budget_seconds=opencli_budget_seconds,
     )
     crawl_elapsed = int(time.time() - start_time)
     logger.info(f"爬取完成: {crawl_elapsed}s")
@@ -320,6 +325,9 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     min_c = int(cfg.crawler.get("replies_min_comments", 5))
                     rlimit = int(cfg.crawler.get("replies_limit", 20))
                     if per > 0:
+                        # 回复正文阶段受预算约束：最多 per 次调用、单次最坏 87s，
+                        # 不设上界时一只股票就能吃掉 10 分钟（见 src/opencli_budget.py）。
+                        rbudget = OpencliBudget(opencli_budget_seconds)
                         sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
                         from xueqiu_analyzer.fetcher_opencli import fetch_replies
                         have = db.existing_reply_post_ids(db_path)
@@ -328,9 +336,19 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                         )
                         n_posts = n_replies = 0
                         now_r = int(time.time())
-                        for url in cands:
+                        for idx, url in enumerate(cands):
                             if url in have:
                                 continue  # 幂等: 已抓过
+                            if rbudget.expired():
+                                # 精确统计剩下多少帖真会去抓（排除已抓过的），
+                                # 别用 n_posts —— 它只数有回复的帖，会少报。
+                                skipped = sum(1 for u in cands[idx:] if u not in have)
+                                logger.warning(
+                                    f"  {stock_code}: 回复预算 {rbudget.seconds:.0f}s 已用尽"
+                                    f"（已花 {rbudget.spent():.0f}s），本轮跳过剩余 "
+                                    f"{skipped} 帖"
+                                )
+                                break
                             rows = fetch_replies(url, rlimit)
                             if rows:
                                 db.insert_post_replies(db_path, [{

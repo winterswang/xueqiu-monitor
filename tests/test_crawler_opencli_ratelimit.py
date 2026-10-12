@@ -179,3 +179,69 @@ class TestRateLimitRetry:
 
         assert result["status"] == "failed"
         assert sleeps == [30]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 预取阶段的 opencli 预算
+# ═══════════════════════════════════════════════════════════════
+
+class _AlwaysExpiredBudget:
+    """恒超时的预算替身（真实类由 tests/test_opencli_budget.py 覆盖）。
+
+    这个 harness 会把 `time.sleep` 全局打桩，所以没法「睡到预算耗尽」；
+    改成直接替换协作者。
+    """
+
+    def __init__(self, *_args, **_kwargs):
+        self.seconds = 0.01
+
+    def limited(self):
+        return True
+
+    def expired(self):
+        return True
+
+    def spent(self):
+        return 999.0
+
+    def remaining(self):
+        return 0.0
+
+
+class TestPrefetchBudget:
+    """预取阶段（讨论 + 公告 + 限流重试）受 per-stock 预算约束。
+
+    不设上界时这三步叠起来最坏 ≈390s（单次 87s），而 crawler.timeout_seconds 管不到
+    opencli 预取 —— 一组 8 只串行时会顶穿 1 小时的 cron 窗口、与下一组重叠。
+    """
+
+    def test_notices_and_retry_are_skipped_when_budget_exhausted(self, monkeypatch):
+        # 讨论空 + 公告有 → 本来会 sleep 30 后重试；预算已尽时这两步都该跳过
+        fake = _fake_opencli_module([[], [_DISC_ITEM]], [[_NOTICE_ITEM]])
+        sleeps: list = []
+        _install(monkeypatch, fake, sleeps)
+        monkeypatch.setattr(crawler_mod, "OpencliBudget", _AlwaysExpiredBudget)
+
+        result = crawler_mod.crawl_single_stock(
+            "300866.SZ", timeout=30, db_path=None, opencli_budget_seconds=0.01
+        )
+
+        assert fake.fetch_notices.call_count == 0, "预算已用尽仍去抓了公告"
+        assert sleeps == [], "预算已用尽仍做了 30s 重试（那一步最费时间）"
+        # 讨论仍照常抓 —— 预算是「跳过剩下的」，不是「一开始就不抓」
+        assert fake.fetch_discussions.call_count == 1
+        assert result["status"] in ("success", "failed")
+
+    def test_budget_disabled_keeps_previous_behaviour(self, monkeypatch):
+        """`opencli_budget_seconds=0` 表示不限 → 公告照抓、重试照做（旧行为）。"""
+        fake = _fake_opencli_module([[], [_DISC_ITEM]], [[_NOTICE_ITEM]])
+        sleeps: list = []
+        _install(monkeypatch, fake, sleeps)
+
+        result = crawler_mod.crawl_single_stock(
+            "300866.SZ", timeout=30, db_path=None, opencli_budget_seconds=0
+        )
+
+        assert fake.fetch_notices.call_count == 1, "不限预算时公告必须照抓"
+        assert sleeps == [30], "不限预算时该重试仍要重试"
+        assert result["posts_count"] == 1
