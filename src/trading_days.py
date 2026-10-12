@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import subprocess
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -79,12 +79,14 @@ def filter_trading_day_stats(
     """按交易日采样基线窗口; 交易日数据不可用 → None (调用方回退).
 
     stats: SentimentStat 列表 (须按 stat_date 升序或任意序, 内部自排序),
-    stat_date 为 UTC 当日零点 epoch (即北京日历日). 取最后一个 window_days
-    条交易日观测。
+    stat_date 为**本地自然日零点** epoch（北京日历日；写入端见 `db.local_day_start`）。
+    取最后一个 window_days 条交易日观测。
     """
     if not stats:
         return None
-    now = today or datetime.now(timezone.utc).date()
+    # 交易日历按北京日历日（CN/HK 市场），所以"今天"也用本地日 —— 原先取 UTC 日，
+    # 在本地 00:00–08:00 会把上界错成昨天。见 issue #77。
+    now = today or datetime.now().date()
     start_iso = (now - timedelta(days=window_days * 2 + 10)).isoformat()
     end_iso = now.isoformat()
     trading = get_trading_days(market, start_iso, end_iso)
@@ -100,8 +102,9 @@ def filter_trading_day_stats(
 
     kept = [
         s for s in stats
-        if _is_observation(
-            datetime.fromtimestamp(s.stat_date, tz=timezone.utc).date()
-        )
+        # stat_date 是**本地**自然日零点；按 UTC 解释会退到前一天（本地午夜 = 前一天
+        # 16:00 UTC）→ 交易日过滤整整错一天。见 issue #77。
+        # 对历史上的 UTC 零点数据也安全：UTC 零点按本地解释仍落在同一日期。
+        if _is_observation(datetime.fromtimestamp(s.stat_date).date())
     ]
     return kept[-window_days:]

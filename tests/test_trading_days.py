@@ -101,3 +101,25 @@ def test_filter_returns_none_for_fallback(monkeypatch):
 
 def test_filter_empty_stats_returns_none():
     assert td.filter_trading_day_stats([], "CN", 14) is None
+
+
+def test_stat_date_is_read_as_local_midnight(monkeypatch):
+    """`stat_date` 是**本地**自然日零点；按 UTC 解释会整错一天（issue #77）。
+
+    构造一个「本地日 D 是交易日、D-1 不是」的日历。若读取端仍按 UTC 解释，
+    本地午夜（= D-1 16:00 UTC）会被算成 D-1 → 这个观测被丢掉 → 用例红。
+
+    这是 `8a857ba` 把写入端改成本地午夜后，读取端没跟着改的那个缺口：
+    写本地、读 UTC，两边差一格。
+    """
+    trading_day = "2026-10-08"      # 本地交易日
+    # 前一日本地休市 —— 所以"被误算成前一天"会立刻表现为丢观测
+    monkeypatch.setattr(td, "get_trading_days", lambda *a, **k: [trading_day])
+
+    # 本地午夜（naive → 宿主本地时区）
+    epoch = int(datetime.fromisoformat(trading_day).timestamp())
+    stat = SentimentStat(stock_code="600519.SH", stat_date=epoch, sentiment_mean=0.1)
+
+    kept = td.filter_trading_day_stats([stat], "CN", 14)
+
+    assert kept == [stat], "本地午夜的 stat_date 必须被解析为当天，而不是前一天"
