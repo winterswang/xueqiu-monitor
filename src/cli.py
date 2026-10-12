@@ -212,9 +212,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     max_retries = cfg.crawler.get("max_retries", 0)
     logger.info(f"开始爬取 {len(stocks)} 只自选股 (concurrency={concurrency}, max_retries={max_retries}) ...")
     start_time = time.time()
-    opencli_budget_seconds = cfg.crawler.get(
-        "opencli_budget_seconds", DEFAULT_OPENCLI_BUDGET_SECONDS
-    )
+    # 显式判 None：`.get(key, DEFAULT)` 只在键**缺失**时给默认值，配置里写成 `null`
+    # 会原样传下来，而 OpencliBudget(None) 表示「不限」—— 那就与「回退到旧行为」相反了。
+    opencli_budget_seconds = cfg.crawler.get("opencli_budget_seconds")
+    if opencli_budget_seconds is None:
+        opencli_budget_seconds = DEFAULT_OPENCLI_BUDGET_SECONDS
     crawl_results = crawler.crawl_watchlist(
         stocks, cfg.crawler["timeout_seconds"], cfg.db_path,
         concurrency=concurrency, max_retries=max_retries,
@@ -340,9 +342,10 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                             if url in have:
                                 continue  # 幂等: 已抓过
                             if rbudget.expired():
-                                # 精确统计剩下多少帖真会去抓（排除已抓过的），
-                                # 别用 n_posts —— 它只数有回复的帖，会少报。
-                                skipped = sum(1 for u in cands[idx:] if u not in have)
+                                # 用下标算，别用 n_posts —— 它只数「有回复」的帖，会少报。
+                                # （cands 已由 _select_reply_candidates 排除了 have，这里
+                                #   不需要再去重。）
+                                skipped = len(cands) - idx
                                 logger.warning(
                                     f"  {stock_code}: 回复预算 {rbudget.seconds:.0f}s 已用尽"
                                     f"（已花 {rbudget.spent():.0f}s），本轮跳过剩余 "
