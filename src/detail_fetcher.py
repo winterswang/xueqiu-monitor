@@ -446,7 +446,15 @@ def _opencli_article(url: str) -> Optional[dict]:
     slot = acquire_opencli_slot("web article", cmd)
     started_at = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # 超时必须盖住插件层限速器的等待（opencli-adapters/rate-limit.js）：它的
+        # 等待发生在 **opencli 子进程内部**，会被 subprocess.run 的墙钟一并计时，
+        # 且打 xueqiu.com 的 `web article` 与 `xueqiu/` 列表调用共用一个额度，
+        # 最坏 = 取锁 2s + 预留(12+75)s + 一次真实执行(~19s) ≈ 108s。
+        # 60 秒会在「每 30 次一次 45–75 秒长停」命中时必然被掐死，那一篇静默降级成
+        # error（fetch_url_detail 再走 reader 兜底，不会崩，但本地抓取白跑一次）。
+        # 与 xueqiu-crawler/scripts/opencli_extractor.py 的 OPENCLI_CALL_TIMEOUT_SECONDS
+        # 取同一个值，改一处要一起改。
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         record_opencli_call(
             cmd, started_at, result=r, caller="_opencli_article", throttle=slot
         )
