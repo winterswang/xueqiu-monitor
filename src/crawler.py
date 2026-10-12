@@ -290,6 +290,19 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                 result["status"] = "partial"
                 result["error"] = diagnostic.get("error_message", f"Playwright 超时（{timeout}s）")
                 logger.warning(f"{stock_code} Playwright 超时, opencli 提供 {len(posts)} 条帖子")
+            elif result["announcements"]:
+                # opencli **只拿到公告、讨论为空**（疑似 comments 接口限流）：上面已经把
+                # 公告并进 result["announcements"] 了，这里绝不能按 failed 处理 ——
+                # src/cli.py 的状态门只放行 success/partial，failed 会让这批公告
+                # **整批不入库、也不产生公告告警**（原本能拿到的数据白丢）。
+                # 讨论的失败单独体现在 error 与 degraded 健康判定里。
+                # 见 xueqiu-monitor issue #76。
+                result["status"] = "partial"
+                result["error"] = "讨论为空（opencli 只取到公告）"
+                logger.warning(
+                    f"{stock_code} 讨论为空但公告 {len(result['announcements'])} 条，"
+                    "按 partial 保留（讨论失败另行记录）"
+                )
             else:
                 result["status"] = "failed"
                 result["error"] = diagnostic.get("error_message", "未知爬取错误")

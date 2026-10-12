@@ -110,16 +110,24 @@ class TestRateLimitRetry:
             "fetch_discussions must be called exactly twice"
         assert sleeps == [30], f"expected one 30s sleep, got {sleeps}"
 
-    def test_retry_still_empty_falls_to_failed(self, monkeypatch):
-        """重试仍空 → 维持原行为: 落 failed, posts_count=0."""
+    def test_retry_still_empty_keeps_notices_as_partial(self, monkeypatch):
+        """重试仍空 → **不能**落 failed，要落 partial 并保留已抓到的公告。
+
+        原先这里是「落 failed, posts_count=0」并当作正确行为 —— 但 cli.py 的状态门
+        只放行 success/partial，failed 会让这批公告**整批不入库、不产生告警**，
+        等于把已经拿到的数据丢掉。见 issue #76。
+        """
         fake = _fake_opencli_module([[], []], [[_NOTICE_ITEM]])
         sleeps: list = []
         _install(monkeypatch, fake, sleeps)
 
         result = crawler_mod.crawl_single_stock("300866.SZ", timeout=30, db_path=None)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "partial", "公告已拿到，不能按 failed 丢掉"
         assert result["posts_count"] == 0
+        assert len(result["announcements"]) == 1
+        assert result["announcements"][0]["title"] == _NOTICE_ITEM["title"]
+        assert result["announcements"][0]["link"] == _NOTICE_ITEM["url"]
         assert fake.fetch_discussions.call_count == 2
         assert sleeps == [30]
 
@@ -163,7 +171,11 @@ class TestRateLimitRetry:
         assert sleeps == []
 
     def test_retry_exception_does_not_crash(self, monkeypatch):
-        """重试调用本身抛异常 → 吃掉, 维持 failed, 不影响其他股票."""
+        """重试调用本身抛异常 → 吃掉，不影响其他股票；公告仍按 partial 保留。
+
+        原断言是 `failed`，但那样 cli 的状态门会把**已经拿到的公告**一起丢掉
+        （见 issue #76）。异常被吃掉、流程不崩 —— 这才是本用例要钉的东西。
+        """
         fake = _fake_opencli_module([[]], [[_NOTICE_ITEM]])
         sleeps: list = []
         _install(monkeypatch, fake, sleeps)
@@ -177,7 +189,8 @@ class TestRateLimitRetry:
 
         result = crawler_mod.crawl_single_stock("300866.SZ", timeout=30, db_path=None)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "partial"
+        assert result["announcements"], "公告已在手，不能按 failed 丢"
         assert sleeps == [30]
 
 

@@ -564,3 +564,60 @@ class TestPipelineE2E:
         assert scores[1] == -0.5, f"暴雷→negative: {scores[1]}"
         assert scores[2] == 0.5, f"分红→positive: {scores[2]}"
         print(f"✅ news keyword sentiment: {scores}")
+
+
+class TestPartialCrawlIsPersisted:
+    """opencli 只取到公告时，公告必须**真的入库**（xueqiu-monitor issue #76）。
+
+    原先这条链路是断的：crawler 落 `failed` → cli 的状态门只放行 `success` →
+    已抓到的公告整批不入库、不产生公告告警。修法是两头各一步：
+    `crawler` 落 `partial`，`cli` 放行 `partial`。
+
+    这里钉的是**端到端**结果（公告真进库），而不是两边各自的状态值 ——
+    任一头回退，这条都会红。
+    """
+
+    _ANN = {
+        "title": "2026年半年度权益分派实施公告",
+        "time": "2026-09-23",
+        "notice_type": "公司公告",
+        "link": "https://xueqiu.com/info/SH600519/announcement-detail",
+    }
+
+    def _partial_result(self):
+        return [{
+            "stock_code": "SH600519",
+            "status": "partial",
+            "error": "讨论为空（opencli 只取到公告）",
+            "crawl_time": 1758000000,
+            "posts_count": 0,
+            "posts_data": [],
+            "sentiment_avg": 0.0,
+            "announcements": [dict(self._ANN)],
+            "diagnostic": {},
+        }]
+
+    def test_announcements_land_in_db_from_a_partial_crawl(
+        self, temp_db, mock_stocks, mock_opencli_feed, monkeypatch
+    ):
+        import tempfile
+
+        from src import cli, crawler as crawler_mod, db
+
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(
+            crawler_mod, "crawl_watchlist", lambda *_a, **_k: self._partial_result()
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump(temp_db.__dict__, f)
+            config_path = f.name
+
+        cli.run_pipeline(config_path, dry_run=True)
+
+        snap = db.get_latest_snapshot(temp_db.db_path, "SH600519")
+        assert snap is not None, "partial 结果也必须落快照 —— 公告挂在它下面"
+        anns = db.get_announcements_by_snapshot(temp_db.db_path, snap.id)
+        assert anns, "公告必须落库：partial 被当成 failed 时这里会是空的（issue #76）"
+        assert anns[0]["title"] == self._ANN["title"]
+        assert anns[0]["link"] == self._ANN["link"]

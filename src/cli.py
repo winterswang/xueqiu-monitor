@@ -234,7 +234,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     _phase("pipeline.detect")
     for cr in crawl_results:
         stock_code = cr.get("stock_code", "?")
-        if cr["status"] != "success":
+        # `partial` 也必须处理：它表示**部分成功**（如 opencli 只取到公告、讨论为空，
+        # 或 Playwright 超时但 opencli 有数据）。按 failed 跳过会让已经拿到的公告
+        # **整批不入库、不告警**。健康判定那边仍会把 partial 记为 degraded。
+        # 见 xueqiu-monitor issue #76。
+        if cr["status"] not in ("success", "partial"):
             logger.debug(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
             continue
 
