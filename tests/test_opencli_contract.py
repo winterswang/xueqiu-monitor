@@ -44,10 +44,24 @@ def _plugin_source() -> str:
     return "\n".join(p.read_text(encoding="utf-8") for p in files)
 
 
-def _plugin_number(key: str) -> float:
+def _xueqiu_pace_block() -> str:
+    """`export const XUEQIU_PACE = { … };` 这个对象字面量。
+
+    取数必须**限定在这个块里**：`policy.js` 里 `max_delay_s` 出现多次（小红书 15、
+    `web` 8），按「全文第一个匹配」只是**碰巧**取到雪球的 12 —— 一改声明顺序就会
+    静默量错对象，而这条守卫的全部意义就是量雪球那条链路的等待。
+    """
     src = _plugin_source()
-    found = re.search(rf"\b{re.escape(key)}\s*:\s*([0-9.]+)", src)
-    assert found, f"插件源码里找不到 `{key}` —— 限速策略结构变了，请同步这个测试"
+    anchor = src.find("XUEQIU_PACE = {")
+    assert anchor >= 0, "policy.js 里找不到 `XUEQIU_PACE = {` —— 策略结构变了"
+    end = src.find("};", anchor)
+    assert end > anchor, "XUEQIU_PACE 块没有闭合的 `};` —— 解析不了"
+    return src[anchor:end]
+
+
+def _plugin_number(key: str) -> float:
+    found = re.search(rf"\b{re.escape(key)}\s*:\s*([0-9.]+)", _xueqiu_pace_block())
+    assert found, f"XUEQIU_PACE 里找不到 `{key}` —— 限速策略结构变了，请同步这个测试"
     return float(found.group(1))
 
 
