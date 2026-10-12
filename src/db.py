@@ -22,13 +22,17 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
-def _local_day_start(now: float | None = None) -> int:
+def local_day_start(now: float | None = None) -> int:
     """本地自然日的起点（本地午夜的 Unix 秒）。
 
     统计口径统一用**本地日**：日报的昨日区间（`report_generator`）与
-    `date(x,'unixepoch','localtime')` 这类查询都是本地日。而本模块原先有两处用
-    UTC 桶（`int(time.time()) // 86400 * 86400`），在本地 00:00–08:00（北京时区）
+    `date(x,'unixepoch','localtime')` 这类查询都是本地日。而原先有三处用
+    UTC 桶（`int(time.time()) // 86400 * 86400`）—— 本模块的 `get_today_alerts`
+    与 `get_historical_new_announcement_counts`，以及 `cli.py` 给
+    `SentimentStat.stat_date` 算日键那一处 —— 在本地 00:00–08:00（北京时区）
     会与本地日错开一格。见 xueqiu-monitor issue #77。
+
+    三处统一调用本函数，不要再各自写 `// 86400 * 86400`。
     """
     dt = datetime.fromtimestamp(time.time() if now is None else now)
     return int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -633,14 +637,14 @@ def mark_alert_filtered(db_path: str, alert_id: int, reason: str) -> None:
 def get_today_alerts(db_path: str) -> list[ChangeAlert]:
     """Get today's alerts (filtered=0).
 
-    "今天" = **本地自然日**（`_local_day_start`），与日报的昨日区间口径一致。
+    "今天" = **本地自然日**（`local_day_start`），与日报的昨日区间口径一致。
     原先用 `int(time.time()) // 86400 * 86400`（UTC 午夜）—— 北京时间 00:00–08:00
     的告警会落进与本地日期不同的窗口。见 issue #77。
 
     保留 `alert_time >= ?` 形式（而非 `date(alert_time,...)=date('now','localtime')`），
     这样还能走 alert_time 上的索引。
     """
-    today_start = _local_day_start()
+    today_start = local_day_start()
     with _connect(db_path) as conn:
         rows = conn.execute(
             "SELECT * FROM change_alert WHERE alert_time >= ? AND filtered=0 ORDER BY priority, alert_time DESC",

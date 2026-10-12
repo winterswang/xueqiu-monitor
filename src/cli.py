@@ -463,7 +463,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # Use max z_score from non-announcement alerts only
             signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
             max_z = max((a.z_score for a in signal_alerts), default=0.0)
-            today_start = now // 86400 * 86400
+            # 日键用**本地自然日**（与日报的昨日区间、`get_today_alerts` 一致）。
+            # 原先这里是 `now // 86400 * 86400`（UTC 桶），在本地 00:00–08:00 会与
+            # 读取端算出的本地日错开一格 —— 写进去的 stat_date 落在读取窗口之外。
+            # 见 xueqiu-monitor issue #77。
+            today_start = db.local_day_start(now)
             cr_degraded = (cr.get("status") != "success") or (
                 (cr.get("diagnostic") or {}).get("sentiment_status") == "degraded"
             )

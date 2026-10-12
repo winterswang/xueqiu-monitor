@@ -88,7 +88,7 @@ class TestLocalDayBoundary:
             datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         )
 
-        assert dbmod._local_day_start(now=noon.timestamp()) == expected
+        assert dbmod.local_day_start(now=noon.timestamp()) == expected
 
     def test_announcement_counts_bucket_by_local_day(self, tmp_db):
         """同一天的两条公告要落进**同一个**桶。

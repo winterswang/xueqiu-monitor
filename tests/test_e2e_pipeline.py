@@ -621,3 +621,46 @@ class TestPartialCrawlIsPersisted:
         assert anns, "公告必须落库：partial 被当成 failed 时这里会是空的（issue #76）"
         assert anns[0]["title"] == self._ANN["title"]
         assert anns[0]["link"] == self._ANN["link"]
+
+
+class TestSentimentStatDayKey:
+    """`sentiment_stats.stat_date` 必须是**本地午夜**（issue #77 的第三处）。
+
+    `src/cli.py` 原先用 `now // 86400 * 86400`（UTC 桶）当日键，而读取端
+    （`report_generator` 的昨日区间、`get_today_alerts`）按**本地日**取 ——
+    在本地 00:00–08:00 写进去的值会落在读取窗口之外。
+
+    判据用"自洽性"：真实日键是本地午夜 ⟺ `local_day_start(stat_date) == stat_date`。
+    旧实现下 stat_date = UTC 午夜 = 本地 08:00，不满足，用例必红。
+    """
+
+    def test_stat_date_is_local_midnight(
+        self, temp_db, mock_crawl_result, mock_stocks, mock_opencli_feed, monkeypatch
+    ):
+        import sqlite3
+        import tempfile
+
+        from src import cli, crawler as crawler_mod, db
+
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(
+            crawler_mod, "crawl_watchlist", lambda *_a, **_k: mock_crawl_result
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump(temp_db.__dict__, f)
+            config_path = f.name
+
+        cli.run_pipeline(config_path, dry_run=True)
+
+        conn = sqlite3.connect(temp_db.db_path)
+        try:
+            dates = [r[0] for r in conn.execute(
+                "SELECT DISTINCT stat_date FROM sentiment_stats"
+            )]
+        finally:
+            conn.close()
+
+        assert dates, "应至少落一条 sentiment_stats（mock 数据是 15/25 帖，不该被 quarantine）"
+        for d in dates:
+            assert db.local_day_start(d) == d, f"stat_date 不是本地午夜: {d}"
