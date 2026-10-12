@@ -613,3 +613,63 @@ class TestUploadCsvToKb:
             assert mock_api.call_count == 2
         finally:
             csv_path.unlink(missing_ok=True)
+
+
+class TestCsvFormulaInjection:
+    """外部文本不得在表格软件里被当成公式执行（xueqiu-monitor issue #78）。
+
+    导出文件用 UTF-8 BOM、明确面向 Excel；而帖子标题/正文/作者由外部用户控制。
+    中和手段是给危险单元格加前导单引号（表格软件的"这是纯文本"标记）。
+    """
+
+    @staticmethod
+    def _row(**over) -> dict:
+        base = {h: "" for h in export_csv.CSV_HEADERS}
+        base.update({
+            "date": "2026-10-13", "stock_code": "SH600519", "stock_name": "贵州茅台",
+            "post_type": "discussion",
+            "like_count": 0, "comment_count": 0, "forward_count": 0,
+            "sentiment_score": 0.0,
+        })
+        base.update(over)
+        return base
+
+    @staticmethod
+    def _round_trip(tmp_path, row: dict) -> dict:
+        out = tmp_path / "out.csv"
+        export_csv.generate_csv([row], out)
+        with out.open(encoding="utf-8-sig", newline="") as f:
+            return next(csv.DictReader(f))
+
+    @pytest.mark.parametrize("payload", ["=cmd|'/C calc'!A1", "+1+1", "-1+1", "@SUM(1+1)"])
+    def test_formula_prefix_is_neutralised(self, tmp_path, payload):
+        got = self._round_trip(tmp_path, self._row(title=payload))
+        assert got["title"] == "'" + payload
+
+    def test_leading_whitespace_still_neutralised(self, tmp_path):
+        """表格软件会先跳过前导空白再判定公式，所以剥掉空白后仍要拦。"""
+        got = self._round_trip(tmp_path, self._row(author="  =1+1"))
+        assert got["author"] == "'  =1+1"
+
+    def test_content_and_link_columns_are_covered(self, tmp_path):
+        got = self._round_trip(
+            tmp_path,
+            self._row(content='=HYPERLINK("http://evil")', link="\t@SUM(A1)"),
+        )
+        assert got["content"] == '\'=HYPERLINK("http://evil")'
+        assert got["link"] == "'\t@SUM(A1)"
+
+    def test_normal_text_is_left_alone(self, tmp_path):
+        """只在危险时加引号 —— 正常内容原样保留，不改数据语义。"""
+        got = self._round_trip(
+            tmp_path, self._row(title="茅台批价企稳回升", author="张三", stock_name="贵州茅台")
+        )
+        assert got["title"] == "茅台批价企稳回升"
+        assert got["author"] == "张三"
+        assert got["stock_name"] == "贵州茅台"
+
+    def test_numeric_columns_are_never_touched(self, tmp_path):
+        """sentiment_score 可以是 -0.5；加单引号会让表格软件把它当文本。"""
+        got = self._round_trip(tmp_path, self._row(sentiment_score=-0.5, like_count=3))
+        assert got["sentiment_score"] == "-0.5"
+        assert got["like_count"] == "3"

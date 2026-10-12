@@ -273,8 +273,44 @@ def fetch_announcements(db_path: str, stocks_cfg: dict, date_str: str) -> list[d
 # ════════════════════════════════════════════════════════
 
 
+# 表格软件（Excel / LibreOffice / Sheets）会把以这些字符开头的单元格当公式执行。
+_FORMULA_LEADS = ("=", "+", "-", "@")
+
+# 只处理**外部可控的文本列**。数值列（like_count / comment_count / forward_count /
+# sentiment_score）绝不能碰 —— sentiment_score 可以是 -0.5，前缀单引号会让表格软件
+# 把它当文本，数值语义就丢了。
+_UNTRUSTED_TEXT_COLUMNS = frozenset({
+    "stock_name", "post_type", "title", "content", "author", "time", "link",
+})
+
+
+def _safe_cell(column: str, value):
+    """中和 CSV 公式注入（xueqiu-monitor issue #78）。
+
+    帖子标题/正文/作者等由外部用户控制。若单元格以 ``= + - @`` 开头，用户用表格
+    软件打开导出文件时可能触发公式执行。惯例做法是在前面加一个单引号 —— 表格软件
+    视其为"后面是纯文本"的标记。
+
+    两个克制之处：
+    - **只在判定危险时才加**，普通文本原样保留（不改数据语义）
+    - **只对文本列生效**，数值列一律不动
+
+    判定前先剥掉前导空白/制表/回车：表格软件会跳过它们再决定是不是公式。
+    """
+    if column not in _UNTRUSTED_TEXT_COLUMNS:
+        return value
+    if not isinstance(value, str) or not value:
+        return value
+    probe = value.lstrip(" \t\r\n")
+    if probe[:1] in _FORMULA_LEADS:
+        return "'" + value
+    return value
+
+
 def generate_csv(rows: list[dict], output_path: Path) -> int:
     """Write rows to a CSV file (UTF-8 BOM for Excel).
+
+    写出前对不可信文本列做公式注入中和（`_safe_cell`）。
 
     Returns the number of data rows written.
     """
@@ -284,7 +320,7 @@ def generate_csv(rows: list[dict], output_path: Path) -> int:
         writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            writer.writerow({k: _safe_cell(k, v) for k, v in row.items()})
     return len(rows)
 
 
