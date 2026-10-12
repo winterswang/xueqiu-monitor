@@ -24,19 +24,22 @@ import backfill_fulltext as bf  # noqa: E402
 
 @pytest.fixture
 def stub_page(monkeypatch):
-    """替掉 detail_fetcher 的抓取实现，由测试指定返回体，并记录被问过的 URL。"""
+    """替掉 detail_fetcher 的抓取实现，由测试指定返回体，并记录被问过的 URL 与 kwargs。"""
     import src.detail_fetcher as df
 
     seen: list[str] = []
+    kwargs_seen: list[dict] = []
 
     def _apply(result: dict) -> list[str]:
-        def _fake(url: str) -> dict:
+        def _fake(url: str, **kwargs) -> dict:
             seen.append(url)
+            kwargs_seen.append(kwargs)
             return dict(result)
 
         monkeypatch.setattr(df, "fetch_page_opencli", _fake)
         return seen
 
+    _apply.kwargs_seen = kwargs_seen  # type: ignore[attr-defined]
     return _apply
 
 
@@ -73,6 +76,31 @@ def test_delegates_to_the_governed_channel(stub_page):
     bf.fetch_fulltext("https://xueqiu.com/S/SZ000933/411499999")
 
     assert seen == ["https://xueqiu.com/S/SZ000933/411499999"]
+
+
+def test_asks_for_untruncated_content(stub_page, monkeypatch):
+    """必须显式要 max_chars=None —— 否则正文被静默截到 8000 字。
+
+    回归背景：本脚本改走 `fetch_page_opencli` 后，曾默默继承了详情页那套
+    DETAIL_MAX_CHARS 上限（旧实现不截断），长文会以 status='ok' 存进
+    post_fulltext 却只有前 8000 字。见 monitor issue #74 第 3 条。
+    """
+    stub_page({"title": "t", "content": "x", "status": "ok"})
+    monkeypatch.setattr(bf, "_opencli_ok", lambda: True)
+
+    bf.fetch_fulltext("https://xueqiu.com/1/2")
+
+    assert stub_page.kwargs_seen == [{"max_chars": None}]
+
+
+def test_long_content_is_not_truncated(stub_page, monkeypatch):
+    stub_page({"title": "t", "content": "正" * 20000, "status": "ok"})
+    monkeypatch.setattr(bf, "_opencli_ok", lambda: True)
+
+    text, status = bf.fetch_fulltext("https://xueqiu.com/1/2")
+
+    assert status == "ok"
+    assert len(text) == 20000
 
 
 def test_content_is_stripped(stub_page, monkeypatch):

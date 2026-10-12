@@ -144,7 +144,10 @@ def fetch_fulltext(url: str) -> tuple[str, str]:
     """
     from src.detail_fetcher import fetch_page_opencli
 
-    r = fetch_page_opencli(url)
+    # max_chars=None：**不要**详情页那套 8000 字上限。本脚本的存在意义就是拿到卡片
+    # 之外的完整正文，截断会让长文静默存错（`full_len` 记的是截断后的长度却标 ok）。
+    # 见 monitor issue #74 第 3 条。
+    r = fetch_page_opencli(url, max_chars=None)
     status = r.get("status")
     if status == "ok":
         return (r.get("content") or "").strip(), "ok"

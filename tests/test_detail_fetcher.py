@@ -577,6 +577,26 @@ class TestOpencliArticleAdapter:
         assert r["content"].startswith("正文")
         assert r["title"] == "标题"
 
+    def test_default_caps_content_at_detail_max_chars(self, monkeypatch):
+        """默认（详情页口径）仍按 DETAIL_MAX_CHARS 截断 —— 这个上限别被顺手改掉。"""
+        self._arm(monkeypatch, stdout=self._rows(content="正" * (df.DETAIL_MAX_CHARS + 500)))
+        r = df.fetch_page_opencli("https://x.com/a")
+        assert r["status"] == "ok"
+        assert len(r["content"]) == df.DETAIL_MAX_CHARS
+
+    def test_max_chars_none_keeps_full_text(self, monkeypatch):
+        """``max_chars=None`` 不截断 —— backfill 靠这个拿完整正文。
+
+        回归背景：backfill 改走本通道后曾**静默**把正文截到 8000 字（旧实现不截断），
+        长文会以 ``status='ok'`` 存进 post_fulltext、却只有前 8000 字，``full_len``
+        记的也是截断后的长度。见 monitor issue #74 第 3 条。
+        """
+        long_text = "正" * (df.DETAIL_MAX_CHARS + 500)
+        self._arm(monkeypatch, stdout=self._rows(content=long_text))
+        r = df.fetch_page_opencli("https://x.com/a", max_chars=None)
+        assert r["status"] == "ok"
+        assert len(r["content"]) == len(long_text)
+
     def test_empty_content_is_empty(self, monkeypatch):
         self._arm(monkeypatch, stdout=self._rows(content=""))
         r = df.fetch_page_opencli("https://x.com/a")
@@ -664,11 +684,12 @@ class TestOpencliArticleAdapter:
         monkeypatch.setattr(
             df,
             "_fetch_page_opencli_legacy",
-            lambda url: called.append(url)
+            lambda url, **kw: called.append((url, kw))
             or {"title": "", "content": "", "status": "error", "channel": "opencli"},
         )
         df.fetch_page_opencli("https://x.com/a")
-        assert called == ["https://x.com/a"]
+        # max_chars 必须透传到回退分支 —— 回退路径同样要能按调用方要求不截断
+        assert called == [("https://x.com/a", {"max_chars": df.DETAIL_MAX_CHARS})]
 
 
 class TestHtmlToText:

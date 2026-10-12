@@ -364,7 +364,7 @@ def _looks_like_junk_page(
     return selector == "body" and content.count("](http") > _MAX_BODY_LINKS
 
 
-def _fetch_page_opencli_legacy(url: str) -> dict:
+def _fetch_page_opencli_legacy(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> dict:
     """回退路径：逐选择器探针的 browser 直连序列。
 
     2026-10-08 起不再是主通道 —— 主通道换成了 `opencli web article`
@@ -403,7 +403,9 @@ def _fetch_page_opencli_legacy(url: str) -> dict:
         logger.info(f"[detail] opencli 拿到占位/首页内容, 弃用 {url[:60]}")
         return {"title": title, "content": "", "status": "junk", "channel": "opencli"}
     return {
-        "title": title, "content": best[:DETAIL_MAX_CHARS], "status": "ok",
+        "title": title,
+        "content": best if max_chars is None else best[:max_chars],
+        "status": "ok",
         "channel": "opencli",
     }
 
@@ -483,8 +485,13 @@ def _opencli_article(url: str) -> Optional[dict]:
     return rows if isinstance(rows, dict) else None
 
 
-def _fetch_page_opencli_adapter(url: str) -> dict:
-    """适配器通道 → 与 legacy 同形的四态返回 (ok/empty/error/junk)."""
+def _fetch_page_opencli_adapter(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> dict:
+    """适配器通道 → 与 legacy 同形的四态返回 (ok/empty/error/junk).
+
+    ``max_chars``：正文截断上限，默认 ``DETAIL_MAX_CHARS``。传 ``None`` 表示**不截断** ——
+    `scripts/backfill_fulltext.py` 走这条路：它的存在意义就是拿到卡片之外**完整**的正文，
+    截到 8000 会让它在长文上静默存错数据（详见 monitor issue #74）。
+    """
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
     row = _opencli_article(url)
@@ -499,21 +506,26 @@ def _fetch_page_opencli_adapter(url: str) -> dict:
         logger.info(f"[detail] web article 拿到占位/首页内容, 弃用 {url[:60]}")
         return {"title": title, "content": "", "status": "junk", "channel": "opencli"}
     return {
-        "title": title, "content": content[:DETAIL_MAX_CHARS], "status": "ok",
+        "title": title,
+        "content": content if max_chars is None else content[:max_chars],
+        "status": "ok",
         "channel": "opencli",
     }
 
 
-def fetch_page_opencli(url: str) -> dict:
+def fetch_page_opencli(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> dict:
     """opencli 本地浏览器抓页面正文 (主通道; 需 Chrome 扩展在线).
 
     主通道是 `opencli web article`（opencli-adapters/article.js）—— 与
     xueqiu-crawler 共用同一份实现，且我们**不再需要**逐选择器探针，所以台账里
     那些 browser:extract 探针噪声也随之消失。命令未注册时回退 legacy 序列。
+
+    ``max_chars``：正文截断上限，默认 ``DETAIL_MAX_CHARS``（详情页落库口径）。
+    **需要全文的调用方传 ``None``** —— 见 `scripts/backfill_fulltext.py`。
     """
     if _article_adapter_available():
-        return _fetch_page_opencli_adapter(url)
-    return _fetch_page_opencli_legacy(url)
+        return _fetch_page_opencli_adapter(url, max_chars=max_chars)
+    return _fetch_page_opencli_legacy(url, max_chars=max_chars)
 
 
 def fetch_url_detail(url: str) -> dict:
