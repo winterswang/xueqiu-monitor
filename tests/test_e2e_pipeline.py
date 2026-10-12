@@ -664,3 +664,70 @@ class TestSentimentStatDayKey:
         assert dates, "应至少落一条 sentiment_stats（mock 数据是 15/25 帖，不该被 quarantine）"
         for d in dates:
             assert db.local_day_start(d) == d, f"stat_date 不是本地午夜: {d}"
+
+
+class TestRealCrawlerPartialFlowsIntoDb:
+    """让**真实**的 `crawl_single_stock` 产出 partial，再交给 `run_pipeline` 入库。
+
+    `TestPartialCrawlIsPersisted` 是手搓一个 partial dict 喂进去的 —— 它只钉住
+    **cli 半边**（把那半退回 `failed`，它照样绿）。这条打桩的只是 opencli 取数那两路，
+    `crawl_single_stock` 与 `run_pipeline` 都真跑，**两头都穿过**：
+    crawler 那半若退回 `failed`，本用例第一条断言就红。
+    """
+
+    def test_real_crawler_output_is_persisted(
+        self, temp_db, mock_stocks, monkeypatch
+    ):
+        import sys
+        import tempfile
+        from unittest.mock import MagicMock
+
+        from src import cli, crawler as crawler_mod, db
+
+        # 只打桩 opencli 取数：讨论空、公告一条
+        fake = MagicMock()
+        fake.is_available = lambda: True
+        fake.fetch_discussions = lambda code, limit=100: []
+        fake.fetch_notices = lambda code, limit=50: [{
+            "title": "2026年半年度权益分派实施公告",
+            "type": "公司公告",
+            "created_at": "2026-09-23",
+            "url": "https://xueqiu.com/info/SH600519/announcement-detail",
+        }]
+        fake.fetch_news = lambda code, limit=30: []
+        fake.fetch_replies = lambda url, limit=20: []
+        monkeypatch.setitem(sys.modules, "xueqiu_analyzer.fetcher_opencli", fake)
+        monkeypatch.setattr(crawler_mod, "_ensure_xueqiu_analyzer_path", lambda: "/fake")
+        # 不许回退 Playwright —— 否则这条测的就不是 opencli 路径了
+        def _no_playwright(*_a, **_k):
+            raise AssertionError("不该走 Playwright 回退")
+
+        monkeypatch.setattr(crawler_mod, "_crawl_with_retry", _no_playwright)
+        monkeypatch.setattr(crawler_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            crawler_mod.sentiment, "analyze_sentiment_batch",
+            lambda posts: [0.0] * len(posts),
+        )
+
+        # ① 真跑 crawler
+        res = crawler_mod.crawl_single_stock("SH600519", timeout=30, db_path=None)
+        assert res["status"] == "partial", (
+            f"真实 crawler 应产出 partial（公告在手），实际 {res['status']} —— "
+            "crawler 那半退回 failed 时这里会先红"
+        )
+        assert res["announcements"], "公告应保留在结果里"
+
+        # ② 再走 run_pipeline
+        monkeypatch.setattr(crawler_mod, "load_watchlist", lambda _cfg: mock_stocks)
+        monkeypatch.setattr(crawler_mod, "crawl_watchlist", lambda *_a, **_k: [res])
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump(temp_db.__dict__, f)
+            config_path = f.name
+
+        cli.run_pipeline(config_path, dry_run=True)
+
+        snap = db.get_latest_snapshot(temp_db.db_path, "SH600519")
+        assert snap is not None, "partial 结果必须落快照"
+        anns = db.get_announcements_by_snapshot(temp_db.db_path, snap.id)
+        assert anns, "真实 crawler 产出的公告必须入库"
+        assert anns[0]["title"] == "2026年半年度权益分派实施公告"

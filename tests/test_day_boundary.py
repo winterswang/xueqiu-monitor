@@ -110,3 +110,39 @@ class TestLocalDayBoundary:
         )
 
         assert counts == [2.0], f"同一本地日应为一个桶，实际 {counts}"
+
+
+class TestTodayAlertsIsTimeIndependent:
+    """时间无关的判据：`get_today_alerts` 返回的**恰好**是"本地日 == 今天"的那些。
+
+    上面 `TestLocalDayBoundary` 里的用例是**时变**的 —— 在本地凌晨跑时，旧实现
+    的 UTC 桶恰好也包含"今天凌晨"，用例不会红（验证者实测在本地 01:20 旧实现下
+    `test_early_morning_alert_counts_as_today` 是过的）。这条与跑测试的时刻无关：
+
+    - 本地 00:00–08:00：旧桶起点是**昨天 08:00** → 会把昨天的晚间告警多算进来 → 红
+    - 本地 08:00 之后：旧桶起点是**今天 08:00** → 会漏掉今天凌晨的告警 → 红
+    """
+
+    def test_exactly_the_alerts_whose_local_date_is_today(self, tmp_db):
+        today = datetime.now().date()
+        seeded = {
+            "today_0000": _local_ts(0),
+            "today_0200": _local_ts(2),
+            "today_1200": _local_ts(12),
+            "yest_2300": _local_ts(23, days_ago=1),
+            "yest_0200": _local_ts(2, days_ago=1),
+        }
+        for word, ts in seeded.items():
+            dbmod.insert_alert(
+                tmp_db, _alert(ts, kind="sentiment_shift", detail={"word": word})
+            )
+
+        expected = {
+            word for word, ts in seeded.items()
+            if datetime.fromtimestamp(ts).date() == today
+        }
+        got = {a.detail["word"] for a in dbmod.get_today_alerts(tmp_db)}
+
+        assert got == expected, (
+            f"应是本地日 == 今天的那些，实际多/少了：{got ^ expected}"
+        )
