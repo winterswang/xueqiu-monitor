@@ -20,6 +20,9 @@ from src import detail_fetcher as df
 from src import report_generator as rg
 from src.models import Announcement, CrawlSnapshot
 
+# 夹具里的相对时间串（"1小时前" / "5天前"）要靠确定性时钟才不受运行时刻影响，见 conftest.py。
+pytestmark = pytest.mark.usefixtures("frozen_clock")
+
 
 @pytest.fixture
 def tmp_db():

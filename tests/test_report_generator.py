@@ -14,6 +14,9 @@ import pytest
 
 from src import report_generator as rg
 
+# 夹具里的相对时间串（"3小时前"）要靠确定性时钟才不受运行时刻影响，见 conftest.py。
+pytestmark = pytest.mark.usefixtures("frozen_clock")
+
 
 class TestFetchStockPosts:
     """Test fetch_stock_posts filtering logic."""
