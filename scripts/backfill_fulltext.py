@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Backfill full text for high-value posts via opencli browser (Chrome extension).
+"""Backfill full text for high-value posts via `opencli web article`.
 
 The 13:00 pipeline captures timeline *card* text only (~230 char cap, set by
 xueqiu's card rendering, not by us). This script picks the day's high-value
-posts from monitor.db and fetches their FULL article text by opening each post
-URL in a real Chrome tab (opencli browser bridge, zero-WAF, login state rides
-the user's profile).
+posts from monitor.db and fetches their FULL article text through the
+`opencli web article` adapter (opencli-adapters/article.js) — the same channel
+`src/detail_fetcher.fetch_page_opencli` uses.
+
+2026-10-13 换通道: 原先走 `opencli browser <session> open` + 逐选择器
+`extract --selector`。那条路**不触发插件钩子**，所以既不受统一限频保护、也不进
+`~/.opencli/adapter-calls.jsonl` 台账（上游 jackwener/opencli#2606）。换成
+`web article` 后两者都有，且不再需要手工 settle/探针选择器 —— 台账里那批
+`browser:extract` 探针噪声也随之消失。
 
 Selection (OR of):
     - engagement score = likes + comments*3 + forwards*2 >= --min-score
@@ -56,17 +62,6 @@ def _opencli_ok() -> bool:
         return "[OK] Extension: connected" in r.stdout
     except Exception:
         return False
-
-
-def _run(*args: str, timeout: int = 45) -> subprocess.CompletedProcess:
-    return subprocess.run(["opencli"] + list(args), capture_output=True, text=True, timeout=timeout)
-
-
-def _clean_json(stdout: str) -> str:
-    """Strip opencli update-noise lines around the JSON payload."""
-    lines = [ln for ln in stdout.splitlines()
-             if "Update available" not in ln and not ln.startswith("  Run:")]
-    return "\n".join(lines)
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
@@ -136,33 +131,28 @@ def _int(v) -> int:
         return 0
 
 
-def fetch_fulltext(session: str, url: str, settle_s: float = 2.5) -> tuple[str, str]:
-    """Open post URL in browser session and extract article body.
+def fetch_fulltext(url: str) -> tuple[str, str]:
+    """Fetch one post's full text through `opencli web article`.
 
-    Returns (text, status). status: ok | empty | opencli-error.
+    复用 ``src/detail_fetcher.fetch_page_opencli``：同一份实现、同一条主通道，
+    因而也共享它的超时预算、限频槽与调用台账。不要在这里另写一份 opencli 调用。
+
+    Returns:
+        ``(text, status)``，status ∈ ``ok`` | ``empty`` | ``error`` | ``opencli-error``。
+        ``opencli-error`` 表示**通道本身不可用**（调用方据此提前收工，不再空耗），
+        与"这一篇抓不到"（``error``）区分开。
     """
-    try:
-        r = _run("browser", session, "open", url)
-        if r.returncode != 0:
-            return "", f"opencli-error: {r.stderr.strip()[:120]}"
-        time.sleep(settle_s)
-        for selector in (".article__bd", None):
-            args = ["browser", session, "extract"]
-            if selector:
-                args += ["--selector", selector]
-            rx = _run("browser", session, *args[2:])
-            if rx.returncode != 0:
-                continue
-            try:
-                d = json.loads(_clean_json(rx.stdout))
-            except Exception:
-                continue
-            text = (d.get("text") or d.get("content") or "").strip()
-            if text:
-                return text, "ok"
+    from src.detail_fetcher import fetch_page_opencli
+
+    r = fetch_page_opencli(url)
+    status = r.get("status")
+    if status == "ok":
+        return (r.get("content") or "").strip(), "ok"
+    if status in ("empty", "junk"):
         return "", "empty"
-    except subprocess.TimeoutExpired:
-        return "", "opencli-timeout"
+    # 单篇失败与桥断都落到 detail_fetcher 的 "error"；用 doctor 再判一次，
+    # 只有通道真的不可用才让调用方提前终止。
+    return "", "opencli-error" if not _opencli_ok() else "error"
 
 
 def main() -> int:
@@ -174,10 +164,8 @@ def main() -> int:
                     help="engagement floor: likes + comments*3 + forwards*2")
     ap.add_argument("--near-cap", type=int, default=200,
                     help="card length >= this also qualifies (likely truncated)")
-    ap.add_argument("--session", default="xqft")
     ap.add_argument("--min-gain", type=int, default=50,
                     help="only keep results whose full text beats card by N chars")
-    ap.add_argument("--settle", type=float, default=2.5)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -204,7 +192,7 @@ def main() -> int:
 
     picked, ok, fail, no_gain = cands[:args.top], 0, 0, 0
     for i, c in enumerate(picked, 1):
-        text, status = fetch_fulltext(args.session, c["url"], args.settle)
+        text, status = fetch_fulltext(c["url"])
         if status != "ok" or not text:
             fail += 1
             logger.warning(f"[{i}/{len(picked)}] ✗ {status} | {c['url']}")
