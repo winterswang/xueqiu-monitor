@@ -10,6 +10,7 @@ import json
 import logging
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .models import (
@@ -19,6 +20,18 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _local_day_start(now: float | None = None) -> int:
+    """本地自然日的起点（本地午夜的 Unix 秒）。
+
+    统计口径统一用**本地日**：日报的昨日区间（`report_generator`）与
+    `date(x,'unixepoch','localtime')` 这类查询都是本地日。而本模块原先有两处用
+    UTC 桶（`int(time.time()) // 86400 * 86400`），在本地 00:00–08:00（北京时区）
+    会与本地日错开一格。见 xueqiu-monitor issue #77。
+    """
+    dt = datetime.fromtimestamp(time.time() if now is None else now)
+    return int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 
 class _ClosingConnection:
@@ -618,8 +631,16 @@ def mark_alert_filtered(db_path: str, alert_id: int, reason: str) -> None:
 
 
 def get_today_alerts(db_path: str) -> list[ChangeAlert]:
-    """Get today's alerts (filtered=0)."""
-    today_start = int(time.time()) // 86400 * 86400
+    """Get today's alerts (filtered=0).
+
+    "今天" = **本地自然日**（`_local_day_start`），与日报的昨日区间口径一致。
+    原先用 `int(time.time()) // 86400 * 86400`（UTC 午夜）—— 北京时间 00:00–08:00
+    的告警会落进与本地日期不同的窗口。见 issue #77。
+
+    保留 `alert_time >= ?` 形式（而非 `date(alert_time,...)=date('now','localtime')`），
+    这样还能走 alert_time 上的索引。
+    """
+    today_start = _local_day_start()
     with _connect(db_path) as conn:
         rows = conn.execute(
             "SELECT * FROM change_alert WHERE alert_time >= ? AND filtered=0 ORDER BY priority, alert_time DESC",
@@ -880,6 +901,10 @@ def get_historical_new_announcement_counts(
 
     Returns list of daily counts (one value per day with alerts) for
     computing Z-score on new announcement volume.
+
+    **按本地自然日分桶**（`date(...,'unixepoch','localtime')`，与本模块 :450 的
+    惯例一致）。原先按 UTC 桶 `alert_time / 86400` 分组，日界与本地日错开 8 小时，
+    每天一个的计数会被劈成两天。见 issue #77。
     """
     cutoff = int(time.time()) - window_days * 86400
     with _connect(db_path) as conn:
@@ -887,7 +912,7 @@ def get_historical_new_announcement_counts(
             """SELECT COUNT(*) as cnt FROM change_alert
                WHERE stock_code=? AND alert_type='new_announcement'
                AND alert_time >= ?
-               GROUP BY (alert_time / 86400)""",
+               GROUP BY date(alert_time,'unixepoch','localtime')""",
             (stock_code, cutoff)
         ).fetchall()
         return [float(r["cnt"]) for r in rows]
