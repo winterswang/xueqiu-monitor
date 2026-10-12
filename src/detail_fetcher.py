@@ -368,7 +368,7 @@ def _fetch_page_opencli_legacy(url: str) -> dict:
     """回退路径：逐选择器探针的 browser 直连序列。
 
     2026-10-08 起不再是主通道 —— 主通道换成了 `opencli web article`
-    （opencli-adapters/article.js，与 xueqiu-crawler 共用同一份实现）。
+    （opencli-adapters/article.js，独立仓，三个仓共用同一份实现）。
     这里只在适配器命令未注册（插件丢失）时才会走到。
 
     实测 (2026-09-20): 新浪 finance 页 selector=div.article 精准提取

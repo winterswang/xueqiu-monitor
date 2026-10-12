@@ -1,7 +1,7 @@
 """monitor 侧的 opencli 超时必须盖住插件层的最坏等待。
 
-背景：插件层限速器（`xueqiu-crawler/opencli-adapters/`）的等待发生在 **opencli 子进程
-内部**，会被调用方 `subprocess.run(timeout=…)` 的墙钟一并计时。它的策略是
+背景：插件层限速器（独立仓 `opencli-adapters`，本机装在 `~/.opencli/plugins/`）的等待发生在
+**opencli 子进程内部**，会被调用方 `subprocess.run(timeout=…)` 的墙钟一并计时。它的策略是
 「6–12 秒间隔 + 每 30 次一次 45–75 秒长停」，所以单次最坏等待 =
 取锁 `LOCK_WAIT_MS` + `max_delay_s` + `long_pause_max_s` + 一次真实执行。
 调用方超时若低于它，**长停一命中就必然被误杀**（表现为那一只股票静默降级成失败）。
@@ -12,6 +12,11 @@ test_opencli_throttle.py`，会解析插件源码），而 **monitor 侧此前�
 而 monitor 没跟，crawler 的测试会红、monitor 的不会。这个文件把那半边补上。
 
 数值都从**源码解析**得出，不照抄：改插件或改调用方任一侧，这里都会红。
+
+插件源码怎么定位（2026-10-12 起）：插件独立成仓，本机那份就是 `~/.opencli/plugins/` 下的
+符号链接，CI 里由 workflow checkout 到 `_deps/opencli-adapters`；解析逻辑见
+`tests/plugin_source.py` —— 它**解析不到就抛错**（不是跳过），所以这条守卫在 CI 里也真跑
+（此前它靠「看不到 crawler 仓」而静默跳过，等于没守）。
 """
 
 from __future__ import annotations
@@ -21,17 +26,11 @@ from pathlib import Path
 
 import pytest
 
-CRAWLER = Path(__file__).resolve().parent.parent.parent / "xueqiu-crawler"
-PLUGIN_DIR = CRAWLER / "opencli-adapters"
-MONITOR_DETAIL_FETCHER = Path(__file__).resolve().parent.parent / "src" / "detail_fetcher.py"
+from plugin_source import resolve_plugin_dir
 
-# ⚠️ monitor 的 CI 只 checkout 本仓 + xueqiu-analyzer-skill（见 .github/workflows/tests.yml），
-# **看不到 crawler 仓的插件源码** —— 所以这条守卫在 CI 里会自动跳过，它的价值在**本地**
-# （两个仓并排时）。想让 CI 也守住，需要让 monitor 的 workflow 一并 checkout crawler；
-# 那会耦合两个仓的 CI，暂不做，先记在这里。
-pytestmark = pytest.mark.skipif(
-    not PLUGIN_DIR.is_dir(),
-    reason=f"看不到插件源码 {PLUGIN_DIR}（CI 不 checkout crawler 仓）—— 本地跑才有意义",
+PLUGIN_DIR = resolve_plugin_dir()  # 独立仓 opencli-adapters（本机 = 已安装的那份）
+MONITOR_DETAIL_FETCHER = (
+    Path(__file__).resolve().parent.parent / "src" / "detail_fetcher.py"
 )
 
 # 单次真实执行的余量（列表/详情的实测耗时量级）。
@@ -118,7 +117,9 @@ def test_analyzer_wrapper_timeout_covers_plugin_worst_wait():
         reason="当前环境没装 xueqiu-analyzer-skill，跳过（CI 里会装）",
     )
     timeout = getattr(analyzer, "OPENCLI_CALL_TIMEOUT_SECONDS", None)
-    assert timeout is not None, "analyzer 的 fetcher_opencli 没有 OPENCLI_CALL_TIMEOUT_SECONDS"
+    assert timeout is not None, (
+        "analyzer 的 fetcher_opencli 没有 OPENCLI_CALL_TIMEOUT_SECONDS"
+    )
     worst = plugin_worst_wait_seconds()
     assert timeout > worst + SINGLE_RUN_HEADROOM_SECONDS, (
         f"analyzer 封装的超时 {timeout}s 盖不住插件层最坏等待 {worst}s + 余量"

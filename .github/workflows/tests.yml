@@ -30,6 +30,16 @@ jobs:
           repository: winterswang/xueqiu-analyzer-skill
           path: _deps/xueqiu-analyzer-skill
 
+      # 插件已独立成仓（2026-10-12）。tests/plugin_source.py 按「env → _deps → 已安装插件」
+      # 解析插件源码；解析不到会 AssertionError（故意失败，不跳过）。
+      # ref 固定：只有主动「升 ref」时，对岸改动才会影响这里的守卫。
+      - name: Checkout opencli-adapters
+        uses: actions/checkout@v4
+        with:
+          repository: winterswang/opencli-adapters
+          ref: b9a3196260363d70be03e0d7fd653931dc8afc52
+          path: _deps/opencli-adapters
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

@@ -3,7 +3,7 @@
 ## 为什么需要
 
 opencli 单次调用最坏要等 ≈87 秒：插件层限速器的「取锁 2s + 每 30 次一次 45–75s 长停」
-加上一次真实执行（见 `xueqiu-crawler/opencli-adapters/lib/ratelimit.js`）。
+加上一次真实执行（见独立仓 `opencli-adapters/lib/ratelimit.js`）。
 
 而一只股票要发**多次** opencli 调用 —— 预取（讨论 + 公告，讨论空还会 sleep 30s 再重试）、
 资讯 1 次、回复正文最多 `replies_per_stock`(5) 次。这些**都不在**
