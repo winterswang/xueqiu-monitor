@@ -6,6 +6,11 @@
 
 set -euo pipefail
 
+# ── 时区：统计口径是**北京日历日**（issue #77）──
+# cron 环境的 TZ 常常是 UTC，而"今天/昨天"的窗口依赖本地日 —— 2am 那轮正落在
+# 00:00–08:00 这个两套日界线会分歧的窗口内。显式钉住，别依赖宿主默认。
+export TZ="${TZ:-Asia/Shanghai}"
+
 # ── PROJECT_DIR: 动态计算，禁止硬编码绝对路径 ──
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOCK_FILE="$PROJECT_DIR/.monitor_running.lock"

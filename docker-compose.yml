@@ -7,4 +7,6 @@ services:
       - ./etc:/app/etc:ro
       - ./data:/app/data
     environment:
+      # 统计口径是北京日历日（issue #77）；显式声明，别依赖宿主机/基础镜像的默认时区
+      - TZ=Asia/Shanghai
       - FEISHU_WEBHOOK_URL=
