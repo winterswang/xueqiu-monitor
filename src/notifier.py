@@ -412,9 +412,16 @@ def dispatch_messages_tracked(
         unsent: list[str] = []
         for i, msg in enumerate(messages):
             card = cards[i] if cards and i < len(cards) else None
-            ok = _send_via_lark_cli(msg, lark_chat_id,
-                                    push_timeout=push_timeout, max_retries=max_retries,
-                                    card=card)
+            if card:
+                ok = _send_via_lark_cli(
+                    msg, lark_chat_id,
+                    push_timeout=push_timeout, max_retries=max_retries, card=card,
+                )
+            else:
+                ok = _send_via_lark_cli(
+                    msg, lark_chat_id,
+                    push_timeout=push_timeout, max_retries=max_retries,
+                )
             if ok:
                 results.append("lark")
             else:
