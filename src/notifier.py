@@ -41,6 +41,7 @@ _TYPE_LABELS = {
 # ── Entry points exposed to cli.py ────────────────────────────
 __all__ = [
     "format_immediate_alert_message", "format_digest_message",
+    "format_immediate_alert_card", "format_digest_card", "format_health_card",
     "dispatch_messages", "generate_daily_report",
 ]
 
@@ -49,7 +50,7 @@ __all__ = [
 # ════════════════════════════════════════════════════════
 
 def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
-    """Build Feishu interactive card for a single alert with key data fields."""
+    """Build a Feishu interactive-card envelope for one alert."""
     priority_emoji = _PRIORITY_EMOJI
     type_labels = _TYPE_LABELS
     emoji = priority_emoji.get(alert.priority, "⚪")
@@ -92,6 +93,50 @@ def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
                         {"tag": "plain_text", "content": f"触发时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(alert.alert_time))}"}
                     ],
                 },
+            ],
+        },
+    }
+
+
+def format_immediate_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
+    """Return the interactive card envelope used by direct Feishu delivery."""
+    return _format_alert_card(alert, key_data)
+
+
+def format_digest_card(alerts: list[ChangeAlert]) -> dict:
+    """Format a P1 digest as a Feishu interactive card."""
+    lines = [
+        f"• {a.stock_code} Z={a.z_score:.1f} | {_TYPE_LABELS.get(a.alert_type, a.alert_type)}"
+        for a in alerts
+    ]
+    lines.append(f"\n共 {len(alerts)} 条异常")
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": "舆情异常汇总"},
+                "template": "blue",
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
+            ],
+        },
+    }
+
+
+def format_health_card(message: str) -> dict:
+    """Wrap the health-gate message in a Feishu interactive card."""
+    # The markdown formatter already includes the alert headline; keep it in
+    # the card body so the file fallback remains byte-for-byte compatible.
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": "爬取健康告警"},
+                "template": "red",
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": message}}
             ],
         },
     }
@@ -239,8 +284,9 @@ def _lark_cli_available() -> tuple[bool, str]:
 
 
 def _send_via_lark_cli(text: str, chat_id: str,
-                       push_timeout: int = 30, max_retries: int = 0) -> bool:
-    """Send a single markdown message via lark-cli.
+                       push_timeout: int = 30, max_retries: int = 0,
+                       card: dict | None = None) -> bool:
+    """Send a Markdown post or interactive card via lark-cli.
 
     Args:
         push_timeout: subprocess timeout in seconds (from notification.push_timeout).
@@ -250,15 +296,27 @@ def _send_via_lark_cli(text: str, chat_id: str,
     """
     for attempt in range(max_retries + 1):
         try:
+            command = ["lark-cli", "im", "+messages-send", "--chat-id", chat_id]
+            if card:
+                # CLI --content expects the interactive card body, not the
+                # outer {msg_type, card} API envelope used by our formatter.
+                content = card.get("card", card)
+                command.extend([
+                    "--msg-type", "interactive",
+                    "--content", json.dumps(content, ensure_ascii=False, separators=(",", ":")),
+                ])
+            else:
+                command.extend(["--markdown", text])
+            command.extend(["--as", "bot"])
             result = subprocess.run(
-                ["lark-cli", "im", "+messages-send",
-                 "--chat-id", chat_id,
-                 "--markdown", text,
-                 "--as", "bot"],
+                command,
                 capture_output=True, text=True, timeout=push_timeout,
             )
             if result.returncode == 0:
-                logger.info(f"lark-cli 消息发送成功: chat_id={chat_id[:12]}...")
+                kind = "interactive card" if card else "markdown post"
+                logger.info(
+                    f"lark-cli {kind} 发送成功: chat_id={chat_id[:12]}..."
+                )
                 return True
             else:
                 logger.warning(f"lark-cli 发送失败 (attempt {attempt+1}): {result.stderr[:200]}")
@@ -280,6 +338,7 @@ def dispatch_messages(
     lark_chat_id: str | None = None,
     push_timeout: int = 30,
     max_retries: int = 0,
+    cards: list[dict] | None = None,
 ) -> int:
     """Dispatch messages via the best available channel.
 
@@ -313,7 +372,7 @@ def dispatch_messages(
         else:
             results = dispatch_messages_tracked(
                 messages, pending_path, mode="lark_cli", lark_chat_id=lark_chat_id,
-                push_timeout=push_timeout, max_retries=max_retries,
+                push_timeout=push_timeout, max_retries=max_retries, cards=cards,
             )
             return len(results)
 
@@ -329,6 +388,7 @@ def dispatch_messages_tracked(
     lark_chat_id: str | None = None,
     push_timeout: int = 30,
     max_retries: int = 0,
+    cards: list[dict] | None = None,
 ) -> list[str]:
     """逐条投递,返回与 messages 对齐的通道标记("lark"|"file")。
 
@@ -350,9 +410,11 @@ def dispatch_messages_tracked(
 
     if use_lark and lark_chat_id:
         unsent: list[str] = []
-        for msg in messages:
+        for i, msg in enumerate(messages):
+            card = cards[i] if cards and i < len(cards) else None
             ok = _send_via_lark_cli(msg, lark_chat_id,
-                                    push_timeout=push_timeout, max_retries=max_retries)
+                                    push_timeout=push_timeout, max_retries=max_retries,
+                                    card=card)
             if ok:
                 results.append("lark")
             else:

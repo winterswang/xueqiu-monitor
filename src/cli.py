@@ -579,6 +579,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     p2_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P2"]
 
     pending_messages: list[str] = []
+    pending_cards: list[dict] = []
 
     if not dry_run:
         def _key_data_for(alert):
@@ -614,13 +615,16 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         # 台账在 dispatch 后按实际通道回写(P0-3, 20261009: 此前先记 sent 再投递,失败也显示已发)
         p0_msgs: list[tuple[object, str]] = []
         for alert in p0_alerts:
-            p0_msgs.append((alert, notifier.format_immediate_alert_message(alert, _key_data_for(alert))))
+            key_data = _key_data_for(alert)
+            p0_msgs.append((alert, notifier.format_immediate_alert_message(alert, key_data)))
+            pending_cards.append(notifier.format_immediate_alert_card(alert, key_data))
         pending_messages.extend(msg for _, msg in p0_msgs)
 
         # P1: format digest message
         p1_digest = notifier.format_digest_message(p1_alerts) if p1_alerts else None
         if p1_digest:
             pending_messages.append(p1_digest)
+            pending_cards.append(notifier.format_digest_card(p1_alerts))
         # Dispatch via lark-cli or file fallback; 台账按实际通道回写(lark→sent, file→fallback)
         if pending_messages:
             channels = notifier.dispatch_messages_tracked(
@@ -629,6 +633,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
                 push_timeout=cfg.notification.get("push_timeout", 30),
                 max_retries=cfg.notification.get("max_retries", 0),
+                cards=pending_cards,
             )
             for i, (alert, _msg) in enumerate(p0_msgs):
                 db.insert_push(db_path, PushHistory(
@@ -716,6 +721,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 lark_chat_id=cfg.notification.get("lark_chat_id") or None,
                 push_timeout=cfg.notification.get("push_timeout", 30),
                 max_retries=cfg.notification.get("max_retries", 0),
+                cards=[notifier.format_health_card(health_msg)],
             )
             logger.warning(
                 f"爬取健康异常 status={health_status} success_rate={success_rate:.0%} posts_coverage={coverage:.0%} → 已写入待发送消息"
