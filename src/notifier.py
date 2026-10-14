@@ -42,7 +42,7 @@ _TYPE_LABELS = {
 __all__ = [
     "format_immediate_alert_message", "format_digest_message",
     "format_immediate_alert_card", "format_digest_card", "format_health_card",
-    "dispatch_messages", "generate_daily_report",
+    "dispatch_messages", "generate_daily_report", "send_card_now",
 ]
 
 # ════════════════════════════════════════════════════════
@@ -140,6 +140,32 @@ def format_health_card(message: str) -> dict:
             ],
         },
     }
+
+
+def send_card_now(title: str, message: str, color: str = "red",
+                  chat_id: str = "", push_timeout: int = 30) -> bool:
+    """立刻直发一张卡片,返回是否成功(shell wrapper 用的入口)。
+
+    与 ``dispatch_messages_tracked`` 的区别: 不走台账、不落回退文件,只做一次直发
+    —— cron_healthgate.sh 这类 bash 包装的失败告警用它,失败时由调用方回退纯文本。
+    """
+    if not chat_id:
+        logger.warning("send_card_now: 缺少 chat_id")
+        return False
+    card = {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": color,
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": message}}
+            ],
+        },
+    }
+    return _send_via_lark_cli(message, chat_id, push_timeout=push_timeout, card=card)
 
 
 # ════════════════════════════════════════════════════════
