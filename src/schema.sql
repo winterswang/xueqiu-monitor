@@ -240,3 +240,58 @@ CREATE INDEX IF NOT EXISTS idx_ann_snapshot ON announcements(snapshot_id);
 -- (如"月度经营数据""股份回购进展")全部被 INSERT OR IGNORE 丢弃 ——
 -- 实测 9/13 每只股票抓到 50 条公告、当天新增 0 行, 公告信号实际是断的。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ann_title_date ON announcements(stock_code, ann_title, ann_date);
+
+-- ════════════════════════════════════════════════════════
+-- options-sense (方向 8): 期权日频聚合与合约快照 — 2026-10-15
+-- 聚合行: 一股一日一行 (美股 CBOE / Longbridge 回填; 港股 Phase 2 HKEX)
+-- 合约行: 一股一日一合约一行, 仅留通过报价过滤闸的合约
+-- ════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS options_daily (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code    TEXT    NOT NULL,
+    stat_date     INTEGER NOT NULL,                  -- unix 本地日 00:00 (local_day_start)
+    call_volume   INTEGER,
+    put_volume    INTEGER,
+    call_oi       INTEGER,
+    put_oi        INTEGER,
+    pcr_volume    REAL,
+    pcr_oi        REAL,
+    atm_iv        REAL,                              -- 美股=CBOE iv30(%); 港股=ATM 合约 iv(%)
+    iv_percentile REAL,                              -- detector 写回 (0~100)
+    premium_yield REAL,                              -- ATM call 权利金率年化 (%)
+    max_pain      REAL,
+    wall_call     REAL,                              -- call OI 最大行权价
+    wall_put      REAL,                              -- put OI 最大行权价
+    z_pcr_oi      REAL,                              -- detector 写回
+    z_volume      REAL,                              -- detector 写回
+    source        TEXT NOT NULL DEFAULT 'cboe'       -- cboe/longbridge/hkex
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_options_daily_unique
+    ON options_daily(stock_code, stat_date, source);
+CREATE INDEX IF NOT EXISTS idx_options_daily_stock
+    ON options_daily(stock_code, stat_date);
+
+CREATE TABLE IF NOT EXISTS options_contracts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code  TEXT    NOT NULL,
+    snap_date   INTEGER NOT NULL,                    -- unix 本地日 00:00
+    contract_id TEXT    NOT NULL,                    -- CBOE: PDD261016C00080000 / HKEX: oID
+    expiry      TEXT    NOT NULL,                    -- YYYY-MM-DD
+    strike      REAL    NOT NULL,
+    cp          TEXT    NOT NULL,                    -- C/P
+    last        REAL,
+    bid         REAL,
+    ask         REAL,
+    volume      INTEGER,
+    oi          INTEGER,
+    iv          REAL,                                -- (%)
+    delta       REAL,
+    gamma       REAL,
+    theta       REAL,
+    vega        REAL,
+    premium_pct REAL,                                -- mid/ask ÷ 标的价 ×100
+    moneyness   REAL,                                -- (strike/spot - 1) ×100
+    UNIQUE(stock_code, snap_date, contract_id)
+);
+CREATE INDEX IF NOT EXISTS idx_options_contracts_stock
+    ON options_contracts(stock_code, snap_date);

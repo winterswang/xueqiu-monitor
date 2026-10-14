@@ -16,4 +16,5 @@ output/
 htmlcov/
 etc/config.local.json
 data/watchlist.json
+data/hk_option_classes.json
 DAILY_LOG.md
