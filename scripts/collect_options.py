@@ -161,6 +161,20 @@ def _run_hk(cfg: Config, stocks: list[str], dry_run: bool) -> int:
     )
 
 
+def emit_complete(ok: bool, error: str = "") -> None:
+    """输出 cindy-script/1 协议帧 —— script 模式的 stdout 只认这个。
+
+    缺了它调度器会判「script exited without a complete frame」并把本轮记成
+    failed，哪怕活儿其实干成了。所有诊断输出必须走 stderr（logging 默认即
+    如此），stdout 上只允许这一行。
+    """
+    frame: dict = {"protocol": "cindy-script/1", "type": "complete"}
+    if not ok:
+        frame["ok"] = False
+        frame["error"] = error or "failed"
+    print(json.dumps(frame, ensure_ascii=False), flush=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-c", "--config", default="etc/config.json")
@@ -173,6 +187,7 @@ def main() -> int:
     cfg = Config.from_file(args.config)
     if not (cfg.options or {}).get("enabled", True):
         logger.info("options.enabled=false, 跳过")
+        emit_complete(True)
         return 0
 
     stocks = load_report_stocks(_report_config_path(cfg))
@@ -187,6 +202,7 @@ def main() -> int:
         rc |= _run_us(cfg, stocks, args.skip_backfill, args.dry_run)
     if args.market in ("hk", "both"):
         rc |= _run_hk(cfg, stocks, args.dry_run)
+    emit_complete(rc == 0, "" if rc == 0 else f"options {args.market} 采集未全部成功")
     return rc
 
 

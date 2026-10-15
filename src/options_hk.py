@@ -482,6 +482,15 @@ def collect_hk(
             "skipped": "no_dtop",
         }
     day, zip_bytes = found
+    expected = trade_day or datetime.now().date()
+    if day != expected:
+        # 回退到更早的一天必须看得见 —— 否则「今天还没发布 → 静默再采一遍昨天」
+        # 会表现成「跑了、退 0、库里没有今天的数据」，事后无从判断。
+        logger.warning(
+            f"DTOP 回退: 期望 {expected.isoformat()} 的实际取到 {day.isoformat()}"
+            f"（当日尚未发布或非交易日），本轮按 {day.isoformat()} 采集"
+        )
+    logger.info(f"DTOP 交易日 = {day.isoformat()} ({len(zip_bytes)} bytes)")
     raw = extract_dtop_raw(zip_bytes)
     if raw is None:
         raise RuntimeError("DTOP zip 内未找到 *_opt_dtl_all.raw")
