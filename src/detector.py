@@ -9,6 +9,7 @@ Phase 1: rule-based detection, no LLM.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import re
@@ -28,19 +29,37 @@ logger = logging.getLogger(__name__)
 # Z-score detection
 # ════════════════════════════════════════════════════════
 
+# σ 相对下限: 低于「均值的 1e-9 倍」视为无波动。
+_Z_SIGMA_REL_FLOOR = 1e-9
+
+
 def compute_z_score(
     current_value: float,
     historical_values: list[float],
 ) -> float:
     """Compute Z-score: Z = (x - μ) / σ.
 
-    Returns 0.0 if insufficient data (σ=0 or <2 data points).
+    Returns 0.0 if insufficient data (σ 低于浮点噪声量级, 或 <2 个点)。
+
+    为什么不是 `sigma == 0`（2026-10-16 修）:
+        历史值在存库时被 `round(x, 4)` 过, 但写入方与读取方用的是**同一个**
+        round 结果 —— 若一批语料完全相同, 历史里就是 N 个**逐位相同**的值,
+        σ 精确为 0, `== 0` 能挡住。
+
+        真正漏掉的是**混合精度**的序列: 只要有一个值是原始未 round 的浮点,
+        它与其余值就可能只差 1 个 ULP —— σ 变成 ~1e-17 而不是 0。此时若分子
+        又来自精度不对称(见 cli.py: 拿**未 round** 的当前值去比 **round 过**的
+        历史), 分子可达 5e-5。两者相除 z ≈ 5e-5 / 5e-17 ≈ 1e12。
+
+        实证: 库里 5 条 SPOT.US `hot_word_surge` z=6.5069e11 (2026-09-03~08),
+        反推需 σ≈5.78e-17 且 curr-μ≈3.76e-5 —— 与「ULP 级 σ + round 误差量级
+        的分子」完全吻合, 且 5 次都真的推送了出去。
     """
     if len(historical_values) < 2:
         return 0.0
     mu = np.mean(historical_values)
     sigma = np.std(historical_values, ddof=1)  # sample std
-    if sigma == 0:
+    if sigma <= _Z_SIGMA_REL_FLOOR * max(abs(float(mu)), 1e-12):
         return 0.0
     return float((current_value - mu) / sigma)
 
@@ -309,6 +328,27 @@ def compute_tfidf(
         return []
 
 
+# 「历史充足」至少要跨这么多**个不同自然日**（不是行数）
+HOT_WORD_MIN_HISTORY_DAYS = 3
+
+
+def hot_word_history_days(
+    historical_events: list[HotWordEvent],
+) -> dict[str, int]:
+    """每个词在历史里出现的**不同自然日**数。
+
+    `len(hist_tfidfs[word])` 数的是**行** —— 同一天内跑多轮 pipeline 会各写一行,
+    于是 3 行可能只来自 1 天,「历史充足」这道门在一天之内就能被满足, 拿单日
+    重复采集当基线算 z (2026-10-16 修)。
+    """
+    days: dict[str, set[str]] = {}
+    for he in historical_events:
+        days.setdefault(he.word, set()).add(
+            datetime.date.fromtimestamp(he.event_time).isoformat()
+        )
+    return {word: len(d) for word, d in days.items()}
+
+
 def detect_hot_word_emergence(
     stock_code: str,
     curr_posts_texts: list[str],
@@ -336,6 +376,7 @@ def detect_hot_word_emergence(
             hist_tfidfs[he.word] = []
         hist_tfidfs[he.word].append(he.tfidf_score)
 
+    hist_days = hot_word_history_days(historical_events)
     alerts = []
     for word, score in curr_tfidf.items():
         # Layer 2: dynamic pre-filters (run before Z-score to prevent false alerts)
@@ -347,9 +388,12 @@ def detect_hot_word_emergence(
             continue
 
         hist = hist_tfidfs.get(word, [])
-        if len(hist) < 3:  # need some history for meaningful Z-score
+        # 门按「不同自然日」而非行数; 比较时把当前值 round 到与历史同精度 ——
+        # 历史存的是 round(x,4), 拿原始值去比会凭空多出一个 round 误差量级的
+        # 分子 (~5e-5), 与 ULP 级 σ 相除就是 1e12 量级的假 z (2026-10-16)。
+        if hist_days.get(word, 0) < HOT_WORD_MIN_HISTORY_DAYS:
             continue
-        z = compute_z_score(score, hist)
+        z = compute_z_score(round(score, 4), hist)
         if z > 2.0:
             alerts.append(ChangeAlert(
                 stock_code=stock_code,
