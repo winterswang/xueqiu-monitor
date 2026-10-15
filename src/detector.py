@@ -64,6 +64,18 @@ def compute_z_score(
     return float((current_value - mu) / sigma)
 
 
+def has_activity_signal(posts_count: int) -> bool:
+    """0 帖不构成任何情绪/讨论量信号。
+
+    风控页 / 登录失效 / 超时 / 水位过滤 都产出**空结果**而非异常, 而 crawler 把
+    空结果无条件写成 `status="success"`、`sentiment_avg=0.0`。若把 0.0 喂进
+    sentiment_shift 检测, 就是拿「抓不到」去比历史(约 +0.3), 凭空推出情感突变
+    (2026-10-16 修: 库里有 74 条「0 帖却记 success」的快照, 其中 9 例触发了
+    sentiment_shift)。
+    """
+    return posts_count > 0
+
+
 def detect_post_spike(
     curr_posts_count: int,
     historical_stats: list[SentimentStat],
