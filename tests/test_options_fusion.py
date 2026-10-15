@@ -157,7 +157,7 @@ class TestZeroPostStillShowsOptions:
         db.upsert_option_daily(db_path, _opt())
         res = rg.analyze_stock("PDD.US", "拼多多", db_path, "2026-10-15", {})
         assert res["analyzed"] is False
-        assert "- 期权读数:" in res["section"]
+        assert "- 期权读数" in res["section"]
         assert "PCR-仓 0.73" in res["section"]
 
     def test_placeholder_has_no_options_line_without_data(self, tmp_path: Path):
@@ -188,3 +188,37 @@ class TestTrailingSectionRemoved:
         note = rg._hk_no_option_note(db_path, stocks, have)
         assert "布鲁可" in note
         assert "泡泡玛特" not in note  # 有数据的不该被列成「无上市期权」
+
+
+class TestFreshnessGuard:
+    """采集侧写着「不得用旧数据充数」, 报告侧原先没有对应的闸 (2026-10-16)。"""
+
+    def _db(self, tmp_path):
+        db_path = str(tmp_path / "t.db")
+        db.init_db(db_path)
+        db.upsert_option_daily(db_path, _opt())          # stat_date = 2026-10-14
+        return db_path
+
+    def test_fresh_data_passes(self, tmp_path):
+        got = rg.fetch_stock_options(self._db(tmp_path), CODE, ref_date="2026-10-15")
+        assert got is not None and got["pcr_oi"] == 0.73
+
+    def test_stale_data_is_treated_as_no_data(self, tmp_path):
+        # 报告日比读数晚 10 天 → 超过 OPTIONS_MAX_AGE_DAYS(5)
+        got = rg.fetch_stock_options(self._db(tmp_path), CODE, ref_date="2026-10-24")
+        assert got is None, "过期的期权读数必须当作无数据, 不能喂给模型"
+
+    def test_boundary_day_still_passes(self, tmp_path):
+        got = rg.fetch_stock_options(self._db(tmp_path), CODE, ref_date="2026-10-19")
+        assert got is not None, "恰好等于阈值(5 天)时仍应保留"
+
+    def test_no_ref_date_skips_the_guard(self, tmp_path):
+        assert rg.fetch_stock_options(self._db(tmp_path), CODE) is not None
+
+    def test_zero_post_placeholder_carries_date_and_caliber(self, tmp_path):
+        """0 帖占位行原先只给一串裸数字, 读者无从判断是哪天的。"""
+        db_path = self._db(tmp_path)
+        res = rg.analyze_stock("PDD.US", "拼多多", db_path, "2026-10-15", {})
+        assert res["analyzed"] is False
+        assert "期权读数（2026-10-14" in res["section"]
+        assert "CBOE" in res["section"]
