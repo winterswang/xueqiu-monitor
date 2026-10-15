@@ -27,6 +27,9 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 
+# 「落回文件兜底」的告警在这么久内出现过就告警（见 3.5 节的 alert_delivery 检查）。
+UNDELIVERED_ALERT_WINDOW_DAYS = 7
+
 # 「批次还在跑」的判定阈值(秒): 日志在这么久内还被写过才算「运行中」。
 # 实测单批次总耗时 11–24 分钟, 中途静默 >15 分钟已属异常 (见 pipeline_completed
 # 分支的注释)。
@@ -319,6 +322,51 @@ def check(require_daily_report: bool = False) -> None:
     else:
         results.append({"check": "watchlist", "status": FAIL, "detail": "watchlist.json not found"})
         errors.append("watchlist_missing")
+
+    # ── 3.5 告警投递: 落回文件兜底的告警其实无人消费（2026-10-16） ──
+    # `notifier.dispatch_messages_tracked` 在 lark-cli 不可用或发送失败时, 把没发出去
+    # 的消息写进 pending 文件(默认 /tmp/xueqiu_monitor_pending.json)并记
+    # status='fallback' —— 但**全仓没有任何消费者**读那个文件: 文档写「由外部调度器
+    # 读取」, 实际不存在。也就是说 P0 告警的兜底通道是黑洞。
+    # (截至 2026-10-16 该路径从未真正走过 —— 库里 fallback 记录为 0 —— 所以这是
+    #  潜在缺陷; 但正因为它「只会静默不投递」, 不做成检查项就永远不会被发现。)
+    if db_path.exists():
+        import sqlite3
+        import time as _time
+        since = int(_time.time()) - UNDELIVERED_ALERT_WINDOW_DAYS * 86400
+        try:
+            conn = sqlite3.connect(str(db_path))
+            has_tbl = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='push_history'"
+            ).fetchone()
+            if has_tbl is None:
+                # 表还没有 = 这台库还没产生过告警, 不是问题(测试用的临时库也走这条)。
+                conn.close()
+                results.append({"check": "alert_delivery", "status": OK,
+                                "detail": "尚无 push_history 表"})
+                n_undelivered = None
+            else:
+                n_undelivered = conn.execute(
+                    "SELECT COUNT(*) FROM push_history "
+                    "WHERE status='fallback' AND push_time >= ?",
+                    (since,),
+                ).fetchone()[0]
+                conn.close()
+            if n_undelivered:
+                results.append({
+                    "check": "alert_delivery", "status": WARN,
+                    "detail": (f"{n_undelivered} 条告警落回文件兜底但无人消费"
+                               f"(近 {UNDELIVERED_ALERT_WINDOW_DAYS} 天)"),
+                })
+                errors.append("undelivered_alerts")
+            else:
+                results.append({
+                    "check": "alert_delivery", "status": OK,
+                    "detail": f"近 {UNDELIVERED_ALERT_WINDOW_DAYS} 天无落回文件兜底的告警",
+                })
+        except sqlite3.Error as exc:
+            results.append({"check": "alert_delivery", "status": WARN,
+                            "detail": f"读取失败: {exc}"})
 
     # ── 3.5 按信息源检查抓取失败（news / notices / discussions / replies / stock）──
     # 之前只统计讨论数，资讯整源挂掉也报 healthy；这里把源级失败显式列出来。
