@@ -280,6 +280,15 @@ _ALERT_LABELS = {
     "hot_word_surge": "热词飙升",
     "sentiment_shift": "情感突变",
     "new_announcement": "新公告",
+    # 期权信号 (options_detector): 不补这些就会把英文类型名原样写进
+    # prompt 与「今日要点」(2026-10-15)
+    "options_pcr_spike": "期权 PCR 异常走高",
+    "options_pcr_call_surge": "期权 call 押注激增 (PCR 异常走低)",
+    "options_volume_spike": "期权成交量激增",
+    "options_iv_extreme": "期权 IV 极端",
+    "options_event_heat": "事件博弈升温",
+    "options_divergence_top": "舆情-期权背离 (偏顶)",
+    "options_divergence_bottom": "舆情-期权背离 (偏底)",
 }
 
 
@@ -312,7 +321,8 @@ def _alert_summary(alert: dict) -> str:
             f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
             f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
         )
-    return d.get("title") or _ALERT_LABELS.get(t, t)
+    # signal 是 options_detector 写进 detail 的人读文案; 有就用它, 比标签更具体
+    return d.get("title") or d.get("signal") or _ALERT_LABELS.get(t, t)
 
 
 def fetch_stock_announcements(
@@ -348,6 +358,29 @@ def fetch_stock_announcements(
         ]
     finally:
         conn.close()
+
+
+def fetch_stock_options(db_path: str, stock_code: str) -> Optional[dict]:
+    """该标的最近一期的期权聚合读数 (无期权/未采集 → None)。
+
+    排序必须是 `stat_date DESC, source ASC`: cboe 行带 IV 与期权墙/MaxPain,
+    longbridge 行只有 PCR —— 同一天两源都在时选错就会让 IV 与墙凭空消失。
+    因此**不能**用 db.get_latest_option_daily()（它不带 source 排序）。
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT * FROM options_daily WHERE stock_code=?
+               ORDER BY stat_date DESC, source ASC LIMIT 1""",
+            (stock_code,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {k: row[k] for k in row.keys()}
 
 
 def fetch_hot_words(
@@ -556,6 +589,73 @@ def _get_llm_client():
     return OpenAI(api_key=api_key, base_url=base_url, max_retries=1, timeout=300)
 
 
+# 期权段的解读指南 —— 每只股票注入同一份。模型不天然懂期权语义：不点明它
+# 要么忽略这段素材、要么把数字复述一遍。用户 2026-10-15 明确要求：
+# 「让 LLM 感知到期权数据的价值和目标 —— 为了搞清楚企业未来一段时间的定价
+#  和走势方向」。所以这里既写"拿来干什么"，也写"每一项怎么读"。
+_OPTIONS_GUIDE = """期权定价的是**未来**（标的未来一段时间的波动预期与价位共识），
+与上面帖子/资讯/公告对**已发生事件**的描述互为补充。请用本节数据回答：
+**市场对未来在给什么价位定价、方向偏向哪边**，并在下面的判断里给出你的读法。
+
+各项怎么读：
+- PCR-仓（put/call 持仓比）：高 = 押注下跌/对冲的仓位更重；低 = 偏多
+- PCR-量：当日新增交投的方向偏好，比持仓更即时
+- z 值：相对该股**自身历史**的偏离，|z| ≥ 2 才算真的异常
+- IV / IV 分位：市场为未来波动定的价；分位高 = 不确定性定价高（常见于事件前）
+- 收租率（年化）：卖 ATM call 的权利金收益率，也是「市场愿为这段波动付多少钱」
+- Call 墙 / Put 墙：持仓最集中的行权价，常成为上方阻力 / 下方支撑，也容易钉住价格
+- MaxPain：期权卖方损失最小的到期价位，临近到期常表现为引力位"""
+
+# 各数据源的口径说明 —— 防模型把它当成实时盘口
+_OPTIONS_CALIBER = {
+    "cboe": "美股 CBOE 快照, 约 15 分钟延迟, OI 为 T-1",
+    "hkex": "港股 HKEX 当日收盘清算值, 无 IV",
+    "longbridge": "Longbridge 聚合, 仅 PCR 口径",
+}
+
+
+def _options_readings(opt: dict) -> str:
+    """期权读数 → 一行紧凑文本（prompt 段与 0 帖占位行共用）。"""
+    parts: list[str] = []
+    if opt.get("pcr_oi") is not None:
+        z = opt.get("z_pcr_oi")
+        parts.append(
+            f"PCR-仓 {opt['pcr_oi']:.2f}"
+            + (f" (z={z:+.1f})" if z is not None else "")
+        )
+    if opt.get("pcr_volume") is not None:
+        parts.append(f"PCR-量 {opt['pcr_volume']:.2f}")
+    if opt.get("atm_iv") is not None:
+        iv = f"IV {opt['atm_iv']:.1f}%"
+        if opt.get("iv_percentile") is not None:
+            iv += f" (分位 {opt['iv_percentile']:.0f}%)"
+        parts.append(iv)
+    if opt.get("premium_yield") is not None:
+        parts.append(f"收租率(年化) {opt['premium_yield']:.0f}%")
+    walls = []
+    if opt.get("wall_call") is not None:
+        walls.append(f"Call 墙 {opt['wall_call']:g}")
+    if opt.get("wall_put") is not None:
+        walls.append(f"Put 墙 {opt['wall_put']:g}")
+    if walls:
+        parts.append(" / ".join(walls))
+    if opt.get("max_pain") is not None:
+        parts.append(f"MaxPain {opt['max_pain']:g}")
+    return " · ".join(parts)
+
+
+def _format_options_block(opt: dict) -> str:
+    """期权读数 → prompt 的「## 期权数据」段（目标说明 + 解读指南 + 实际读数）。"""
+    dstr = datetime.fromtimestamp(opt["stat_date"]).strftime("%Y-%m-%d")
+    caliber = _OPTIONS_CALIBER.get(opt.get("source") or "", str(opt.get("source") or ""))
+    readings = _options_readings(opt) or "（本期无有效读数）"
+    return (
+        f"## 期权数据（{dstr}，{caliber}）\n"
+        f"{_OPTIONS_GUIDE}\n\n"
+        f"{readings}"
+    )
+
+
 def _build_analysis_prompt(
     stock_name: str,
     stock_code: str,
@@ -570,6 +670,7 @@ def _build_analysis_prompt(
     news_details: Optional[dict[str, str]] = None,
     tier: str = "deep",
     max_posts: Optional[int] = None,
+    options: Optional[dict] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -586,6 +687,9 @@ def _build_analysis_prompt(
             actual content instead of a headline.
         tier: v2 增量档位 (deep/std/flat) — 只切换输出指令模板,
             不决定是否分析 (全部股票照常调用)。
+        options: options_daily 的最近一期读数 (fetch_stock_options)。有则注入
+            「## 期权数据」段 —— 期权定价未来, 与帖子的"已发生"互补。None 时
+            整段不出现 (A 股 / 无上市期权的港股 / 未采集), 不留空段。
     """
     news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
@@ -696,7 +800,8 @@ def _build_analysis_prompt(
     else:
         hot_words_text = ", ".join(hot_words) if hot_words else "无"
 
-    return f"""你是雪球舆情分析师。请分析以下「{stock_name}（{stock_code}）」{scope}的雪球讨论。
+    options_block = f"\n{_format_options_block(options)}\n" if options else ""
+    return f"""你是股票分析师。请分析以下「{stock_name}（{stock_code}）」{scope}的雪球讨论，并结合资讯/公告与期权市场数据 —— 前者描述**已发生**的事，期权那段定价的是**未来**，两者要一起用。
 
 ## 情感数据
 {trend_text}
@@ -706,7 +811,7 @@ def _build_analysis_prompt(
 
 ## 今日异常信号
 {alert_text}
-
+{options_block}
 ## 今日公告（官方披露，附详情页链接）
 {ann_text}
 
@@ -718,6 +823,17 @@ def _build_analysis_prompt(
 
 ---
 {_tier_instructions(tier, scope)}"""
+
+
+# 期权数据的输出要求 —— 必须落到"未来方向"上, 否则模型只会把数字复述一遍
+# (用户 2026-10-15: "为了搞清楚企业未来一段时间的定价和走势方向")。
+_OPTIONS_ASK_DEEP = """⚠️ 若素材里有「期权数据」段：在「💡 值得关注的判断」里给一条**期权读法** ——
+用期权定价去回答**未来一段时间市场在给什么价位定价、方向偏向哪边、有无关键行权价
+在钉住价格**，并与上面的舆情判断**对照**：一致时点明共振，背离时另起一句明确指出
+（例：舆情看多，但 put 仓位与 IV 分位同步走高）。**不要只复述数字。**"""
+
+_OPTIONS_ASK_STD = """⚠️ 若素材里有「期权数据」段：在「情感读数」一行里带上**期权给出的未来方向**
+（市场在给什么价位定价、偏向哪边），与舆情情绪对照；有背离就点出来。**不要只复述数字。**"""
 
 
 def _tier_instructions(tier: str, scope: str) -> str:
@@ -738,6 +854,8 @@ def _tier_instructions(tier: str, scope: str) -> str:
 ### 情感读数
 一行：结合情感数据（今日分 vs 14日基准）与帖子内容总结情绪
 
+{_OPTIONS_ASK_STD}
+
 ⚠️ 格式要求：
 - 两段标题必须用 `#### `（4 个 #）开头，严禁输出更高级别标题
 - 帖子引用格式统一用 `[编号]`"""
@@ -746,6 +864,8 @@ def _tier_instructions(tier: str, scope: str) -> str:
 
 - 若确有值得注意的新事件/新观点/新风险：用 `#### ` 标题输出简短分析（新增内容 + 情感读数，共 2-4 句）
 - 若{scope}确无增量（纯闲聊/零互动噪音）：只输出一行 `（无新增量）情感分 {scope}读数 X`，不要为了填篇幅编造内容
+
+{_OPTIONS_ASK_STD}
 
 ⚠️ 帖子引用格式统一用 `[编号]`，严禁输出 `#`/`##`/`###` 级别标题"""
     # deep (默认, 兼容旧调用)
@@ -768,6 +888,8 @@ def _tier_instructions(tier: str, scope: str) -> str:
 
 **⭐最有价值观点**（单独一行，供全场要点挑选）：
 `⭐ [股票]一句话观点（引用编号）`
+
+{_OPTIONS_ASK_DEEP}
 
 ⚠️ 素材不足时的例外：若该股当天素材确实极少（例如仅 1-2 帖且零互动、
 无公告/资讯详情），**不要为凑齐小节而编造** —— 只输出「🆕 {scope}新增」
@@ -835,6 +957,10 @@ def analyze_stock(
     min_len = config.get("llm", {}).get("min_post_length", 30)
     content_caps = config.get("llm", {}).get("content_caps")
     day_count = fetch_day_post_count(db_path, stock_code, date_str)
+    # 期权读数与帖子/资讯/公告并列, 一起喂给逐股分析 (期权定价未来, 帖子描述
+    # 已发生)。取在早退分支之前 —— 0 帖标的不调 LLM, 那条占位小节是它唯一的
+    # 可见通道 (2026-10-15 用户要求"每个自选股都看到")。
+    options = fetch_stock_options(db_path, stock_code)
 
     posts = fetch_stock_posts(
         db_path, stock_code, date_str, min_length=min_len,
@@ -870,10 +996,14 @@ def analyze_stock(
         # "平稳股（无新增量，仅读数）"紧凑列表。此前写"今日及近7日无帖子数据。"
         # 没有该前缀, 结果 0 帖的股票被塞进"其他今日有增量的股票"完整小节
         # (2026-09-19 实测: 特斯拉当日/近7日 0 帖, 标题与内容自相矛盾)
+        opt_line = (
+            f"- 期权读数: {_options_readings(options)}\n" if options else ""
+        )
         return {
             "section": (
                 f"#### {stock_name} [{stock_code}]\n\n"
-                f"{caliber}\n\n"
+                f"{caliber}\n"
+                f"{opt_line}\n"
                 f"（无新增量）今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
             ),
             "tier": TIER_FLAT,
@@ -916,6 +1046,7 @@ def analyze_stock(
         max_posts=(
             config.get("llm", {}).get("max_posts_by_tier", {}).get(tier)
         ),
+        options=options,
     )
 
     logger.info(
@@ -1394,102 +1525,28 @@ def _report_window_days(
     return 1 if posts else FALLBACK_MAX_AGE_DAYS
 
 
-def _build_options_section(db_path: str, stocks_cfg: dict) -> str:
-    """期权温度计 (方向 8 Phase 1): 有数据才成节, 全员无数据返回空串。
+def _hk_codes_with_options(db_path: str, stocks_cfg: dict) -> set[str]:
+    """stocks_cfg 的港股里, options_daily 已有数据的那些。
 
-    读数口径如实标注: CBOE ~15 分钟延迟, OI 为 T-1; 期权信号是环境参考。
+    供 _hk_no_option_note 区分「标的压根没上市期权」与「采集漏了」——
+    后者不该被说成前者。
     """
-    import sqlite3  # noqa: PLC0415 — 局部引入, 与既有 SQL 直查风格一致
-
-    rows_out: list[str] = []
-    alert_lines: list[str] = []
-    have_codes: set[str] = set()
+    hk = [c for c in stocks_cfg if c.upper().endswith(".HK")]
+    if not hk:
+        return set()
+    conn = _connect(db_path)
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-    except sqlite3.Error:
-        return ""
-    try:
-        # 告警窗口 = 昨天 18:00 起。日报 19:00 生成, 上游有**两批**采集:
-        #   美股 07:05 当天写告警 → 落在当日 00:00 起的窗口内
-        #   港股 20:00 前一天写告警 → 严格按「当日 00:00 起」会整批落在窗外, 港股信号永不进报
-        # 用 18:00 起可同时覆盖两批, 且不会把上一日的美股告警重复带进来。
-        alert_since = int(datetime.now().replace(
-            hour=18, minute=0, second=0, microsecond=0).timestamp()) - 86400
-        for code in stocks_cfg:
-            row = conn.execute(
-                """SELECT * FROM options_daily WHERE stock_code=?
-                   ORDER BY stat_date DESC, source ASC LIMIT 1""",
-                (code,),
-            ).fetchone()
-            if row is None:
-                continue
-            name = stocks_cfg[code].get("name", code)
-            parts = [f"**{name}**"]
-            if row["pcr_oi"] is not None:
-                z = row["z_pcr_oi"]
-                parts.append(f"PCR-仓 {row['pcr_oi']:.2f}"
-                             + (f" (z={z:+.1f})" if z is not None else ""))
-            if row["pcr_volume"] is not None:
-                parts.append(f"PCR-量 {row['pcr_volume']:.2f}")
-            if row["atm_iv"] is not None:
-                iv = f"IV {row['atm_iv']:.1f}%"
-                if row["iv_percentile"] is not None:
-                    iv += f" (分位 {row['iv_percentile']:.0f}%)"
-                parts.append(iv)
-            if row["premium_yield"] is not None:
-                parts.append(f"收租率(年化) {row['premium_yield']:.0f}%")
-            walls = []
-            if row["wall_call"] is not None:
-                walls.append(f"Call 墙 {row['wall_call']:g}")
-            if row["wall_put"] is not None:
-                walls.append(f"Put 墙 {row['wall_put']:g}")
-            if walls:
-                parts.append(" / ".join(walls))
-            if row["max_pain"] is not None:
-                parts.append(f"MaxPain {row['max_pain']:g}")
-            dstr = datetime.fromtimestamp(row["stat_date"]).strftime("%m-%d")
-            parts.append(f"({dstr})")
-            rows_out.append("- " + " · ".join(parts) + "\n")
-            have_codes.add(code)
-
-        alerts = conn.execute(
-            """SELECT stock_code, alert_type, priority, detail FROM change_alert
-               WHERE alert_type LIKE 'options_%' AND alert_time >= ?
-               ORDER BY priority ASC, alert_time DESC""",
-            (alert_since,),
+        placeholders = ",".join("?" * len(hk))
+        rows = conn.execute(
+            f"""SELECT DISTINCT stock_code FROM options_daily
+                WHERE stock_code IN ({placeholders})""",
+            hk,
         ).fetchall()
-        for a in alerts:
-            if a["stock_code"] not in stocks_cfg:
-                continue
-            try:
-                detail = json.loads(a["detail"]) if a["detail"] else {}
-            except (ValueError, TypeError):
-                detail = {}
-            name = stocks_cfg[a["stock_code"]].get("name", a["stock_code"])
-            icon = "🔴" if a["priority"] == "P0" else "🟡"
-            alert_lines.append(
-                f"- {icon} **{name}** {detail.get('signal', a['alert_type'])}\n"
-            )
+        return {r["stock_code"] for r in rows}
+    except sqlite3.Error:
+        return set()
     finally:
         conn.close()
-
-    if not rows_out:
-        return ""
-    lines = ["## 五、期权温度计\n"]
-    lines.extend(rows_out)
-    if alert_lines:
-        lines.append("\n**期权信号**\n")
-        lines.extend(alert_lines)
-    gap_note = _hk_no_option_note(db_path, stocks_cfg, have_codes)
-    if gap_note:
-        lines.append(gap_note)
-    lines.append(
-        "\n*期权读数为环境参考，不构成操作建议。美股 CBOE ~15 分钟延迟快照，"
-        "OI 为 T-1；港股为 HKEX 收盘清算值、无 IV；口径见 "
-        "plans/options-sense/PLAN.md。*\n"
-    )
-    return "\n" + "".join(lines) + "\n"
 
 
 def _hk_no_option_note(db_path: str, stocks_cfg: dict, have_codes: set[str]) -> str:
@@ -1758,13 +1815,12 @@ def generate_daily_report(
         logger.error(f"主线节失败(不阻塞): {e}")
         mainlines_md = "## 四、持续主线\n\n生成失败。\n"
 
-    # ── Section 5: 期权温度计 (方向 8; 无数据返回空串, 整节省略) ──
-    try:
-        options_md = _build_options_section(db_path, stocks_cfg)
-    except Exception as e:
-        logger.error(f"期权温度计节失败(不阻塞): {e}")
-        options_md = ""
-    options_block = f"\n---\n\n{options_md}\n" if options_md else ""
+    # ── 期权数据已并入逐股分析 (prompt 素材), 不再单列一节 (2026-10-15 用户要求)。
+    # 只留下「哪些自选港股压根没有上市期权」这一条 —— 它是区分"标的没有期权"
+    # 与"采集漏了"的唯一线索, 放进尾注, 信息不丢。
+    hk_gap_note = _hk_no_option_note(
+        db_path, stocks_cfg, _hk_codes_with_options(db_path, stocks_cfg)
+    )
 
     # ── Assemble: 深读 → 标准 → 平稳(紧凑) ──
     deep_codes = sorted(
@@ -1836,6 +1892,8 @@ def generate_daily_report(
     ]
     if sentiment_degradation_note:
         notes.append(sentiment_degradation_note)
+    if hk_gap_note:
+        notes.append(hk_gap_note.strip().lstrip("- ").strip())
     notes_md = "\n".join(f"- {n}" for n in notes)
 
     report = f"""# 📊 自选股舆情日报 {date_str}
@@ -1859,7 +1917,6 @@ def generate_daily_report(
 ---
 
 {mainlines_md}
-{options_block}
 
 ---
 
