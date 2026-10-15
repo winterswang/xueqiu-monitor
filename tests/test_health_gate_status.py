@@ -5,6 +5,7 @@ gate 之前只看 health_check 的退出码, 而 WARN 档退出码是 0 → 真�
 解析错了要么天天误报, 要么把真失败静默掉。
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import health_gate_status  # noqa: E402
 
 OK_REPORT = '{"status": "ok", "errors": [], "checks": [{"check": "a", "status": "ok"}]}'
 WARN_REPORT = '{"status": "warn", "errors": ["no_summary"], "checks": []}'
+FAIL_REPORT = '{"status": "fail", "errors": ["db_missing"], "checks": []}'
 
 
 class TestReportStatus:
@@ -68,11 +70,76 @@ class TestReportStatus:
 
 
 class TestCliContract:
-    """cron_healthgate.sh 靠 stdout 单行 + 退出码 0 取结果."""
+    """cron_healthgate.sh 靠 stdout 单行 + 退出码 0 取结果.
 
-    def test_prints_single_line_and_exits_zero(self, capsys, monkeypatch):
-        import io
+    输入走**参数**而不是 stdin: 本机 cron 有 pipe_to_interpreter 安全扫描
+    (把命令输出 pipe 进解释器 → pending_approval, 无人审批即卡死)。
+    """
 
-        monkeypatch.setattr(sys, "stdin", io.StringIO(WARN_REPORT))
-        assert health_gate_status.main() == 0
-        assert capsys.readouterr().out == "warn\n"
+    def _run(self, capsys, *argv):
+        assert health_gate_status.main(["health_gate_status.py", *argv]) == 0
+        return capsys.readouterr().out.strip()
+
+    def test_status_from_argv(self, capsys):
+        assert self._run(capsys, WARN_REPORT) == "warn"
+
+    def test_no_args_is_fail(self, capsys):
+        assert self._run(capsys) == "fail"
+
+    def test_multiline_json_survives_argv(self, capsys):
+        raw = json.dumps(json.loads(FAIL_REPORT), ensure_ascii=False, indent=2)
+        assert self._run(capsys, raw) == "fail"   # 单参传入, 换行不被吞
+
+    def test_fail_report(self, capsys):
+        assert self._run(capsys, FAIL_REPORT) == "fail"
+
+    def test_fingerprint_mode(self, capsys):
+        assert self._run(capsys, "--fingerprint", WARN_REPORT) == "no_summary"
+
+    def test_truncate_mode_is_char_safe(self, capsys):
+        text = "中文" * 10
+        out = self._run(capsys, "--truncate", "5", text)
+        assert out.startswith("中文中文中")
+        assert "…(已截断)" in out
+
+
+class TestFingerprint:
+    """同一份持续失败在当天各次 gate 上要有**相同**指纹, 否则去重失效、每小时一张卡."""
+
+    BASE = '{"status": "warn", "errors": ["high_failure_rate"], "checks": [' \
+           '{"check": "crawl_failures", "status": "warn", "detail": "9 stocks skipped"},' \
+           '{"check": "db_exists", "status": "ok"}]}'
+
+    def test_detail_changes_do_not_change_fingerprint(self):
+        other = self.BASE.replace("9 stocks skipped", "9 stocks skipped, 3 小时前更新")
+        assert (health_gate_status.fingerprint(self.BASE)
+                == health_gate_status.fingerprint(other))
+
+    def test_new_error_code_changes_fingerprint(self):
+        other = self.BASE.replace('"errors": ["high_failure_rate"]',
+                                 '"errors": ["high_failure_rate", "no_summary"]')
+        assert (health_gate_status.fingerprint(self.BASE)
+                != health_gate_status.fingerprint(other))
+
+    def test_ok_checks_do_not_enter_fingerprint(self):
+        assert "db_exists" not in health_gate_status.fingerprint(self.BASE)
+
+    def test_unparseable_has_stable_fingerprint(self):
+        assert health_gate_status.fingerprint("not json") == "unparseable"
+        assert (health_gate_status.fingerprint("also not json")
+                == health_gate_status.fingerprint("not json"))
+
+
+class TestTruncate:
+    def test_short_text_untouched(self):
+        assert health_gate_status.truncate("短", 5) == "短"
+
+    def test_exactly_limit_untouched(self):
+        assert health_gate_status.truncate("abcde", 5) == "abcde"
+
+    def test_cjk_never_split_mid_character(self):
+        """按字节切会切坏中文 → notify_card.py 侧 UnicodeDecodeError → 卡片静默降级."""
+        text = "中" * 3000
+        out = health_gate_status.truncate(text, 2000)
+        out.encode("utf-8").decode("utf-8")          # 非法 UTF-8 会在这里炸
+        assert len(out) == 2000 + len("\n…(已截断)")

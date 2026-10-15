@@ -27,6 +27,20 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 
+# 「批次还在跑」的判定阈值(秒): 日志在这么久内还被写过才算「运行中」。
+# 实测单批次总耗时 11–24 分钟, 中途静默 >15 分钟已属异常 (见 pipeline_completed
+# 分支的注释)。
+RUNNING_FRESH_SECONDS = 900
+
+# 当日舆情日报产物。2026-10-15: 按 skills 文档的口径, 这份日报在
+# **xueqiu-crawler** 项目里 (不是本仓库) —— cron-ops.md:96 明确写了这一点,
+# 并记录了「占位/最小日报 = 无真实交付」的判据。跨仓路径允许用环境变量覆盖,
+# 便于容器/换机器部署。
+DAILY_REPORT_DIR = Path(
+    os.environ.get("XUEQIU_DAILY_REPORT_DIR")
+    or (PROJECT_ROOT.parent / "xueqiu-crawler" / "data" / "daily_reports")
+)
+
 
 def _get_latest_log() -> Path | None:
     """Get the most recent non-empty log file by modification time.
@@ -205,8 +219,14 @@ def check(require_daily_report: bool = False) -> None:
             if summary_match:
                 with_summary.append(f"{lg.name}:{summary_match.group(1)[:36]}")
                 continue
-            recent = (now_ts - lg.stat().st_mtime) < 3600
-            if pipeline_active and recent:
+            # 「运行中」= 这股批次**自己的**日志还在被写。
+            # 2026-10-15 (review): 不能只看全局进程 —— 任一批次活着就把当天所有
+            # 未收尾日志都算「运行中」的话, 上一组崩溃(日志停在 45 分钟前)会被
+            # 同一时段另一组的进程掩盖, gate 从此永久静默放行。所以收紧为
+            # 「进程活着 **且** 这股日志 15 分钟内还在写」; 实测单批次总耗时
+            # 11–24 分钟, 中途静默 >15 分钟已属异常。
+            still_writing = (now_ts - lg.stat().st_mtime) < RUNNING_FRESH_SECONDS
+            if pipeline_active and still_writing:
                 without_summary.append(f"{lg.name}(运行中)")
             else:
                 without_summary.append(lg.name)
@@ -246,33 +266,47 @@ def check(require_daily_report: bool = False) -> None:
         results.append({"check": "log_exists", "status": WARN, "detail": "No run log found"})
 
     # ── 2.5 当日舆情日报产物 (仅收尾巡检要求) ──
-    # 2026-10-15: 之前 cron 巡检 prompt 里写的是「日报缺失或为空视为失败」,
-    # 但脚本根本不读 sys.argv、也没有这一项 —— 实测 `--require-daily-report`
-    # 是空转 flag (skills/data-science/xueqiu-monitor/references/cron-ops.md:96),
-    # 只能靠人工核验 + 手工往卡片表格补行。这里把它做实。
+    # 2026-10-15: 之前 cron 巡检 prompt 声称「日报缺失或为空视为失败」, 但脚本
+    # 根本不读 sys.argv、也没有这一项 —— `--require-daily-report` 是空转 flag
+    # (skills/data-science/xueqiu-monitor/references/cron-ops.md:96), 只能人工
+    # 核验 + 手工往卡片表格补行。这里把它做实。
+    # 判据抄 cron-ops.md:96-99 的三连: 存在 → 非空 → 不是「今日无新增」占位形态。
     # 白天批间巡检 (14:25–18:25) 不传此参: 那时日报本来还没生成。
     if require_daily_report:
-        report_path = Path(PROJECT_ROOT) / "data" / "daily_reports" / (
-            datetime.date.today().isoformat() + "-sentiment.md"
-        )
-        try:
-            size = report_path.stat().st_size if report_path.is_file() else None
-        except OSError as exc:
-            results.append({"check": "daily_report", "status": FAIL,
-                            "detail": f"读取失败: {exc}"})
-            errors.append("daily_report_invalid")
+        report_path = DAILY_REPORT_DIR / (datetime.date.today().isoformat() + ".md")
+        if not DAILY_REPORT_DIR.is_dir():
+            # 跨仓路径不存在 = 本机/容器没配好, 而不是「今天没交付」。报 WARN 并
+            # 指路, 免得在没有 crawler 检出的环境里天天红灯。
+            results.append({"check": "daily_report", "status": WARN,
+                            "detail": f"日报目录不存在: {DAILY_REPORT_DIR}"
+                                      f"（用 XUEQIU_DAILY_REPORT_DIR 指定）"})
         else:
-            if size is None:
+            try:
+                size = report_path.stat().st_size if report_path.is_file() else None
+                head = report_path.read_text(encoding="utf-8", errors="replace")[:2000] if size else ""
+            except OSError as exc:
                 results.append({"check": "daily_report", "status": FAIL,
-                                "detail": f"未生成今日文件 {report_path.name}"})
-                errors.append("daily_report_missing")
-            elif size == 0:
-                results.append({"check": "daily_report", "status": FAIL,
-                                "detail": f"{report_path.name} 为空"})
+                                "detail": f"读取失败: {exc}"})
                 errors.append("daily_report_invalid")
             else:
-                results.append({"check": "daily_report", "status": OK,
-                                "detail": f"{report_path.name} ({size} bytes)"})
+                if size is None:
+                    results.append({"check": "daily_report", "status": FAIL,
+                                    "detail": f"未生成今日文件 {report_path.name}"})
+                    errors.append("daily_report_missing")
+                elif size == 0:
+                    results.append({"check": "daily_report", "status": FAIL,
+                                    "detail": f"{report_path.name} 为空"})
+                    errors.append("daily_report_invalid")
+                elif "今日无新增" in head:
+                    # 「今日无新增」最小日报: 文件在, 但没有真实内容 —— cron-ops.md
+                    # 判它是无交付 (crawler PR #54 正是为了让这天仍落一份最小日报)。
+                    results.append({"check": "daily_report", "status": FAIL,
+                                    "detail": f"{report_path.name} 是「今日无新增」占位形态 "
+                                              f"({size} bytes), 无真实内容"})
+                    errors.append("daily_report_placeholder")
+                else:
+                    results.append({"check": "daily_report", "status": OK,
+                                    "detail": f"{report_path.name} ({size} bytes)"})
 
     # ── 3. Check watchlist ──
     if WATCHLIST_PATH.exists():
@@ -446,7 +480,8 @@ def check(require_daily_report: bool = False) -> None:
 
     # ── Output ──
     status = FAIL if any(e in ["db_missing", "watchlist_missing", "daily_report_missing",
-                               "daily_report_invalid", "stale_last_crawl_time",
+                               "daily_report_invalid", "daily_report_placeholder",
+                               "stale_last_crawl_time",
                                "high_time_parse_failure"] for e in errors) else \
              WARN if errors else OK
 
