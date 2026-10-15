@@ -360,12 +360,27 @@ def fetch_stock_announcements(
         conn.close()
 
 
-def fetch_stock_options(db_path: str, stock_code: str) -> Optional[dict]:
-    """该标的最近一期的期权聚合读数 (无期权/未采集 → None)。
+# 期权读数最大可接受的年龄（天）。港股天然滞后 1 天（DTOP 20:00 采、日报 19:00 生成），
+# 再留一个长周末 + 假期余量 —— 超过就当作无数据，不用旧读数充数。
+OPTIONS_MAX_AGE_DAYS = 5
+
+
+def fetch_stock_options(
+    db_path: str,
+    stock_code: str,
+    ref_date: Optional[str] = None,
+    max_age_days: int = OPTIONS_MAX_AGE_DAYS,
+) -> Optional[dict]:
+    """该标的最近一期的期权聚合读数 (无期权 / 未采集 / 数据过期 → None)。
 
     排序必须是 `stat_date DESC, source ASC`: cboe 行带 IV 与期权墙/MaxPain,
     longbridge 行只有 PCR —— 同一天两源都在时选错就会让 IV 与墙凭空消失。
     因此**不能**用 db.get_latest_option_daily()（它不带 source 排序）。
+
+    **新鲜度守卫**（2026-10-16 补）: 采集侧自己写着「采集失败必须显式报错, 不得用
+    旧数据充数」, 但报告侧原先只取 `max(stat_date)` 且不检查年龄 —— 采集中断时会
+    把 N 天前的 PCR/墙/MaxPain 当作当期读数, 还配着「请判断市场对未来在给什么
+    价位定价」的指令喂给模型。超过 `max_age_days` 直接当作无数据并告警。
     """
     conn = _connect(db_path)
     try:
@@ -374,13 +389,31 @@ def fetch_stock_options(db_path: str, stock_code: str) -> Optional[dict]:
                ORDER BY stat_date DESC, source ASC LIMIT 1""",
             (stock_code,),
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        # 原先这里静默 return None: 49 只的期权段会同时消失, 而日志/报告里
+        # 看不出和「这些标的没有上市期权」的区别 (2026-10-16 补日志)。
+        logger.warning(f"期权读数读取失败 stock={stock_code}: {e}")
         return None
     finally:
         conn.close()
     if row is None:
         return None
-    return {k: row[k] for k in row.keys()}
+
+    out = {k: row[k] for k in row.keys()}
+    if ref_date:
+        try:
+            ref_d = datetime.strptime(ref_date, "%Y-%m-%d").date()
+        except ValueError:
+            return out
+        age = (ref_d - datetime.fromtimestamp(row["stat_date"]).date()).days
+        if age > max_age_days:
+            logger.warning(
+                f"期权读数过期 stock={stock_code}: {age} 天前 "
+                f"(stat_date={datetime.fromtimestamp(row['stat_date']):%Y-%m-%d}, "
+                f"报告日={ref_date}, 阈值 {max_age_days} 天) → 按无数据处理"
+            )
+            return None
+    return out
 
 
 def fetch_hot_words(
@@ -960,7 +993,7 @@ def analyze_stock(
     # 期权读数与帖子/资讯/公告并列, 一起喂给逐股分析 (期权定价未来, 帖子描述
     # 已发生)。取在早退分支之前 —— 0 帖标的不调 LLM, 那条占位小节是它唯一的
     # 可见通道 (2026-10-15 用户要求"每个自选股都看到")。
-    options = fetch_stock_options(db_path, stock_code)
+    options = fetch_stock_options(db_path, stock_code, ref_date=date_str)
 
     posts = fetch_stock_posts(
         db_path, stock_code, date_str, min_length=min_len,
@@ -996,9 +1029,15 @@ def analyze_stock(
         # "平稳股（无新增量，仅读数）"紧凑列表。此前写"今日及近7日无帖子数据。"
         # 没有该前缀, 结果 0 帖的股票被塞进"其他今日有增量的股票"完整小节
         # (2026-09-19 实测: 特斯拉当日/近7日 0 帖, 标题与内容自相矛盾)
-        opt_line = (
-            f"- 期权读数: {_options_readings(options)}\n" if options else ""
-        )
+        # 补上日期与口径 —— 原先只给一串裸数字, 读者无从判断是哪天的
+        # (2026-10-16 修)。
+        opt_line = ""
+        if options:
+            dstr = datetime.fromtimestamp(options["stat_date"]).strftime("%Y-%m-%d")
+            caliber = _OPTIONS_CALIBER.get(
+                options.get("source") or "", str(options.get("source") or "")
+            )
+            opt_line = f"- 期权读数（{dstr}，{caliber}）: {_options_readings(options)}\n"
         return {
             "section": (
                 f"#### {stock_name} [{stock_code}]\n\n"
