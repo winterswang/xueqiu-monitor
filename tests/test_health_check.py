@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
+from freezegun import freeze_time
+
 import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -311,6 +313,21 @@ def _write_pipeline_log(tmp_path: Path, name: str, text: str, age_seconds: float
     return log
 
 
+# 时钟必须钉在远离午夜的位置，下面是两个类共用它的原因。
+#
+# 「日志 mtime = 现在 - age」造出来的文件要同时满足两件事: 落在**今日**
+# (_get_todays_logs() 按 `date(mtime) == date.today()` 过滤) 且相对现在
+# **陈旧**(> RUNNING_FRESH_SECONDS)。本地午夜后不久这两条互斥 —— 45 分钟前
+# 就掉到前一个自然日, 日志被滤掉, 断言落空。CI 早就在北京 00:00 触发过一次
+# 假红 (见 conftest.frozen_clock 的实测记录)。
+#
+# 这里用 freezegun 而不是 frozen_clock 夹具: 后者只冻 time.time(), 而
+# health_check 读的「现在」来自 datetime.now() / date.today() —— 只冻一半
+# 会让两个时钟错开(文件 mtime 在中午, now 还在凌晨), 反而把用例弄坏。
+_FROZEN_NOON = "2026-01-15 12:00:00"
+
+
+@freeze_time(_FROZEN_NOON)
 class TestRunningBatchIsNotAFailure:
     """14:25–18:25 每小时的批间巡检跑的是同一个 gate。
 
@@ -494,6 +511,7 @@ class TestExitCodeContract:
         assert self._exit_code(tmp_path) == 0
 
 
+@freeze_time(_FROZEN_NOON)
 class TestRunningExemptionIsPerLog:
     """review 复现的漏洞: 豁免原先只看全局进程, 于是「任一批次活着」会掩盖
     当天所有未收尾日志 —— 上一组崩溃(日志停在 45 分钟前)会被静默放行。"""
