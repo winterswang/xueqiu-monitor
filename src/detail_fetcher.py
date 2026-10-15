@@ -43,6 +43,7 @@ import urllib.request
 from typing import Optional
 
 from xueqiu_analyzer.opencli_call_logger import record_opencli_call
+from xueqiu_analyzer.opencli_cooldown import in_cooldown
 from xueqiu_analyzer.opencli_rate_limiter import acquire_opencli_slot
 
 logger = logging.getLogger(__name__)
@@ -523,6 +524,13 @@ def fetch_page_opencli(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> di
     ``max_chars``：正文截断上限，默认 ``DETAIL_MAX_CHARS``（详情页落库口径）。
     **需要全文的调用方传 ``None``** —— 见 `scripts/backfill_fulltext.py`。
     """
+    # 0 秒预检，必须在最前面：插件对 `--help` 这类探测在冷却检查**之前**就早退，
+    # 所以 `web article --help` 探测在冷却期照样成功、`_article_adapter_available()`
+    # 为真，命令会走适配器分支 —— 每次白等约 45 秒的 daemon 超时，且注定被拦。
+    if in_cooldown():
+        logger.warning("[detail] xueqiu 处于熔断冷却，跳过抓取（一个请求都没发）")
+        return {"title": "", "content": "", "status": "cooldown", "channel": "cooldown"}
+
     if _article_adapter_available():
         return _fetch_page_opencli_adapter(url, max_chars=max_chars)
     return _fetch_page_opencli_legacy(url, max_chars=max_chars)
@@ -549,6 +557,11 @@ def fetch_url_detail(url: str) -> dict:
     # 网页: opencli 主通道 (Chrome 扩展在线时)
     if _opencli_available():
         result = fetch_page_opencli(url)
+        if result["status"] == "cooldown":
+            # 熔断器正封着这个站点。**绝不能转手给 reader 兜底** —— 那是不经插件钩子、
+            # 不限速、不计台账的通道（而且是付费 API），等于绕过熔断器继续取。
+            logger.warning(f"[detail] 熔断冷却中，放弃 reader 兜底 {url[:60]}")
+            return result
         if result["status"] == "ok":
             return result
         if result["status"] == "junk":
@@ -849,7 +862,11 @@ def fetch_detail_cached(
     from . import db as dbmod
 
     cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=max_age_seconds)
-    if cached is not None and cached["status"] != "ok":
+    if cached is not None and cached["status"] == "cooldown":
+        # 冷却只是**暂时**取不到（1h 起，最多 24h），不是「这篇取不到」。落进下面那条
+        # 24h 的失败档，会让这篇文章一整天都从缓存里读到一个空的「冷却」结果。
+        cached = None
+    elif cached is not None and cached["status"] != "ok":
         cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=86400)
     if cached is not None:
         return {

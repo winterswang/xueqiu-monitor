@@ -253,14 +253,25 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             logger.debug(f"  opencli 跳过: {e}")
 
         # ── opencli got data → skip Playwright entirely ──
-        if _opencli_posts or _opencli_notices:
-            logger.info(f"  opencli 已获取数据，跳过 Playwright")
+        # 熔断期同样跳过 Playwright —— 站点正因为被打而开冷却，回退回去等于继续打它。
+        cooldown = _in_cooldown()
+        if _opencli_posts or _opencli_notices or cooldown:
+            skipped_for_cooldown = cooldown and not (_opencli_posts or _opencli_notices)
+            if skipped_for_cooldown:
+                logger.warning("  xueqiu 处于熔断冷却，跳过 Playwright 回退（该通道不限速）")
+            else:
+                logger.info("  opencli 已获取数据，跳过 Playwright")
             crawl_info = {
                 "result": None,
                 "diagnostic": {
                     "timed_out": False,
-                    "error_type": None,
-                    "error_message": None,
+                    "error_type": "cooldown" if skipped_for_cooldown else None,
+                    # ⚠️ 必须给个**非 None** 的原因：下面 `diagnostic.get("error_message",
+                    # "未知爬取错误")` 的默认值对「键存在且为 None」不生效，会让
+                    # `result["error"]` 变成 None，把原因彻底藏起来。
+                    "error_message": (
+                        "熔断冷却中（我们主动停手，未发出请求）" if skipped_for_cooldown else None
+                    ),
                     "crawl_duration_ms": 0,
                     "discussions_count": 0,
                     "news_count": 0,
@@ -305,7 +316,7 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                 )
             else:
                 result["status"] = "failed"
-                result["error"] = diagnostic.get("error_message", "未知爬取错误")
+                result["error"] = diagnostic.get("error_message") or "未知爬取错误"
             if not posts:
                 elapsed = time.time() - t_start
                 return result
@@ -461,6 +472,24 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
         f"posts={result['posts_count']}"
     )
     return result
+
+
+def _in_cooldown() -> bool:
+    """xueqiu 现在是否处于插件层的**熔断冷却**中。
+
+    熔断期内 opencli 那侧是**刻意**空手而归的，绝不能因此回退到 Playwright /
+    nodriver —— 那条路径不经插件钩子、**不限速**（见
+    `xueqiu_analyzer.opencli_cooldown` 的模块说明）。
+
+    装不上 analyzer / 读不到状态时按「否」处理：不因为它而改变原有回退行为。
+    """
+    try:
+        _ensure_xueqiu_analyzer_path()
+        from xueqiu_analyzer.opencli_cooldown import in_cooldown
+
+        return in_cooldown()
+    except Exception:  # noqa: BLE001 —— 这条判断只是优化，失败必须退化成原行为
+        return False
 
 
 def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None,
