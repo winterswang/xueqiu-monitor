@@ -21,9 +21,7 @@ from . import sentiment
 
 # Add xueqiu-analyzer to path (configurable via XUEQIU_ANALYZER_PATH env var)
 # Default: sibling directory ../xueqiu-analyzer-skill/src (works on macOS/Linux/Docker)
-_DEFAULT_XA = str(
-    Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src"
-)
+_DEFAULT_XA = str(Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
 _XA_PATH = os.environ.get("XUEQIU_ANALYZER_PATH", _DEFAULT_XA)
 if _XA_PATH and _XA_PATH not in sys.path:
     sys.path.insert(0, _XA_PATH)
@@ -65,44 +63,19 @@ def _clean_author(raw: str) -> str:
 def _extract_news_source(title: str) -> str:
     """Extract media source from news title when author/source is empty."""
     import re
-
     known_sources = [
-        "证券时报",
-        "财联社",
-        "华尔街见闻",
-        "澎湃新闻",
-        "第一财经",
-        "中国证券报",
-        "上海证券报",
-        "经济观察报",
-        "21世纪经济报道",
-        "时代财经",
-        "中国基金报",
-        "界面新闻",
-        "新浪财经",
-        "智通财经",
-        "格隆汇",
-        "每日经济新闻",
-        "中证网",
-        "证券日报",
-        "中国经营报",
-        "中国商报",
-        "新京报",
-        "北京商报",
-        "财经网",
-        "巨潮资讯",
-        "金融界",
-        "市场资讯",
-        "财说",
-        "智东西",
-        "南方财经",
-        "羊城晚报",
+        '证券时报', '财联社', '华尔街见闻', '澎湃新闻', '第一财经',
+        '中国证券报', '上海证券报', '经济观察报', '21世纪经济报道',
+        '时代财经', '中国基金报', '界面新闻', '新浪财经', '智通财经',
+        '格隆汇', '每日经济新闻', '中证网', '证券日报', '中国经营报',
+        '中国商报', '新京报', '北京商报', '财经网', '巨潮资讯', '金融界',
+        '市场资讯', '财说', '智东西', '南方财经', '羊城晚报',
     ]
     for s in known_sources:
         if s in title:
             return s
     # Generic pattern
-    m = re.search(r"[(（]?来源[：:]\s*(\S{2,12})[)）]?", title)
+    m = re.search(r'[(（]?来源[：:]\s*(\S{2,12})[)）]?', title)
     if m:
         return m.group(1)
     return ""
@@ -112,22 +85,14 @@ def _extract_news_source(title: str) -> str:
 # Watchlist loading
 # ════════════════════════════════════════════════════════
 
-
 def load_watchlist(config: dict) -> list[dict]:
     """Load watchlist from morning-brief DB or fallback JSON.
 
     Returns list of {'stock_code': str, 'stock_name': str}.
     """
     # Try morning-brief DB first (configurable via config.crawler.morning_brief_db)
-    default_mb_db = str(
-        Path(__file__).resolve().parent.parent.parent
-        / "morning-brief"
-        / "data"
-        / "morning-brief.db"
-    )
-    mb_db = config.get(
-        "morning_brief_db", os.environ.get("MORNING_BRIEF_DB", default_mb_db)
-    )
+    default_mb_db = str(Path(__file__).resolve().parent.parent.parent / "morning-brief" / "data" / "morning-brief.db")
+    mb_db = config.get("morning_brief_db", os.environ.get("MORNING_BRIEF_DB", default_mb_db))
     if mb_db and os.path.exists(mb_db):
         try:
             conn = sqlite3.connect(mb_db)
@@ -137,10 +102,7 @@ def load_watchlist(config: dict) -> list[dict]:
             ).fetchall()
             conn.close()
             if rows:
-                result = [
-                    {"stock_code": r["stock_code"], "stock_name": r["stock_name"]}
-                    for r in rows
-                ]
+                result = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"]} for r in rows]
                 logger.info(f"从 morning-brief 加载 {len(result)} 只自选股")
                 return result
         except Exception as e:
@@ -164,14 +126,9 @@ def load_watchlist(config: dict) -> list[dict]:
 # Crawler wrapper
 # ════════════════════════════════════════════════════════
 
-
-def crawl_single_stock(
-    stock_code: str,
-    timeout: int = 1200,
-    db_path: str | None = None,
-    max_retries: int = 0,
-    opencli_budget_seconds: float | None = None,
-) -> dict:
+def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None = None,
+                       max_retries: int = 0,
+                       opencli_budget_seconds: float | None = None) -> dict:
     """Crawl a single stock using xueqiu-analyzer.
 
     Returns:
@@ -217,7 +174,6 @@ def crawl_single_stock(
             from xueqiu_analyzer.fetcher_opencli import is_available as _ocli_ok
             from xueqiu_analyzer.fetcher_opencli import fetch_discussions as _ocli_discs
             from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
-
             if _ocli_ok():
                 logger.info(f"  opencli: 预取 {stock_code}")
                 # 预取阶段（讨论 + 公告 + 失败重试）整体受预算约束：单次最坏 87s，
@@ -229,26 +185,24 @@ def crawl_single_stock(
                 )
 
                 def _extend_discussions(items: list) -> None:
-                    for item in items or []:
-                        _opencli_posts.append(
-                            {
-                                "type": "discussion",
-                                "post_id": item.get("url", "") or item.get("id", ""),
-                                "title": (item.get("text", "") or "")[:100],
-                                # opencli adapter now returns full text (was card
-                                # summary ~230 chars). Keep posts up to 8000 chars
-                                # in DB; export_csv.py applies its own
-                                # CONTENT_MAX_CHARS cap when writing CSV.
-                                "content": (item.get("text", "") or "")[:8000],
-                                "link": item.get("url", ""),
-                                "author": item.get("author", ""),
-                                "time": item.get("created_at", ""),
-                                "sentiment_score": 0.0,
-                                "comment_count": item.get("replies", 0) or 0,
-                                "like_count": item.get("likes", 0) or 0,
-                                "forward_count": item.get("retweets", 0) or 0,
-                            }
-                        )
+                    for item in (items or []):
+                        _opencli_posts.append({
+                            "type": "discussion",
+                            "post_id": item.get("url", "") or item.get("id", ""),
+                            "title": (item.get("text", "") or "")[:100],
+                            # opencli adapter now returns full text (was card
+                            # summary ~230 chars). Keep posts up to 8000 chars
+                            # in DB; export_csv.py applies its own
+                            # CONTENT_MAX_CHARS cap when writing CSV.
+                            "content": (item.get("text", "") or "")[:8000],
+                            "link": item.get("url", ""),
+                            "author": item.get("author", ""),
+                            "time": item.get("created_at", ""),
+                            "sentiment_score": 0.0,
+                            "comment_count": item.get("replies", 0) or 0,
+                            "like_count": item.get("likes", 0) or 0,
+                            "forward_count": item.get("retweets", 0) or 0,
+                        })
 
                 try:
                     _extend_discussions(_ocli_discs(stock_code, limit=100))
@@ -262,15 +216,13 @@ def crawl_single_stock(
                     )
                 else:
                     try:
-                        for item in _ocli_notices(stock_code, limit=50) or []:
-                            _opencli_notices.append(
-                                {
-                                    "title": item.get("title", ""),
-                                    "time": item.get("created_at", ""),
-                                    "notice_type": item.get("type", ""),
-                                    "link": item.get("url", ""),
-                                }
-                            )
+                        for item in (_ocli_notices(stock_code, limit=50) or []):
+                            _opencli_notices.append({
+                                "title": item.get("title", ""),
+                                "time": item.get("created_at", ""),
+                                "notice_type": item.get("type", ""),
+                                "link": item.get("url", ""),
+                            })
                         logger.info(f"  opencli: {len(_opencli_notices)} 条公告")
                     except Exception as e:
                         logger.warning(f"  opencli 公告失败: {e}")
@@ -301,23 +253,25 @@ def crawl_single_stock(
             logger.debug(f"  opencli 跳过: {e}")
 
         # ── opencli got data → skip Playwright entirely ──
-        # 熔断期同样跳过 Playwright：opencli 那侧是**刻意**空手而归的，而 Playwright
-        # 不在插件管辖内、**不限速** —— 站点正因为被打而开冷却，回退回去等于继续打它。
-        # 跳过时沿用「有数据」那支的 diagnostic 形状（下游按 result=None 处理）。
+        # 熔断期同样跳过 Playwright —— 站点正因为被打而开冷却，回退回去等于继续打它。
         cooldown = _in_cooldown()
         if _opencli_posts or _opencli_notices or cooldown:
-            if cooldown and not (_opencli_posts or _opencli_notices):
-                logger.warning(
-                    "  xueqiu 处于熔断冷却，跳过 Playwright 回退（该通道不限速）"
-                )
+            skipped_for_cooldown = cooldown and not (_opencli_posts or _opencli_notices)
+            if skipped_for_cooldown:
+                logger.warning("  xueqiu 处于熔断冷却，跳过 Playwright 回退（该通道不限速）")
             else:
                 logger.info("  opencli 已获取数据，跳过 Playwright")
             crawl_info = {
                 "result": None,
                 "diagnostic": {
                     "timed_out": False,
-                    "error_type": None,
-                    "error_message": None,
+                    "error_type": "cooldown" if skipped_for_cooldown else None,
+                    # ⚠️ 必须给个**非 None** 的原因：下面 `diagnostic.get("error_message",
+                    # "未知爬取错误")` 的默认值对「键存在且为 None」不生效，会让
+                    # `result["error"]` 变成 None，把原因彻底藏起来。
+                    "error_message": (
+                        "熔断冷却中（我们主动停手，未发出请求）" if skipped_for_cooldown else None
+                    ),
                     "crawl_duration_ms": 0,
                     "discussions_count": 0,
                     "news_count": 0,
@@ -335,24 +289,18 @@ def crawl_single_stock(
         # ── Merge opencli data early (survives Playwright failure) ──
         posts = list(_opencli_posts) if _opencli_posts else []
         for item in _opencli_notices:
-            result["announcements"].append(
-                {
-                    "title": item.get("title", ""),
-                    "time": item.get("time", ""),
-                    "notice_type": item.get("notice_type", ""),
-                    "link": item.get("link", ""),
-                }
-            )
+            result["announcements"].append({
+                "title": item.get("title", ""),
+                "time": item.get("time", ""),
+                "notice_type": item.get("notice_type", ""),
+                "link": item.get("link", ""),
+            })
 
         if crawl_result is None:
             if diagnostic.get("timed_out"):
                 result["status"] = "partial"
-                result["error"] = diagnostic.get(
-                    "error_message", f"Playwright 超时（{timeout}s）"
-                )
-                logger.warning(
-                    f"{stock_code} Playwright 超时, opencli 提供 {len(posts)} 条帖子"
-                )
+                result["error"] = diagnostic.get("error_message", f"Playwright 超时（{timeout}s）")
+                logger.warning(f"{stock_code} Playwright 超时, opencli 提供 {len(posts)} 条帖子")
             elif result["announcements"]:
                 # opencli **只拿到公告、讨论为空**（疑似 comments 接口限流）：上面已经把
                 # 公告并进 result["announcements"] 了，这里绝不能按 failed 处理 ——
@@ -368,71 +316,62 @@ def crawl_single_stock(
                 )
             else:
                 result["status"] = "failed"
-                result["error"] = diagnostic.get("error_message", "未知爬取错误")
+                result["error"] = diagnostic.get("error_message") or "未知爬取错误"
             if not posts:
                 elapsed = time.time() - t_start
                 return result
         else:
             for d in crawl_result.discussions:
-                posts.append(
-                    {
-                        "type": "discussion",
-                        "post_id": d.link or d.content[:20],
-                        "title": d.content[:100] or "",
-                        "content": d.content or "",
-                        "link": d.link or "",
-                        "author": _clean_author(d.author or ""),
-                        "time": d.time or "",
-                        "sentiment_score": 0.0,
-                        "comment_count": getattr(d, "comment_count", 0) or 0,
-                        "forward_count": getattr(d, "forward_count", 0) or 0,
-                        "like_count": getattr(d, "like_count", 0) or 0,
-                    }
-                )
+                posts.append({
+                    "type": "discussion",
+                    "post_id": d.link or d.content[:20],
+                    "title": d.content[:100] or "",
+                    "content": d.content or "",
+                    "link": d.link or "",
+                    "author": _clean_author(d.author or ""),
+                    "time": d.time or "",
+                    "sentiment_score": 0.0,
+                    "comment_count": getattr(d, "comment_count", 0) or 0,
+                    "forward_count": getattr(d, "forward_count", 0) or 0,
+                    "like_count": getattr(d, "like_count", 0) or 0,
+                })
             for n in crawl_result.news:
-                posts.append(
-                    {
-                        "type": "news",
-                        "post_id": n.link or n.title,
-                        "title": n.title or "",
-                        "content": n.content or "",
-                        "link": n.link or "",
-                        "author": _clean_author(n.source or "")
-                        or _extract_news_source(n.title or ""),
-                        "time": n.time or "",
-                        "sentiment_score": 0.0,
-                    }
-                )
+                posts.append({
+                    "type": "news",
+                    "post_id": n.link or n.title,
+                    "title": n.title or "",
+                    "content": n.content or "",
+                    "link": n.link or "",
+                    "author": _clean_author(n.source or "") or _extract_news_source(n.title or ""),
+                    "time": n.time or "",
+                    "sentiment_score": 0.0,
+                })
             for a in crawl_result.articles:
-                posts.append(
-                    {
-                        "type": "article",
-                        "post_id": a.link or a.article_id or a.title,
-                        "title": a.title or "",
-                        "content": a.content or "",
-                        "link": a.link or "",
-                        "author": _clean_author(a.author or ""),
-                        "time": a.time or "",
-                        "sentiment_score": 0.0,
-                    }
-                )
+                posts.append({
+                    "type": "article",
+                    "post_id": a.link or a.article_id or a.title,
+                    "title": a.title or "",
+                    "content": a.content or "",
+                    "link": a.link or "",
+                    "author": _clean_author(a.author or ""),
+                    "time": a.time or "",
+                    "sentiment_score": 0.0,
+                })
             for nt in crawl_result.notices:
                 title_raw = nt.title or ""
-                lines = title_raw.split("\n")
+                lines = title_raw.split('\n')
                 if len(lines) > 1:
-                    title = "\n".join(lines[1:]).strip()[:100]
+                    title = '\n'.join(lines[1:]).strip()[:100]
                 else:
                     title = title_raw.strip()[:100]
                 if not title:
                     title = title_raw.strip()[:100]
-                result["announcements"].append(
-                    {
-                        "title": title,
-                        "time": nt.time or "",
-                        "notice_type": nt.notice_type or "",
-                        "link": nt.link or "",
-                    }
-                )
+                result["announcements"].append({
+                    "title": title,
+                    "time": nt.time or "",
+                    "notice_type": nt.notice_type or "",
+                    "link": nt.link or "",
+                })
 
         result["posts_count"] = len(posts)
         result["posts_data"] = posts
@@ -538,7 +477,7 @@ def crawl_single_stock(
 def _in_cooldown() -> bool:
     """xueqiu 现在是否处于插件层的**熔断冷却**中。
 
-    熔断期内 opencli 那侧是**刻意**空手而归的，调用方绝不能因此回退到 Playwright /
+    熔断期内 opencli 那侧是**刻意**空手而归的，绝不能因此回退到 Playwright /
     nodriver —— 那条路径不经插件钩子、**不限速**（见
     `xueqiu_analyzer.opencli_cooldown` 的模块说明）。
 
@@ -553,14 +492,9 @@ def _in_cooldown() -> bool:
         return False
 
 
-def crawl_watchlist(
-    stocks: list[dict],
-    timeout: int = 30,
-    db_path: str | None = None,
-    concurrency: int = 1,
-    max_retries: int = 0,
-    opencli_budget_seconds: float | None = None,
-) -> list[dict]:
+def crawl_watchlist(stocks: list[dict], timeout: int = 30, db_path: str | None = None,
+                    concurrency: int = 1, max_retries: int = 0,
+                    opencli_budget_seconds: float | None = None) -> list[dict]:
     """Crawl all stocks with configurable concurrency.
 
     Sequential mode (concurrency=1): simple for-loop.
@@ -570,32 +504,23 @@ def crawl_watchlist(
     Returns list of crawl result dicts (order may differ from input when parallel).
     """
     if concurrency <= 1:
-        return _crawl_sequential(
-            stocks, timeout, db_path, max_retries, opencli_budget_seconds
-        )
+        return _crawl_sequential(stocks, timeout, db_path, max_retries, opencli_budget_seconds)
     return _crawl_parallel(
         stocks, timeout, db_path, concurrency, max_retries, opencli_budget_seconds
     )
 
 
-def _crawl_sequential(
-    stocks: list[dict],
-    timeout: int,
-    db_path: str | None,
-    max_retries: int = 0,
-    opencli_budget_seconds: float | None = None,
-) -> list[dict]:
+def _crawl_sequential(stocks: list[dict], timeout: int, db_path: str | None,
+                      max_retries: int = 0,
+                      opencli_budget_seconds: float | None = None) -> list[dict]:
     results = []
     total = len(stocks)
     for i, s in enumerate(stocks):
         code = s["stock_code"]
-        logger.info(f"[{i + 1}/{total}] 爬取 {code} ...")
+        logger.info(f"[{i+1}/{total}] 爬取 {code} ...")
         start = time.time()
         r = crawl_single_stock(
-            code,
-            timeout,
-            db_path,
-            max_retries=max_retries,
+            code, timeout, db_path, max_retries=max_retries,
             opencli_budget_seconds=opencli_budget_seconds,
         )
         elapsed = time.time() - start
@@ -607,30 +532,19 @@ def _crawl_sequential(
     return results
 
 
-def _crawl_parallel(
-    stocks: list[dict],
-    timeout: int,
-    db_path: str | None,
-    concurrency: int,
-    max_retries: int = 0,
-    opencli_budget_seconds: float | None = None,
-) -> list[dict]:
+def _crawl_parallel(stocks: list[dict], timeout: int, db_path: str | None,
+                   concurrency: int, max_retries: int = 0,
+                   opencli_budget_seconds: float | None = None) -> list[dict]:
     import concurrent.futures
-
     results = []
     total = len(stocks)
     logger.info(f"并行爬取: {total} 只股票, concurrency={concurrency}")
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_map: dict[concurrent.futures.Future, str] = {}
         for s in stocks:
-            f = executor.submit(
-                crawl_single_stock,
-                s["stock_code"],
-                timeout,
-                db_path,
-                max_retries=max_retries,
-                opencli_budget_seconds=opencli_budget_seconds,
-            )
+            f = executor.submit(crawl_single_stock, s["stock_code"], timeout, db_path,
+                                max_retries=max_retries,
+                                opencli_budget_seconds=opencli_budget_seconds)
             future_map[f] = s["stock_code"]
         for f in concurrent.futures.as_completed(future_map):
             code = future_map[f]
@@ -650,9 +564,7 @@ def _crawl_parallel(
                     "_elapsed": 0,
                 }
             results.append(r)
-            logger.info(
-                f"  → {r['status']} ({r['posts_count']}贴, {r.get('_elapsed', '?')}s)"
-            )
+            logger.info(f"  → {r['status']} ({r['posts_count']}贴, {r.get('_elapsed', '?')}s)")
     success = sum(1 for r in results if r["status"] == "success")
     logger.info(f"爬取完成: {success}/{total} 成功")
     return results
@@ -661,7 +573,6 @@ def _crawl_parallel(
 # ════════════════════════════════════════════════════════
 # Helpers
 # ════════════════════════════════════════════════════════
-
 
 def _to_xueqiu_code(stock_code: str) -> str:
     """Convert watchlist code format to Xueqiu URL format.
@@ -676,14 +587,14 @@ def _to_xueqiu_code(stock_code: str) -> str:
 
     Returns unchanged code if format is unrecognized (e.g. already SH600519).
     """
-    if stock_code.endswith(".SH"):
-        return "SH" + stock_code[:-3]
-    if stock_code.endswith(".SZ"):
-        return "SZ" + stock_code[:-3]
-    if stock_code.endswith(".HK"):
+    if stock_code.endswith('.SH'):
+        return 'SH' + stock_code[:-3]
+    if stock_code.endswith('.SZ'):
+        return 'SZ' + stock_code[:-3]
+    if stock_code.endswith('.HK'):
         num_part = stock_code[:-3]
         return num_part.zfill(5)
-    if stock_code.endswith(".US"):
+    if stock_code.endswith('.US'):
         return stock_code[:-3]  # strip .US suffix
     return stock_code
 
@@ -728,7 +639,6 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         抛 WafDetectedError 或任何异常 → 上层回退 playwright。
         """
         from xueqiu_analyzer.crawler_nodriver import XueqiuNodriverCrawler
-
         _c = XueqiuNodriverCrawler({"headless": True})
         # max_pages 收紧：讨论页刷新快，2 天内海量新帖，翻 20 页会 >150s 超时丢数据。
         # 实测每页 ~10 条，6 页≈ 60 条/tab，足够覆盖近期内容且能在 timeout 内返回。
@@ -738,7 +648,9 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         """Tier 2 回退: playwright 引擎（原实现）。"""
         _crawler = XueqiuCrawler({"headless": True})
         try:
-            return _crawler.crawl(xq_code, max_pages=1000, max_articles=200, days=2)
+            return _crawler.crawl(
+                xq_code, max_pages=1000, max_articles=200, days=2
+            )
         finally:
             try:
                 _crawler.close()
@@ -786,7 +698,9 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
         # Timeout — daemon thread continues in bg, caller detached
         diagnostic["timed_out"] = True
         diagnostic["error_type"] = "timeout"
-        diagnostic["error_message"] = f"爬取超时（{timeout}s, elapsed={elapsed_ms}ms）"
+        diagnostic["error_message"] = (
+            f"爬取超时（{timeout}s, elapsed={elapsed_ms}ms）"
+        )
         return {"result": None, "diagnostic": diagnostic}
 
     if result_holder["error"] is not None:
@@ -820,9 +734,8 @@ def _crawl_with_timeout(stock_code: str, timeout: int) -> dict:
     return {"result": result_holder["result"], "diagnostic": diagnostic}
 
 
-def _crawl_with_retry(
-    stock_code: str, timeout: int, max_retries: int = 0, retry_delay: float = 2.0
-) -> dict:
+def _crawl_with_retry(stock_code: str, timeout: int, max_retries: int = 0,
+                      retry_delay: float = 2.0) -> dict:
     """Wrap _crawl_with_timeout with immediate retry on transient failures.
 
     Retries when crawl result is None AND not timed out (e.g. nodriver browser
@@ -907,30 +820,30 @@ def _parse_post_time(time_str: str, now: float) -> float:
         return 0.0
 
     # "X分钟前"
-    m = re.match(r"(\d+)\s*分钟前", time_str)
+    m = re.match(r'(\d+)\s*分钟前', time_str)
     if m:
         return now - int(m.group(1)) * 60
 
     # "X小时前"
-    m = re.match(r"(\d+)\s*小时前", time_str)
+    m = re.match(r'(\d+)\s*小时前', time_str)
     if m:
         return now - int(m.group(1)) * 3600
 
     # "X秒前"
-    m = re.match(r"(\d+)\s*秒前", time_str)
+    m = re.match(r'(\d+)\s*秒前', time_str)
     if m:
         return now - int(m.group(1))
 
     # "X天前" (xueqiu shows this for posts older than ~48h; without this
     # branch such posts parse to 0 and fail-open into every time window)
-    m = re.match(r"(\d+)\s*天前", time_str)
+    m = re.match(r'(\d+)\s*天前', time_str)
     if m:
         return now - int(m.group(1)) * 86400
 
     now_dt = datetime.fromtimestamp(now)
 
     # "昨天 HH:MM"
-    m = re.match(r"昨天\s+(\d{1,2}):(\d{2})", time_str)
+    m = re.match(r'昨天\s+(\d{1,2}):(\d{2})', time_str)
     if m:
         yesterday = now_dt - timedelta(days=1)
         target = yesterday.replace(
@@ -939,13 +852,10 @@ def _parse_post_time(time_str: str, now: float) -> float:
         return target.timestamp()
 
     # "MM-DD HH:MM"
-    m = re.match(r"(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})", time_str)
+    m = re.match(r'(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
     if m:
         month, day, hour, minute = (
-            int(m.group(1)),
-            int(m.group(2)),
-            int(m.group(3)),
-            int(m.group(4)),
+            int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
         )
         target = now_dt.replace(
             month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0
@@ -955,7 +865,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
         return target.timestamp()
 
     # "MM-DD"
-    m = re.match(r"(\d{2})-(\d{2})$", time_str)
+    m = re.match(r'(\d{2})-(\d{2})$', time_str)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
         target = now_dt.replace(
@@ -966,10 +876,12 @@ def _parse_post_time(time_str: str, now: float) -> float:
         return target.timestamp()
 
     # "HH:MM"
-    m = re.match(r"(\d{1,2}):(\d{2})$", time_str)
+    m = re.match(r'(\d{1,2}):(\d{2})$', time_str)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2))
-        target = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        target = now_dt.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
         # 2026-09-14 修: 未来钳制。"MM-DD HH:MM" 分支本来就有这个保护, "HH:MM"
         # 没有 —— 一个标注为今天、但时刻晚于抓取时刻的帖子, 会把增量水位
         # (last_post_time)写到未来, 之后该窗口内的帖子全被判成旧帖而跳过。
@@ -979,7 +891,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
     # ISO 8601: "YYYY-MM-DDTHH:MM:SS.fffZ" (opencli / xueqiu API native format)
     # Matches: 2026-08-12T04:57:37.000Z, 2026-08-12T04:57:37Z, 2026-08-12T12:57:37+08:00
     m = re.match(
-        r"(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$",
+        r'(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$',
         time_str,
     )
     if m:
@@ -994,17 +906,16 @@ def _parse_post_time(time_str: str, now: float) -> float:
                 # 等于"把北京墙上时间当本地时间" —— 宿主 TZ=UTC 时整体偏 +8 小时
                 # (帖子时间变成未来 → 增量水位跳到未来 → 后续帖子全被判为旧帖)。
                 y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
-                return datetime(
-                    y, mo, d, h, mi, s, tzinfo=timezone(timedelta(hours=8))
-                ).timestamp()
+                return datetime(y, mo, d, h, mi, s,
+                                tzinfo=timezone(timedelta(hours=8))).timestamp()
             # 带 Z / ±HH:MM 后缀 → 本身就是绝对时刻, 直接取, 不经本地时区
-            dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
             return dt.timestamp()
         except ValueError:
             return 0.0
 
     # "YYYY-MM-DD" (posts from previous years, news/announcement absolute dates)
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", time_str)
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})$', time_str)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
         try:
@@ -1013,7 +924,7 @@ def _parse_post_time(time_str: str, now: float) -> float:
             return 0.0
 
     # "YYYY-MM-DD HH:MM"
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})", time_str)
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})', time_str)
     if m:
         y, mo, d, h, mi = (int(m.group(i)) for i in range(1, 6))
         try:

@@ -292,3 +292,42 @@ class TestPrefetchBudget:
         assert fake.fetch_notices.call_count == 1, "不限预算时公告必须照抓"
         assert sleeps == [30], "不限预算时该重试仍要重试"
         assert result["posts_count"] == 1
+
+
+class TestCooldownSkipsPlaywright:
+    """熔断冷却期**不**回退 Playwright。
+
+    那条通道不经插件钩子、**不限速**；站点正因为被打才开的冷却，回退回去等于继续打它。
+    `_install` 里的 `_crawl_with_retry` 一旦被调用就抛断言 —— 所以这条既能证明「没回退」，
+    也会在守卫被挖掉时变红（先前 monitor 侧这半个改动 538 个用例一个都盖不到）。
+    """
+
+    def test_cooldown_skips_playwright(self, monkeypatch):
+        fake = _fake_opencli_module([[]], [[]])  # opencli 空手而归
+        _install(monkeypatch, fake, [])
+        monkeypatch.setattr(crawler_mod, "_in_cooldown", lambda: True)
+
+        result = crawler_mod.crawl_single_stock("300866.SZ", timeout=30, db_path=None)
+
+        assert result["diagnostic"]["error_type"] == "cooldown"
+        assert "熔断冷却" in (result["error"] or ""), "原因不能被藏成 None"
+
+    def test_no_cooldown_keeps_the_fallback(self, monkeypatch):
+        """没冷却时行为不变 —— 这条判断只该在熔断期生效。
+
+        （`_crawl_with_retry` 会抛断言，所以这里只断言「它被调用了」。）
+        """
+        sleeps = []
+        fake = _fake_opencli_module([[]], [[]])
+        _install(monkeypatch, fake, sleeps)
+        monkeypatch.setattr(crawler_mod, "_in_cooldown", lambda: False)
+        called = []
+        monkeypatch.setattr(
+            crawler_mod,
+            "_crawl_with_retry",
+            lambda *a, **k: called.append(1) or {"result": None, "diagnostic": {}},
+        )
+
+        crawler_mod.crawl_single_stock("300866.SZ", timeout=30, db_path=None)
+
+        assert called, "没冷却时该照旧回退"
