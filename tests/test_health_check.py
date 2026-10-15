@@ -605,3 +605,58 @@ class TestFailureSignalsActuallyFire:
         line_start = src.rindex("\n", 0, marker)
         line = src[line_start:src.index("\n", marker)]
         assert "logger.debug" not in line, f"`[SKIP]` 又变回 debug 级了: {line.strip()}"
+
+
+@freeze_time(_FROZEN_NOON)
+class TestUndeliveredAlertsAreVisible:
+    """`notifier` 的「落回文件兜底」文件**没有任何消费者** —— P0 告警的兜底通道
+    实为黑洞（文档写「由外部调度器读取」，实际不存在）。
+
+    它只会「静默不投递」，所以不做成检查项就永远不会被发现（2026-10-16 补）。
+    """
+
+    def _seed(self, conn, status: str, n: int = 1) -> None:
+        conn.executescript(
+            """CREATE TABLE IF NOT EXISTS push_history (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, stock_code TEXT,
+                   alert_id INTEGER, push_time REAL, priority TEXT,
+                   content TEXT, status TEXT)"""
+        )
+        for i in range(n):
+            conn.execute(
+                "INSERT INTO push_history (stock_code, alert_id, push_time,"
+                " priority, content, status) VALUES (?,?,?,?,?,?)",
+                ("X.US", i, time.time(), "P0", "probe", status),
+            )
+        conn.commit()
+
+    def test_fallback_rows_are_flagged(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        self._seed(conn, "fallback", 2)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["alert_delivery"]["status"] == "warn"
+        assert "undelivered_alerts" in report["errors"]
+        assert report["status"] == "warn"
+
+    def test_sent_rows_are_fine(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        self._seed(conn, "sent", 3)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["alert_delivery"]["status"] == "ok"
+        assert "undelivered_alerts" not in report["errors"]
+
+    def test_missing_table_is_not_a_problem(self, fake_project, monkeypatch):
+        """还没产生过告警的库不该因此报警。"""
+        conn, tmp_path = fake_project
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["alert_delivery"]["status"] == "ok"
+        assert "undelivered_alerts" not in report["errors"]
