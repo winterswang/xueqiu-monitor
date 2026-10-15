@@ -159,7 +159,13 @@ def _read_source_failures_in_window(
     return rows
 
 
-def check():
+def check(require_daily_report: bool = False) -> None:
+    """跑全部检查, 打 JSON 到 stdout, 并按 status 决定退出码。
+
+    Args:
+        require_daily_report: 要求当日舆情日报产物存在且非空 (收尾巡检查这条,
+            白天批间巡检时日报尚未生成, 不要传)。
+    """
     results = []
     errors = []
 
@@ -189,6 +195,7 @@ def check():
         pipeline_active = _is_pipeline_running()
         now_ts = datetime.datetime.now().timestamp()
         with_summary, without_summary = [], []
+        unfinished: list[str] = []
         total_skip = total_err = 0
         for idx, lg in enumerate(logs):
             text = lg.read_text(encoding="utf-8", errors="replace")
@@ -203,6 +210,7 @@ def check():
                 without_summary.append(f"{lg.name}(运行中)")
             else:
                 without_summary.append(lg.name)
+                unfinished.append(lg.name)
             total_skip += len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
             total_err += len(re.findall(r"\[ABORT\]|\[DETECT_ERR\]|CRITICAL", text))
 
@@ -211,7 +219,15 @@ def check():
                 "check": "pipeline_completed", "status": WARN,
                 "detail": f"{len(without_summary)}/{len(logs)} 当日批次无 [SUMMARY]: " + ", ".join(without_summary),
             })
-            errors.append("no_summary")
+            # 2026-10-15: 只有「确实没跑完」才计错误。「还在跑」是正常态 ——
+            # health_check 自己都把它标成「(运行中)」, 计进 errors 会让 status=warn,
+            # 而 14:25–18:25 每小时的批间巡检 (同一脚本) 就会把「上一组还没收尾」
+            # 当成失败, 每天最多发 5 张红卡片 (实测批次 11–24 分钟, gate 在 :25
+            # 跑, g1/g2 这种正好压在边界上)。
+            # 停滞判定仍由上面 recent(<1h) 兜住: 进程活着但一小时没写日志 → 不算
+            # 「运行中」, 照旧计错误并告警。检查项本身保持 WARN, 卡片照常展示。
+            if unfinished:
+                errors.append("no_summary")
         else:
             results.append({
                 "check": "pipeline_completed", "status": OK,
@@ -228,6 +244,35 @@ def check():
             errors.append("detect_errors")
     else:
         results.append({"check": "log_exists", "status": WARN, "detail": "No run log found"})
+
+    # ── 2.5 当日舆情日报产物 (仅收尾巡检要求) ──
+    # 2026-10-15: 之前 cron 巡检 prompt 里写的是「日报缺失或为空视为失败」,
+    # 但脚本根本不读 sys.argv、也没有这一项 —— 实测 `--require-daily-report`
+    # 是空转 flag (skills/data-science/xueqiu-monitor/references/cron-ops.md:96),
+    # 只能靠人工核验 + 手工往卡片表格补行。这里把它做实。
+    # 白天批间巡检 (14:25–18:25) 不传此参: 那时日报本来还没生成。
+    if require_daily_report:
+        report_path = Path(PROJECT_ROOT) / "data" / "daily_reports" / (
+            datetime.date.today().isoformat() + "-sentiment.md"
+        )
+        try:
+            size = report_path.stat().st_size if report_path.is_file() else None
+        except OSError as exc:
+            results.append({"check": "daily_report", "status": FAIL,
+                            "detail": f"读取失败: {exc}"})
+            errors.append("daily_report_invalid")
+        else:
+            if size is None:
+                results.append({"check": "daily_report", "status": FAIL,
+                                "detail": f"未生成今日文件 {report_path.name}"})
+                errors.append("daily_report_missing")
+            elif size == 0:
+                results.append({"check": "daily_report", "status": FAIL,
+                                "detail": f"{report_path.name} 为空"})
+                errors.append("daily_report_invalid")
+            else:
+                results.append({"check": "daily_report", "status": OK,
+                                "detail": f"{report_path.name} ({size} bytes)"})
 
     # ── 3. Check watchlist ──
     if WATCHLIST_PATH.exists():
@@ -400,7 +445,9 @@ def check():
             conn.close()
 
     # ── Output ──
-    status = FAIL if any(e in ["db_missing", "watchlist_missing", "stale_last_crawl_time", "high_time_parse_failure"] for e in errors) else \
+    status = FAIL if any(e in ["db_missing", "watchlist_missing", "daily_report_missing",
+                               "daily_report_invalid", "stale_last_crawl_time",
+                               "high_time_parse_failure"] for e in errors) else \
              WARN if errors else OK
 
     report = {
@@ -413,4 +460,10 @@ def check():
 
 
 if __name__ == "__main__":
-    check()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="雪球 monitor 日更健康检查")
+    parser.add_argument("--require-daily-report", action="store_true",
+                        help="要求当日 data/daily_reports/<date>-sentiment.md 存在且非空"
+                             "（收尾巡检用；白天批间巡检不要传）")
+    check(require_daily_report=parser.parse_args().require_daily_report)

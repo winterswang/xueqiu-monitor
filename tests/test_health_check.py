@@ -58,7 +58,7 @@ def fake_project(tmp_path: Path):
     return conn, tmp_path
 
 
-def _run_check(tmp_path: Path) -> dict:
+def _run_check(tmp_path: Path, require_daily_report: bool = False) -> dict:
     """Run health_check.check() against a fake project root, return parsed report."""
     with mock.patch.object(health_check, "PROJECT_ROOT", tmp_path), \
          mock.patch.object(health_check, "LOG_DIR", tmp_path / "logs"), \
@@ -69,7 +69,7 @@ def _run_check(tmp_path: Path) -> dict:
         out = io.StringIO()
         with redirect_stdout(out):
             with pytest.raises(SystemExit):
-                health_check.check()
+                health_check.check(require_daily_report=require_daily_report)
         return json.loads(out.getvalue())
 
 
@@ -293,3 +293,146 @@ def test_whitelisted_stale_stock_still_warns(fake_project, with_config):
     detail = next(c["detail"] for c in report["checks"] if c["check"] == "crawl_freshness")
     assert "AAA.HK" in detail
     assert report["status"] == "ok"
+
+
+# =============================================================================
+# 2026-10-15: 两个 gate 判定的回归 —— 「批次还在跑」不能算失败;
+# --require-daily-report 不再空转。
+# =============================================================================
+
+
+def _write_pipeline_log(tmp_path: Path, name: str, text: str, age_seconds: float = 0.0) -> Path:
+    log = tmp_path / "logs" / name
+    log.write_text(text, encoding="utf-8")
+    if age_seconds:
+        ts = time.time() - age_seconds
+        import os as _os
+        _os.utime(log, (ts, ts))
+    return log
+
+
+class TestRunningBatchIsNotAFailure:
+    """14:25–18:25 每小时的批间巡检跑的是同一个 gate。
+
+    health_check 会把运行中的批次标成「(运行中)」——那是正常态。若它同时
+    计进 errors, status 就是 warn, 新 gate 会每小时发一张红卡片说「未通过」。
+    实测批次耗时 11–24 分钟而 gate 在 :25 跑, g1/g2 正好压在边界上。
+    """
+
+    def test_running_batch_warns_but_does_not_error(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g9.log", "爬取中…没有 SUMMARY\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["pipeline_completed"]["status"] == "warn"      # 仍可见
+        assert "运行中" in checks["pipeline_completed"]["detail"]
+        assert "no_summary" not in report["errors"]                   # 但不算错误
+        assert report["status"] == "ok"                               # → gate 静默
+
+    def test_stalled_batch_still_errors(self, fake_project, monkeypatch):
+        """进程活着但一小时没写日志 = 真停滞, 必须照旧计错误并告警."""
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g9.log", "挂住了\n", age_seconds=7200)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+
+        assert "no_summary" in report["errors"]
+        assert report["status"] == "warn"                             # → gate 告警
+
+    def test_finished_batch_without_summary_errors(self, fake_project, monkeypatch):
+        """没有进程在跑、日志里也没有 SUMMARY = 真没跑完."""
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g9.log", "没跑完就退了\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: False)
+
+        report = _run_check(tmp_path)
+
+        assert "no_summary" in report["errors"]
+        assert report["status"] == "warn"
+
+
+class TestRequireDailyReport:
+    """`--require-daily-report` 之前是空转 flag (脚本不读 sys.argv、也没有这一项),
+    cron 巡检 prompt 却声称「日报缺失或为空视为失败」→ 只能人工补行。"""
+
+    def _mkdailydir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "data" / "daily_reports"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_default_does_not_check_daily_report(self, fake_project):
+        conn, tmp_path = fake_project
+        report = _run_check(tmp_path)
+        assert "daily_report" not in {c["check"] for c in report["checks"]}
+
+    def test_present_and_non_empty_is_ok(self, fake_project):
+        conn, tmp_path = fake_project
+        today = datetime.date.today().isoformat()
+        (self._mkdailydir(tmp_path) / f"{today}-sentiment.md").write_text("# 日报\n正文", encoding="utf-8")
+
+        report = _run_check(tmp_path, require_daily_report=True)
+
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["daily_report"]["status"] == "ok"
+        assert checks["daily_report"]["detail"].startswith(f"{today}-sentiment.md")
+        assert "daily_report_missing" not in report["errors"]
+        assert report["status"] == "ok"
+
+    def test_missing_is_fail(self, fake_project):
+        conn, tmp_path = fake_project
+        self._mkdailydir(tmp_path)
+
+        report = _run_check(tmp_path, require_daily_report=True)
+
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["daily_report"]["status"] == "fail"
+        assert "daily_report_missing" in report["errors"]
+        assert report["status"] == "fail"          # → 退出码 1
+
+    def test_empty_is_fail(self, fake_project):
+        conn, tmp_path = fake_project
+        today = datetime.date.today().isoformat()
+        (self._mkdailydir(tmp_path) / f"{today}-sentiment.md").write_text("", encoding="utf-8")
+
+        report = _run_check(tmp_path, require_daily_report=True)
+
+        assert "daily_report_invalid" in report["errors"]
+        assert report["status"] == "fail"
+
+    def test_daily_report_dir_absent_counts_as_missing(self, fake_project):
+        """目录都没建 (= 真没跑) 也必须是 missing, 而不是抛 OSError."""
+        conn, tmp_path = fake_project
+        report = _run_check(tmp_path, require_daily_report=True)
+        assert "daily_report_missing" in report["errors"]
+
+
+class TestExitCodeContract:
+    """skills 文档的巡检 prompt 靠退出码判读, 且明写「exit 0≠ok」的坑。"""
+
+    def _exit_code(self, tmp_path: Path, require_daily_report: bool = False) -> int:
+        with mock.patch.object(health_check, "PROJECT_ROOT", tmp_path), \
+             mock.patch.object(health_check, "LOG_DIR", tmp_path / "logs"), \
+             mock.patch.object(health_check, "WATCHLIST_PATH", tmp_path / "data" / "watchlist.json"):
+            import io
+            from contextlib import redirect_stdout
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                with pytest.raises(SystemExit) as exc:
+                    health_check.check(require_daily_report=require_daily_report)
+            return exc.value.code
+
+    def test_fail_status_exits_1(self, fake_project):
+        _, tmp_path = fake_project
+        assert self._exit_code(tmp_path, require_daily_report=True) == 1
+
+    def test_warn_status_exits_0_so_gate_must_read_status(self, fake_project, monkeypatch):
+        """WARN 档退出 0 —— 这正是 gate 必须按 status 判定的原因."""
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g9.log", "没跑完就退了\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: False)
+        assert self._exit_code(tmp_path) == 0
