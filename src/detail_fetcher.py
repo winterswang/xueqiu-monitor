@@ -862,7 +862,11 @@ def fetch_detail_cached(
     from . import db as dbmod
 
     cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=max_age_seconds)
-    if cached is not None and cached["status"] != "ok":
+    if cached is not None and cached["status"] == "cooldown":
+        # 冷却只是**暂时**取不到（1h 起，最多 24h），不是「这篇取不到」。落进下面那条
+        # 24h 的失败档，会让这篇文章一整天都从缓存里读到一个空的「冷却」结果。
+        cached = None
+    elif cached is not None and cached["status"] != "ok":
         cached = dbmod.get_detail_fetch(db_path, url, max_age_seconds=86400)
     if cached is not None:
         return {
