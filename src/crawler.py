@@ -20,7 +20,7 @@ from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import sentiment
 
 # Add xueqiu-analyzer to path (configurable via XUEQIU_ANALYZER_PATH env var)
-# Default: sibling directory ../xueqiu-analyzer-skill/src (works on macOS/Linux/Docker)
+# Default: sibling directory ../xueqiu-analyzer-skill/src (works on macOS/Linux)
 _DEFAULT_XA = str(Path(__file__).resolve().parent.parent.parent / "xueqiu-analyzer-skill" / "src")
 _XA_PATH = os.environ.get("XUEQIU_ANALYZER_PATH", _DEFAULT_XA)
 if _XA_PATH and _XA_PATH not in sys.path:

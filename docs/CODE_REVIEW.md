@@ -79,7 +79,7 @@
 - [ ] 2-N: models.py 增加 `from __future__ import annotations` (已有，全模块)
 - [ ] 2-O: requirements.txt 添加版本号下限注释
 - [ ] 2-P: scripts/run.sh 错误处理完善 (trap EXIT)
-- [ ] 2-Q: Dockerfile CMD → 考虑改为 ENTRYPOINT + CMD 分离
+- [x] 2-Q: ~~Dockerfile CMD → 考虑改为 ENTRYPOINT + CMD 分离~~ —— 容器路径已整体移除（2026-10-16），此项无对象
 - [ ] 2-R: 配置验证: 启动时检查 db_path 可写性
 - [ ] 2-S: 爬取成功率 <98% 告警未实现 (§2.1 验收标准 3)
 
@@ -161,7 +161,7 @@
 
 - ISO 8601 时间修复（PR #37）✅ 生效：last_crawl_time 全部更新至 8/17，零帖快照消失
 - 2-J/2-K/2-L/2-N/2-O/2-P/2-S 均已修复（行号证据略，见 git log）
-- 2-M（exc_info 统一）、2-Q（Dockerfile）、2-R（db_path 可写检查）仍开口，均为低价值
+- 2-M（exc_info 统一）、2-Q（Dockerfile）、2-R（db_path 可写检查）仍开口，均为低价值；其中 2-Q 已于 2026-10-16 随容器路径移除而作废
 
 ## 新发现问题
 
