@@ -35,10 +35,12 @@ fail_alert() { # $1=告警正文(含 health_check 输出摘要)
        --title "⛔ 舆情日更组级 gate 失败" --color red --chat "$CHAT" >/dev/null 2>&1; then
     return 0
   fi
-  # 回退: 纯文本只带 400 字摘要(旧的 --text 形态), 同样按字符截断
+  # 回退: 纯文本只带 400 字摘要(旧的 --text 形态), 同样按字符截断。
+  # 两条通道都失败要如实返回非零 —— 调用方据此决定「算不算已经告过」。
   short=$(python3 "$ROOT/scripts/health_gate_status.py" --truncate 400 "$1")
   "$LARK" im +messages-send --chat-id "$CHAT" --as bot \
-    --text "⛔ 舆情日更组级 gate 失败($stamp): $short" >/dev/null 2>&1 || true
+    --text "⛔ 舆情日更组级 gate 失败($stamp): $short" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 OUT=$(python3 "$ROOT/scripts/health_check.py" 2>&1)
@@ -55,7 +57,6 @@ fi
 # 一次瞬时抖动会让 14:25 / 15:25 … 19:05 每次 gate 各发一张内容几乎相同的红卡
 # (最多 6 张)。告警疲劳最终会把真正的组级失败一起淹掉 —— 20:30 的收尾巡检
 # 仍会照常报告当天状态, 信息不丢。
-mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
 SIG="$(date +%F):$(python3 "$ROOT/scripts/health_gate_status.py" --fingerprint "$OUT")"
 if [ -f "$STATE" ] && [ "$(cat "$STATE" 2>/dev/null)" = "$SIG" ]; then
   printf '%s\n' '{"protocol":"cindy-script/1","type":"complete","ok":false,"error":"health_check failed (already alerted today)"}'
@@ -64,9 +65,13 @@ fi
 
 # 卡片不怕长,给足 2000 **字符**(按字节切会切坏多字节字符, 见 health_gate_status.py)
 BODY=$(python3 "$ROOT/scripts/health_gate_status.py" --truncate 2000 "$OUT")
-fail_alert "health_check 未通过(rc=$rc, status=$LEVEL):
+if fail_alert "health_check 未通过(rc=$rc, status=$LEVEL):
 
-$BODY"
-printf '%s' "$SIG" > "$STATE" 2>/dev/null || true
+$BODY"; then
+  # 只有真发出去才记状态位。否则(卡片+纯文本都失败)当天后续 gate 会以为「已告过」
+  # 而不再尝试 —— 告警通道就哑了, 正是脚本头注释承诺不许发生的事。
+  mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+  printf '%s' "$SIG" > "$STATE" 2>/dev/null || true
+fi
 printf '%s\n' '{"protocol":"cindy-script/1","type":"complete","ok":false,"error":"health_check failed"}'
 exit 1

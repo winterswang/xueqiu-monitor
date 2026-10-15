@@ -61,7 +61,7 @@ def gate(tmp_path: Path):
     calls = tmp_path / "notify.calls"
     lark_calls = tmp_path / "lark.calls"
 
-    def run(out: str, notify_rc: int = 0):
+    def run(out: str, notify_rc: int = 0, lark_cli: str | None = None):
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(tmp_path),
@@ -69,7 +69,7 @@ def gate(tmp_path: Path):
             "GATE_CALLS": str(calls),
             "GATE_CALLS_LARK": str(lark_calls),
             "GATE_NOTIFY_RC": str(notify_rc),
-            "LARK_CLI": str(lark),
+            "LARK_CLI": lark_cli or str(lark),
         }
         return subprocess.run(["bash", str(scripts / "cron_healthgate.sh")],
                               capture_output=True, text=True, timeout=60, env=env)
@@ -131,3 +131,30 @@ class TestAlertFallback:
         raw = lark_calls.read_text(encoding="utf-8")
         assert "…(已截断)" in raw
         assert raw.encode("utf-8").decode("utf-8")    # 非法 UTF-8 会在这里炸
+
+
+class TestDedupeNeverSilencesTheAlarm:
+    """去重只在「确实告过」时生效: 两条通道都失败时不写状态位, 下次继续尝试."""
+
+    def test_both_channels_down_does_not_record_alert(self, gate):
+        run, calls, lark_calls = gate
+        # notify_card 退 1 + lark-cli 指到不存在的路径 → 两条通道都失败
+        r = run(WARN_A, notify_rc=1, lark_cli="/nonexistent/lark-cli")
+        assert r.returncode == 1
+        state = calls.parent / "logs" / ".healthgate_last_alert"
+        assert not state.exists(), "告警没发出去却记了状态位 → 当天后续 gate 不再尝试"
+
+        # 通道恢复后必须重新告警(而不是被去重跳过)
+        r2 = run(WARN_A, notify_rc=0)
+        assert r2.returncode == 1
+        assert _count(calls) == 2, "通道恢复后应该重新发卡片"
+        assert (calls.parent / "logs" / ".healthgate_last_alert").exists()
+
+    def test_text_fallback_alone_still_counts_as_alerted(self, gate):
+        """卡片失败但纯文本发出去了 = 用户已被告知 → 记状态位, 不再重复打扰."""
+        run, calls, lark_calls = gate
+        run(WARN_A, notify_rc=1)
+        assert _count(lark_calls) == 1
+        assert (calls.parent / "logs" / ".healthgate_last_alert").exists()
+        run(WARN_A, notify_rc=1)
+        assert _count(lark_calls) == 1, "已告过的同一份失败不该再发"
