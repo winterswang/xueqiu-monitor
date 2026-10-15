@@ -43,6 +43,7 @@ import urllib.request
 from typing import Optional
 
 from xueqiu_analyzer.opencli_call_logger import record_opencli_call
+from xueqiu_analyzer.opencli_cooldown import in_cooldown
 from xueqiu_analyzer.opencli_rate_limiter import acquire_opencli_slot
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ logger = logging.getLogger(__name__)
 _ZHIPU_BASE = "https://open.bigmodel.cn/api"
 _READER_PATH = "/paas/v4/reader"
 _TOOLS_PATH = "/paas/v4/tools"
-_HTTP_TIMEOUT = 45          # reader 抓 PDF 较慢, 实测 30s 内返回
+_HTTP_TIMEOUT = 45  # reader 抓 PDF 较慢, 实测 30s 内返回
 _SEARCH_TIMEOUT = 30
 
 # 详情正文留存上限 (存库); 注入 prompt 的上限在 report 侧另控 (5000)
@@ -88,6 +89,7 @@ _DAILY_DISCLOSURE_PAT = re.compile(r"翌日披露")
 # 智谱 API 底座
 # ════════════════════════════════════════════════════════
 
+
 def _zhipu_key() -> str:
     key = os.environ.get("ZHIPU_API_KEY", "")
     if not key:
@@ -112,6 +114,7 @@ def _post_json(url: str, payload: dict, timeout: int) -> dict:
 # ════════════════════════════════════════════════════════
 # 通道 1: 智谱 reader (网页 / PDF 正文)
 # ════════════════════════════════════════════════════════
+
 
 def _looks_like_garbled(text: str) -> bool:
     """巨潮 PDF 乱码检测: 长文本里 CJK 占比过低即视为编码损坏。
@@ -157,9 +160,7 @@ def _strip_menu_junk(text: str) -> str:
 
 _PDF_URL_PAT = re.compile(r"\.pdf($|\?)", re.IGNORECASE)
 # 目录页识别: 含"目錄/目录/CONTENTS"且 >=5 行是纯页码 (港股年报实测结构)
-_TOC_TITLE_RE = re.compile(
-    r"目\s*錄|目\s*录|TABLE\s+OF\s+CONTENTS|\bCONTENTS?\b", re.I
-)
+_TOC_TITLE_RE = re.compile(r"目\s*錄|目\s*录|TABLE\s+OF\s+CONTENTS|\bCONTENTS?\b", re.I)
 _TOC_PAGE_NUM_RE = re.compile(r"\d{1,4}")
 
 
@@ -178,9 +179,7 @@ def _pdf_content(pages: list[str]) -> str:
     一份目录 (2026-09-20 实测港股中期报告); 目录页对 LLM 零价值, 跳过。
     封面信息 (公司名/报告期) 已由公告标题给出, 一并丢弃。
     """
-    toc_at = next(
-        (i for i, t in enumerate(pages[:6]) if _is_toc_page(t)), None
-    )
+    toc_at = next((i for i, t in enumerate(pages[:6]) if _is_toc_page(t)), None)
     if toc_at is None:
         return "".join(pages)
     start = toc_at + 1
@@ -190,9 +189,7 @@ def _pdf_content(pages: list[str]) -> str:
 
 
 def _is_pdf_url(url: str) -> bool:
-    return bool(_PDF_URL_PAT.search(url or "")) or (
-        "cninfo.com.cn" in (url or "")
-    )
+    return bool(_PDF_URL_PAT.search(url or "")) or ("cninfo.com.cn" in (url or ""))
 
 
 def fetch_pdf_local(url: str) -> dict:
@@ -203,10 +200,11 @@ def fetch_pdf_local(url: str) -> dict:
     服务端 PDF 解析器的问题, 本地方案不存在。智谱通道保留为兜底。
     """
     if url.startswith("http://"):
-        url = "https://" + url[len("http://"):]
+        url = "https://" + url[len("http://") :]
     try:
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
         )
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
             data = resp.read()
@@ -231,8 +229,12 @@ def fetch_pdf_local(url: str) -> dict:
     # 用 _looks_like_garbled 会把港股英文版公告误杀 (2026-09-20 复盘)
     if text.count("\ufffd") > len(text) * 0.02:
         return {"title": "", "content": "", "status": "garbled", "channel": "pdf_local"}
-    return {"title": "", "content": text[:DETAIL_MAX_CHARS], "status": "ok",
-            "channel": "pdf_local"}
+    return {
+        "title": "",
+        "content": text[:DETAIL_MAX_CHARS],
+        "status": "ok",
+        "channel": "pdf_local",
+    }
 
 
 # ════════════════════════════════════════════════════════
@@ -256,15 +258,22 @@ def _opencli_session() -> str:
         _OPENCLI_TLS.session = name
     return name
 
+
 # 正文容器候选 (按"精确度"排序, 先命中先用): 新浪/东财/雪球通用。
 # 实测 2026-09-20: 新浪 div.article 1148 字 = 正文, .article-content 18794 字
 # = 整站菜单堆; 东财只有 #ContentBody 命中 (2901 字, .content/body 掺推荐流)
 _ARTICLE_SELECTORS = [
-    "div.article", "#artibody", ".article-content", "article",
-    ".article-content-detail", "#ContentBody", ".content", "body",
+    "div.article",
+    "#artibody",
+    ".article-content",
+    "article",
+    ".article-content-detail",
+    "#ContentBody",
+    ".content",
+    "body",
 ]
-_MIN_ARTICLE_CHARS = 300     # 短于此视为"容器没命中", 继续往下试
-_MAX_BODY_LINKS = 80         # body 兜底时链接过多 = 首页/频道页, 不是文章
+_MIN_ARTICLE_CHARS = 300  # 短于此视为"容器没命中", 继续往下试
+_MAX_BODY_LINKS = 80  # body 兜底时链接过多 = 首页/频道页, 不是文章
 
 
 # opencli 的升级提示在命令输出**之后**由退出钩子打印（update-check.js），
@@ -309,9 +318,7 @@ def _opencli(
     slot = acquire_opencli_slot(" ".join(args[:2]), cmd)
     started_at = time.time()
     try:
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         record_opencli_call(
             cmd,
             started_at,
@@ -346,9 +353,7 @@ _JUNK_PAGE_RE = re.compile(
 )
 
 
-def _looks_like_junk_page(
-    content: str, title: str = "", selector: str = ""
-) -> bool:
+def _looks_like_junk_page(content: str, title: str = "", selector: str = "") -> bool:
     """占位页 / 首页菜单堆 / 浏览器错误页识别 (不可当作正文注入).
 
     三类实测废页 (2026-09-20):
@@ -364,7 +369,9 @@ def _looks_like_junk_page(
     return selector == "body" and content.count("](http") > _MAX_BODY_LINKS
 
 
-def _fetch_page_opencli_legacy(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> dict:
+def _fetch_page_opencli_legacy(
+    url: str, max_chars: int | None = DETAIL_MAX_CHARS
+) -> dict:
     """回退路径：逐选择器探针的 browser 直连序列。
 
     2026-10-08 起不再是主通道 —— 主通道换成了 `opencli web article`
@@ -375,7 +382,7 @@ def _fetch_page_opencli_legacy(url: str, max_chars: int | None = DETAIL_MAX_CHAR
     843 字正文, 无菜单噪音, 优于 zhipu reader 的全页输出。
     """
     if url.startswith("http://"):
-        url = "https://" + url[len("http://"):]
+        url = "https://" + url[len("http://") :]
     opened = _opencli("open", url)
     if not opened or "page" not in (opened or {}):
         return {"title": "", "content": "", "status": "error", "channel": "opencli"}
@@ -422,7 +429,9 @@ def _article_adapter_available() -> bool:
     try:
         r = subprocess.run(
             ["opencli", "web", "article", "--help"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         _ARTICLE_ADAPTER_OK = r.returncode == 0 and "article" in (r.stdout or "")
     except (subprocess.TimeoutExpired, OSError):
@@ -485,7 +494,9 @@ def _opencli_article(url: str) -> Optional[dict]:
     return rows if isinstance(rows, dict) else None
 
 
-def _fetch_page_opencli_adapter(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> dict:
+def _fetch_page_opencli_adapter(
+    url: str, max_chars: int | None = DETAIL_MAX_CHARS
+) -> dict:
     """适配器通道 → 与 legacy 同形的四态返回 (ok/empty/error/junk).
 
     ``max_chars``：正文截断上限，默认 ``DETAIL_MAX_CHARS``。传 ``None`` 表示**不截断** ——
@@ -493,7 +504,7 @@ def _fetch_page_opencli_adapter(url: str, max_chars: int | None = DETAIL_MAX_CHA
     截到 8000 会让它在长文上静默存错数据（详见 monitor issue #74）。
     """
     if url.startswith("http://"):
-        url = "https://" + url[len("http://"):]
+        url = "https://" + url[len("http://") :]
     row = _opencli_article(url)
     if not row:
         return {"title": "", "content": "", "status": "error", "channel": "opencli"}
@@ -525,6 +536,12 @@ def fetch_page_opencli(url: str, max_chars: int | None = DETAIL_MAX_CHARS) -> di
     """
     if _article_adapter_available():
         return _fetch_page_opencli_adapter(url, max_chars=max_chars)
+    if in_cooldown():
+        # 熔断器正封着这个站点（它在 routing 阶段硬失败，一个请求都没发）。而下面的
+        # legacy 序列走 `opencli browser …` —— **不经插件钩子、不限速**。站点正因为
+        # 被打而开了冷却，回退回去等于继续打它，而熔断器的全部意义就是停止这件事。
+        logger.warning("[detail] xueqiu 处于熔断冷却，不回退 legacy 浏览器序列")
+        return {"title": "", "content": "", "status": "cooldown", "channel": "cooldown"}
     return _fetch_page_opencli_legacy(url, max_chars=max_chars)
 
 
@@ -568,6 +585,7 @@ def _opencli_available() -> bool:
     if _OPENCLI_OK is not None:
         return _OPENCLI_OK
     import shutil
+
     if not shutil.which("opencli"):
         _OPENCLI_OK = False
         return _OPENCLI_OK
@@ -589,12 +607,22 @@ def _fetch_url_reader(url: str) -> dict:
     try:
         rsp = _post_json(
             f"{_ZHIPU_BASE}{_READER_PATH}",
-            {"url": url, "return_format": "markdown",
-             "no_cache": True, "timeout": 30, "retain_images": False},
+            {
+                "url": url,
+                "return_format": "markdown",
+                "no_cache": True,
+                "timeout": 30,
+                "retain_images": False,
+            },
             timeout=_HTTP_TIMEOUT,
         )
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, RuntimeError) as e:
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        OSError,
+        json.JSONDecodeError,
+        RuntimeError,
+    ) as e:
         logger.warning(f"[detail] reader 失败 {url[:60]}: {e}")
         return {"title": "", "content": "", "status": "error", "channel": "reader"}
 
@@ -619,18 +647,26 @@ def _fetch_url_reader(url: str) -> dict:
 # 通道 2: 智谱 web-search-pro (背景补充 / 乱码降级)
 # ════════════════════════════════════════════════════════
 
+
 def search_context_with_status(query: str) -> tuple[str, Optional[str]]:
     """返回 (背景文本, 错误原因); 无结果时为 ("", None)。"""
     try:
         rsp = _post_json(
             f"{_ZHIPU_BASE}{_TOOLS_PATH}",
-            {"tool": "web-search-pro",
-             "messages": [{"role": "user", "content": query}],
-             "stream": False},
+            {
+                "tool": "web-search-pro",
+                "messages": [{"role": "user", "content": query}],
+                "stream": False,
+            },
             timeout=_SEARCH_TIMEOUT,
         )
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, RuntimeError) as e:
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        OSError,
+        json.JSONDecodeError,
+        RuntimeError,
+    ) as e:
         logger.warning(f"[detail] search 失败 {query[:40]}: {e}")
         return "", str(e)
 
@@ -660,9 +696,9 @@ def search_context(query: str) -> str:
 # 发布日期在 URL 里的三种常见形态 (2026-09-20 补: 只认新浪形态时, 东财
 # 「相关推荐」的几个月前旧闻 (URL 里 /a/YYYYMMDD…html) 会绕过时效闸)
 _URL_DATE_PATTERNS = (
-    re.compile(r"/(\d{4})-(\d{2})-(\d{2})/"),           # 新浪 /2026-09-19/
-    re.compile(r"/a/(\d{4})(\d{2})(\d{2})\d{3,}\."),    # 东财 /a/202609163875401912.html
-    re.compile(r"/(\d{4})(\d{2})(\d{2})/"),             # 同花顺 stock.10jqka.com.cn/20260414/
+    re.compile(r"/(\d{4})-(\d{2})-(\d{2})/"),  # 新浪 /2026-09-19/
+    re.compile(r"/a/(\d{4})(\d{2})(\d{2})\d{3,}\."),  # 东财 /a/202609163875401912.html
+    re.compile(r"/(\d{4})(\d{2})(\d{2})/"),  # 同花顺 stock.10jqka.com.cn/20260414/
 )
 
 
@@ -686,6 +722,7 @@ def news_staleness_days(url: str, ref_date: str) -> Optional[int]:
         return None
     try:
         from datetime import date
+
         d_ref = date.fromisoformat(ref_date)
         d_url = date.fromisoformat(ud)
         return (d_ref - d_url).days
@@ -763,8 +800,11 @@ def filter_news_posts(
         # 公告转载 (新浪 AIGC 的港股公告流) 与 announcements 表重叠, 丢弃
         if "公告及通告" in title or "海外监管公告" in title:
             continue
-        eng = (int(p.get("like_count") or 0) + int(p.get("comment_count") or 0)
-               + int(p.get("forward_count") or 0))
+        eng = (
+            int(p.get("like_count") or 0)
+            + int(p.get("comment_count") or 0)
+            + int(p.get("forward_count") or 0)
+        )
         # ③ 限量闸排序键: 新的优先 (日报正文里当天资讯价值最高), 同刻比互动量,
         #    再比正文长度 (有摘要的优先); 时间未知的排最后
         scored.append(((-posted_ts, -eng, -len(p.get("content") or "")), p))
@@ -775,6 +815,7 @@ def filter_news_posts(
 # ════════════════════════════════════════════════════════
 # 公告分级
 # ════════════════════════════════════════════════════════
+
 
 def _form_of_title(title: str) -> str:
     """取公告标题里的表格代号 (美股 SEC form: 6-K / 20-F / SCHEDULE 13D/A …)。
@@ -824,19 +865,15 @@ def is_push_worthy(title: str) -> bool:
     会连带把港股「公告及通告 - [股息或分派]」这类高价值派息件一起降档。
     """
     t = title or ""
-    return (
-        classify_announcement(t) == "high"
-        and not _DAILY_DISCLOSURE_PAT.search(t)
-    )
+    return classify_announcement(t) == "high" and not _DAILY_DISCLOSURE_PAT.search(t)
 
 
 # ════════════════════════════════════════════════════════
 # 抓取编排 (带 detail_fetch_log 缓存)
 # ════════════════════════════════════════════════════════
 
-def fetch_detail_cached(
-    db_path: str, url: str, max_age_seconds: int = 86400
-) -> dict:
+
+def fetch_detail_cached(db_path: str, url: str, max_age_seconds: int = 86400) -> dict:
     """带缓存的详情抓取: detail_fetch_log 命中且未过期时直接返回。
 
     error 状态不重试 (失败标记也是缓存); 缓存按 (link, max_age_seconds) 生效。
@@ -864,8 +901,9 @@ def fetch_detail_cached(
         f"[detail] {detail.get('channel', '?')} → {detail['status']}: {url[:70]}"
     )
 
-    dbmod.insert_detail_fetch(db_path, url, detail["status"],
-                              detail["title"], detail["content"])
+    dbmod.insert_detail_fetch(
+        db_path, url, detail["status"], detail["title"], detail["content"]
+    )
     return detail
 
 
@@ -890,7 +928,9 @@ def _sec_get(url: str, timeout: int = 30, as_json: bool = False):
     持续 SSL EOF (curl 同 URL 200, 2026-09-20 实测), 走 curl 最稳。"""
     r = subprocess.run(
         ["curl", "-s", "-m", str(timeout), "-H", f"User-Agent: {_SEC_UA}", url],
-        capture_output=True, text=True, timeout=timeout + 10,
+        capture_output=True,
+        text=True,
+        timeout=timeout + 10,
     )
     raw = r.stdout or ""
     return json.loads(raw) if as_json else raw
@@ -901,9 +941,7 @@ def _ticker_to_cik(ticker: str) -> str:
     if ticker in _TICKER_CIK_CACHE:
         return _TICKER_CIK_CACHE[ticker]
     try:
-        data = _sec_get(
-            "https://www.sec.gov/files/company_tickers.json", as_json=True
-        )
+        data = _sec_get("https://www.sec.gov/files/company_tickers.json", as_json=True)
         for item in data.values():
             if str(item.get("ticker", "")).upper() == ticker.upper():
                 cik = str(item["cik_str"])
@@ -915,18 +953,17 @@ def _ticker_to_cik(ticker: str) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    """ filing 主文档 HTML → 纯文本 (stdlib, 去脚本样式表格化简).
+    """filing 主文档 HTML → 纯文本 (stdlib, 去脚本样式表格化简).
 
     先剥 inline-XBRL 的 ix:hidden/ix:header —— 20-F/10-K 里那是给机器读的
     事实块 (实测 TCOM 20-F 正文首屏全是 XBRL 数字残渣), 留着会顶掉真正文。
     """
-    html = re.sub(
-        r"<ix:(hidden|header)[^>]*>.*?</ix:\1>", " ", html, flags=re.S | re.I
-    )
+    html = re.sub(r"<ix:(hidden|header)[^>]*>.*?</ix:\1>", " ", html, flags=re.S | re.I)
     html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
     html = re.sub(r"<br\s*/?>|</p>|</div>|</tr>", "\n", html, flags=re.I)
     html = re.sub(r"<[^>]+>", " ", html)
     import html as _html
+
     text = _html.unescape(html)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n", text)
@@ -991,6 +1028,7 @@ def fetch_announcement_detail(
         )
         if bg:
             from . import db as dbmod
+
             dbmod.insert_detail_fetch(db_path, url, "search_fallback", title, bg)
             return f"[EDGAR 原文不可得, 以下为新闻解读]\n{bg[:5000]}"
         if search_error:
@@ -1005,6 +1043,7 @@ def fetch_announcement_detail(
     bg, search_error = search_context_with_status(f"{title} 公告 解读")
     if bg:
         from . import db as dbmod
+
         dbmod.insert_detail_fetch(db_path, url, "search_fallback", title, bg)
         logger.info(f"[detail] search_fallback → ok ({detail['status']}): {title[:50]}")
         return f"[原文不可得({detail['status']}), 以下为新闻解读]\n{bg[:5000]}"
@@ -1028,8 +1067,8 @@ def resolve_us_filing_url(title: str, stock_code: str) -> str:
             f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json",
             as_json=True,
         )
-        accessions = submissions.get("filings", {}).get("recent", {}).get(
-            "accessionNumber", []
+        accessions = (
+            submissions.get("filings", {}).get("recent", {}).get("accessionNumber", [])
         )
         if accession not in accessions:
             return ""
