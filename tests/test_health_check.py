@@ -550,3 +550,58 @@ class TestRunningExemptionIsPerLog:
 
         report = _run_check(tmp_path)
         assert "no_summary" in report["errors"]
+
+
+@freeze_time(_FROZEN_NOON)
+class TestFailureSignalsActuallyFire:
+    """2026-10-16 修: 两个 WARN 档原本是**死检查**。
+
+    `total_err` 匹配 `[ABORT]|[DETECT_ERR]|CRITICAL` —— 全仓没有任何地方输出
+    这三个词 (每股失败实际打的是 cli.py 的 `[ERROR] stock=`); 而 `[SKIP]` 那行
+    是 logger.debug, INFO 级运行下永不落盘。于是 total_skip/total_err 恒为 0,
+    `crawl_failures`/`high_failure_rate`/`detect_errors` 永远进不了 errors ——
+    gate 头部却声称它们会告警。
+    """
+
+    def test_skip_lines_raise_crawl_failures(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        body = "[SUMMARY] stocks=6/8 success=6 failed=2\n"
+        body += "".join(
+            f"[SKIP] stock=S{i}.US status=timeout error=boom\n" for i in range(6)
+        )
+        _write_pipeline_log(tmp_path, "pipeline.log", body + "[SUMMARY] ok\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert "crawl_failures" in checks, "6 条 skip 应触发 crawl_failures"
+        assert "high_failure_rate" in report["errors"]
+
+    def test_error_lines_raise_detect_errors(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        body = "[ERROR] stock=X.US processing failed: database is locked\n"
+        _write_pipeline_log(tmp_path, "pipeline.log", body + "[SUMMARY] ok\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert "detect_errors" in checks, "`[ERROR] stock=` 应触发 detect_errors"
+        assert "detect_errors" in report["errors"]
+
+    def test_regex_matches_tokens_the_code_actually_emits(self):
+        """契约: health_check 匹配的 token 必须是 cli.py 真的会打的。
+
+        这条防的是「正则与发射端再次漂移」—— 上一次漂移让两个检查静默失效了
+        很久(没人发现, 因为它们只会「不报警」)。
+        """
+        src = (SCRIPTS_DIR.parent / "src" / "cli.py").read_text(encoding="utf-8")
+        assert "[ERROR] stock=" in src, "正则里的 `[ERROR] stock=` 必须有人真的打"
+        assert "[SKIP] stock=" in src, "正则里的 `[SKIP] stock=` 必须有人真的打"
+
+    def test_skip_log_is_not_debug_level(self):
+        """[SKIP] 必须在 INFO 及以上 —— debug 级在 `python3 -u -m src.cli` 下不落盘。"""
+        src = (SCRIPTS_DIR.parent / "src" / "cli.py").read_text(encoding="utf-8")
+        marker = src.index('"[SKIP] stock=')
+        line_start = src.rindex("\n", 0, marker)
+        line = src[line_start:src.index("\n", marker)]
+        assert "logger.debug" not in line, f"`[SKIP]` 又变回 debug 级了: {line.strip()}"

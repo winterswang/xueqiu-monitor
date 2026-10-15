@@ -215,6 +215,13 @@ def check(require_daily_report: bool = False) -> None:
             text = lg.read_text(encoding="utf-8", errors="replace")
             if idx == len(logs) - 1:
                 source_window = _latest_pipeline_window(text)
+            # 每股级失败必须**在 [SUMMARY] 的 continue 之前**累计 ——
+            # 否则「批次正常收尾、但里面有股票抓失败」的日志会被整条跳过
+            # (2026-10-16 修: 实测 6/8 成功的组, 其 skip/err 一条都数不到),
+            # crawl_failures / high_failure_rate / detect_errors 于是只在
+            # 「批次根本没跑完」时才可能生效 —— 而那已经是另一个检查的职责了。
+            total_skip += len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
+            total_err += len(re.findall(r"\[ERROR\] stock=|CRITICAL", text))
             summary_match = re.search(r"\[SUMMARY\] (.+)", text)
             if summary_match:
                 with_summary.append(f"{lg.name}:{summary_match.group(1)[:36]}")
@@ -231,9 +238,6 @@ def check(require_daily_report: bool = False) -> None:
             else:
                 without_summary.append(lg.name)
                 unfinished.append(lg.name)
-            total_skip += len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
-            total_err += len(re.findall(r"\[ABORT\]|\[DETECT_ERR\]|CRITICAL", text))
-
         if without_summary:
             results.append({
                 "check": "pipeline_completed", "status": WARN,

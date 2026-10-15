@@ -239,7 +239,10 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         # **整批不入库、不告警**。健康判定那边仍会把 partial 记为 degraded。
         # 见 xueqiu-monitor issue #76。
         if cr["status"] not in ("success", "partial"):
-            logger.debug(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
+            # INFO 而非 debug: health_check 的 crawl_failures 检查靠这行统计
+            # 当日 skip 数, debug 级在 `python3 -u -m src.cli`(INFO) 下永不落盘
+            # → total_skip 恒为 0, 大面积抓取失败被静默放行 (2026-10-16 修)。
+            logger.info(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
             continue
 
         try:
