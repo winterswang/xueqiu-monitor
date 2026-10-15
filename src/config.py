@@ -5,9 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 # Load .env if python-dotenv is available
 try:
@@ -84,6 +83,14 @@ DEFAULT_CONFIG = {
         "concurrency": 1,
         "news_per_stock": 5,
     },
+    # options-sense (方向 8): 期权日频采集与信号
+    "options": {
+        "enabled": True,
+        "us_symbols": [],          # 空 = 从 report_config 的股票池自动取 .US
+        "report_config": "etc/config.report.json",  # 标的唯一真源 (与日报同源)
+        "skip_backfill": False,    # True = 跳过 Longbridge 20 天回填
+        "cross_tolerance": 0.20,   # 双源 PCR 偏差告警阈值
+    },
 }
 
 
@@ -99,6 +106,7 @@ class Config:
     cold_start: dict = field(default_factory=lambda: DEFAULT_CONFIG["cold_start"].copy())
     schedule: dict = field(default_factory=lambda: DEFAULT_CONFIG["schedule"].copy())
     detail: dict = field(default_factory=lambda: DEFAULT_CONFIG["detail"].copy())
+    options: dict = field(default_factory=lambda: DEFAULT_CONFIG["options"].copy())
 
     @classmethod
     def from_file(cls, path: str) -> Config:

@@ -16,7 +16,7 @@ from pathlib import Path
 from .models import (
     CrawlSnapshot, SentimentStat, ChangeAlert,
     HotWordEvent, PushHistory,
-    Comment, Announcement,
+    Comment, Announcement, OptionDaily,
 )
 
 logger = logging.getLogger(__name__)
@@ -987,4 +987,113 @@ def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float)
                last_crawl_time=excluded.last_crawl_time,
                last_post_time=MAX(xueqiu_monitor_meta.last_post_time, excluded.last_post_time)""",
             (stock_code, now, last_post_time)
+        )
+
+
+
+
+# ════════════════════════════════════════════════════════
+# options-sense (方向 8): 期权聚合与合约快照
+# ════════════════════════════════════════════════════════
+
+
+def upsert_option_daily(db_path: str, stat: OptionDaily) -> int:
+    """Upsert 当日聚合行: 最新采集覆盖同日同源旧行 (当日重跑以新值为准)。"""
+    d = stat.to_dict()
+    del d["id"]
+    cols = list(d.keys())
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            f"""INSERT INTO options_daily ({", ".join(cols)})
+                VALUES ({", ".join(":" + c for c in cols)})
+                ON CONFLICT(stock_code, stat_date, source) DO UPDATE SET
+                {", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("stock_code", "stat_date", "source"))}
+                RETURNING id""",
+            d,
+        )
+        return cur.fetchone()[0]
+
+
+def backfill_option_daily(db_path: str, stat: OptionDaily) -> bool:
+    """回填历史行: 只补缺, 永不覆盖 (INSERT OR IGNORE)。
+
+    Longbridge 20 天滚动窗口漏采一天就永远缺一天, 但反过来已有的行
+    (通常是 CBOE 当日 fresh 值) 也不能被迟到的回填值覆盖。
+    """
+    d = stat.to_dict()
+    del d["id"]
+    cols = list(d.keys())
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            f"""INSERT OR IGNORE INTO options_daily ({", ".join(cols)})
+                VALUES ({", ".join(":" + c for c in cols)})""",
+            d,
+        )
+        return cur.rowcount > 0
+
+
+def get_option_daily_history(
+    db_path: str, stock_code: str, limit: int = 90, source: str | None = None
+) -> list[OptionDaily]:
+    """按日升序取最近 N 天聚合行 (跨源混排, detector 只看序列)。
+
+    实现要点: 先 DESC 取「最新的 N 行」再翻转回升序。若直接 ASC + LIMIT,
+    拿到的是**最老的** N 行 —— 窗口满了以后 detector 会永远停在最早的窗口上
+    (每天 z 值都基于两个月前的「当日」算, 信号再也不会触发)。
+    """
+    q = "SELECT * FROM options_daily WHERE stock_code=?"
+    params: list = [stock_code]
+    if source:
+        q += " AND source=?"
+        params.append(source)
+    q += " ORDER BY stat_date DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with _connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(q, params).fetchall()
+    return [
+        OptionDaily(
+            **{k: r[k] for k in r.keys() if k in OptionDaily.__dataclass_fields__}
+        )
+        for r in reversed(rows)
+    ]
+
+
+def get_latest_option_daily(
+    db_path: str, stock_code: str, source: str | None = None
+) -> OptionDaily | None:
+    hist = get_option_daily_history(db_path, stock_code, limit=1, source=source)
+    return hist[-1] if hist else None
+
+
+def insert_option_contracts(db_path: str, rows: list[dict]) -> int:
+    """批量写合约快照 (INSERT OR REPLACE: 当日重跑覆盖)。返回写入条数。"""
+    if not rows:
+        return 0
+    cols = list(rows[0].keys())
+    with _connect(db_path) as conn:
+        cur = conn.executemany(
+            f"""INSERT OR REPLACE INTO options_contracts ({", ".join(cols)})
+                VALUES ({", ".join(":" + c for c in cols)})""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def update_option_daily_stats(
+    db_path: str,
+    row_id: int,
+    z_pcr_oi: float | None = None,
+    z_volume: float | None = None,
+    iv_percentile: float | None = None,
+) -> None:
+    """detector 写回派生指标 (z 值 / IV 分位)。"""
+    with _connect(db_path) as conn:
+        conn.execute(
+            """UPDATE options_daily
+               SET z_pcr_oi=COALESCE(?, z_pcr_oi),
+                   z_volume=COALESCE(?, z_volume),
+                   iv_percentile=COALESCE(?, iv_percentile)
+               WHERE id=?""",
+            (z_pcr_oi, z_volume, iv_percentile, row_id),
         )

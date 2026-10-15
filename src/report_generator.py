@@ -1394,6 +1394,129 @@ def _report_window_days(
     return 1 if posts else FALLBACK_MAX_AGE_DAYS
 
 
+def _build_options_section(db_path: str, stocks_cfg: dict) -> str:
+    """期权温度计 (方向 8 Phase 1): 有数据才成节, 全员无数据返回空串。
+
+    读数口径如实标注: CBOE ~15 分钟延迟, OI 为 T-1; 期权信号是环境参考。
+    """
+    import sqlite3  # noqa: PLC0415 — 局部引入, 与既有 SQL 直查风格一致
+
+    rows_out: list[str] = []
+    alert_lines: list[str] = []
+    have_codes: set[str] = set()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return ""
+    try:
+        # 告警窗口 = 昨天 18:00 起。日报 19:00 生成, 上游有**两批**采集:
+        #   美股 07:05 当天写告警 → 落在当日 00:00 起的窗口内
+        #   港股 20:00 前一天写告警 → 严格按「当日 00:00 起」会整批落在窗外, 港股信号永不进报
+        # 用 18:00 起可同时覆盖两批, 且不会把上一日的美股告警重复带进来。
+        alert_since = int(datetime.now().replace(
+            hour=18, minute=0, second=0, microsecond=0).timestamp()) - 86400
+        for code in stocks_cfg:
+            row = conn.execute(
+                """SELECT * FROM options_daily WHERE stock_code=?
+                   ORDER BY stat_date DESC, source ASC LIMIT 1""",
+                (code,),
+            ).fetchone()
+            if row is None:
+                continue
+            name = stocks_cfg[code].get("name", code)
+            parts = [f"**{name}**"]
+            if row["pcr_oi"] is not None:
+                z = row["z_pcr_oi"]
+                parts.append(f"PCR-仓 {row['pcr_oi']:.2f}"
+                             + (f" (z={z:+.1f})" if z is not None else ""))
+            if row["pcr_volume"] is not None:
+                parts.append(f"PCR-量 {row['pcr_volume']:.2f}")
+            if row["atm_iv"] is not None:
+                iv = f"IV {row['atm_iv']:.1f}%"
+                if row["iv_percentile"] is not None:
+                    iv += f" (分位 {row['iv_percentile']:.0f}%)"
+                parts.append(iv)
+            if row["premium_yield"] is not None:
+                parts.append(f"收租率(年化) {row['premium_yield']:.0f}%")
+            walls = []
+            if row["wall_call"] is not None:
+                walls.append(f"Call 墙 {row['wall_call']:g}")
+            if row["wall_put"] is not None:
+                walls.append(f"Put 墙 {row['wall_put']:g}")
+            if walls:
+                parts.append(" / ".join(walls))
+            if row["max_pain"] is not None:
+                parts.append(f"MaxPain {row['max_pain']:g}")
+            dstr = datetime.fromtimestamp(row["stat_date"]).strftime("%m-%d")
+            parts.append(f"({dstr})")
+            rows_out.append("- " + " · ".join(parts) + "\n")
+            have_codes.add(code)
+
+        alerts = conn.execute(
+            """SELECT stock_code, alert_type, priority, detail FROM change_alert
+               WHERE alert_type LIKE 'options_%' AND alert_time >= ?
+               ORDER BY priority ASC, alert_time DESC""",
+            (alert_since,),
+        ).fetchall()
+        for a in alerts:
+            if a["stock_code"] not in stocks_cfg:
+                continue
+            try:
+                detail = json.loads(a["detail"]) if a["detail"] else {}
+            except (ValueError, TypeError):
+                detail = {}
+            name = stocks_cfg[a["stock_code"]].get("name", a["stock_code"])
+            icon = "🔴" if a["priority"] == "P0" else "🟡"
+            alert_lines.append(
+                f"- {icon} **{name}** {detail.get('signal', a['alert_type'])}\n"
+            )
+    finally:
+        conn.close()
+
+    if not rows_out:
+        return ""
+    lines = ["## 五、期权温度计\n"]
+    lines.extend(rows_out)
+    if alert_lines:
+        lines.append("\n**期权信号**\n")
+        lines.extend(alert_lines)
+    gap_note = _hk_no_option_note(db_path, stocks_cfg, have_codes)
+    if gap_note:
+        lines.append(gap_note)
+    lines.append(
+        "\n*期权读数为环境参考，不构成操作建议。美股 CBOE ~15 分钟延迟快照，"
+        "OI 为 T-1；港股为 HKEX 收盘清算值、无 IV；口径见 "
+        "plans/options-sense/PLAN.md。*\n"
+    )
+    return "\n" + "".join(lines) + "\n"
+
+
+def _hk_no_option_note(db_path: str, stocks_cfg: dict, have_codes: set[str]) -> str:
+    """自选港股里「压根没上市期权」的清单。
+
+    与「有期权但当日/本轮没采到」区分开: 只有在 HKEX 官方类代码表里查无此股,
+    才断定为无期权 —— 否则会把自己的漏采说成「标的没有期权」。
+    """
+    from .options_hk import class_cache_path, load_class_cache
+
+    cache = load_class_cache(class_cache_path(db_path))
+    try:
+        known = {int(k) for k in cache["map"]}  # type: ignore[index]
+    except (KeyError, TypeError, ValueError):
+        return ""
+    missing = []
+    for code, info in stocks_cfg.items():
+        if not code.upper().endswith(".HK") or code in have_codes:
+            continue
+        head = code.split(".")[0]
+        if head.isdigit() and int(head) not in known:
+            missing.append(info.get("name", code))
+    if not missing:
+        return ""
+    return f"\n- 自选港股中 {len(missing)} 只无上市期权：{'、'.join(missing)}\n"
+
+
 def enrich_details(
     db_path: str, date_str: str, config: dict
 ) -> tuple[dict[str, dict[str, str]], int, int]:
@@ -1635,6 +1758,14 @@ def generate_daily_report(
         logger.error(f"主线节失败(不阻塞): {e}")
         mainlines_md = "## 四、持续主线\n\n生成失败。\n"
 
+    # ── Section 5: 期权温度计 (方向 8; 无数据返回空串, 整节省略) ──
+    try:
+        options_md = _build_options_section(db_path, stocks_cfg)
+    except Exception as e:
+        logger.error(f"期权温度计节失败(不阻塞): {e}")
+        options_md = ""
+    options_block = f"\n---\n\n{options_md}\n" if options_md else ""
+
     # ── Assemble: 深读 → 标准 → 平稳(紧凑) ──
     deep_codes = sorted(
         (c for c, r in results.items() if r["tier"] == TIER_DEEP),
@@ -1728,6 +1859,7 @@ def generate_daily_report(
 ---
 
 {mainlines_md}
+{options_block}
 
 ---
 

@@ -121,6 +121,8 @@ cron (07:00)
 | F-017 | 健康检查脚本 | P2 | 已发布 | winterswang | 2026-06-01 | v0.1 | health_check.py | |
 | F-018 | 用户反馈闭环 | P0 | 已移除（v0.7.3 死代码清理） | winterswang | 2026-05-25 | v0.1 | feedback.py | 3个月0反馈 |
 | F-019 | 自选股情绪日报 | P1 | 已发布 | winterswang | 2026-06-02 | v0.1 | daily_sentiment_report.py | 64只全景看板 |
+| F-020 | options-sense 期权温度计 (方向 8 Phase 1) | P1 | 已发布 | winterswang | 2026-10-15 | v0.8 | options_collector.py, options_detector.py, report_generator.py | 美股 CBOE 逐合约采集 + Longbridge 20天回填/双源校验 + L1 z-score 信号; 港股 HKEX Phase 2; 设计见 plans/options-sense/PLAN.md; 调度 07:05 北京时间 (id f2dba8eb) |
+| F-021 | options-sense 覆盖补齐 (Phase 2: 标的来源+港股通道) | P1 | 已发布 | winterswang | 2026-10-15 | v0.8 | options_hk.py, collect_options.py, config.py, report_generator.py | ① 标的来源改从 etc/config.report.json 取 (与日报同源), 美股 3→19 只 —— 此前只读 config.json 的 crawler.whitelist, 漏采散在 g1..g5 组里的 16 只; ② 新上港股通道: 原 stock_options_detail.aspx 逐合约 CSV 路径 HKEX 改版后 404, 改走 DTOP 日报 (全市场 1 个 zip) + 官方类代码表映射, 港股 0→10 只 (池内 20 只中 10 只无上市期权, 日报显式标注); ③ 港股无 IV (DTOP 无该字段), 收租率用 Longbridge quote 作分母; 调度 20:00 北京时间 (id f8c5b037) |
 
 ---
 
