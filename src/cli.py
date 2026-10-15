@@ -11,6 +11,7 @@ Main pipeline:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
 import os
@@ -528,7 +529,14 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     hist_tfidfs.setdefault(he.word, []).append(he.tfidf_score)
                 for word, score in curr_tfidf.items():
                     hist = hist_tfidfs.get(word, [])
-                    z = detector.compute_z_score(score, hist) if len(hist) >= 3 else 0.0
+                    # 同 detector.detect_hot_word_emergence: 门按「不同自然日」,
+                    # 比较同精度 (历史存的是 round(x,4))。
+                    z = (
+                        detector.compute_z_score(round(score, 4), hist)
+                        if len({datetime.date.fromtimestamp(e.event_time).isoformat()
+                                for e in hist_events if e.word == word}) >= 3
+                        else 0.0
+                    )
                     db.insert_hot_word_event(db_path, HotWordEvent(
                         stock_code=stock_code,
                         word=word,
