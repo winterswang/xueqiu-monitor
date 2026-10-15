@@ -14,6 +14,7 @@ openpyxl>=3.1.0             # HKEX 股票期权类代码表 xlsx 解析 (options
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
+freezegun>=1.4.0            # 冻结时钟: 批次日志用例要造「今日但已停滞」的 mtime, 午夜前后会跨自然日
 
 # Development
 mypy>=1.5.0
