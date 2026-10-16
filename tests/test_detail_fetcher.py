@@ -713,3 +713,27 @@ class TestHtmlToText:
 
     def test_entities_unescaped(self):
         assert "A&B" in df._html_to_text("<p>A&amp;B</p>")
+
+
+def test_opencli_article_waf_surfaces_blocked_waf_marker(monkeypatch):
+    """BLOCKED_WAF 必须以 blocked_waf 标记上传 —— 回抓停轮靠它(issue #74)。
+
+    主流程语义不变：status 仍是 error，fetch_url_detail 照旧走 reader 兜底。
+    """
+    import subprocess
+
+    monkeypatch.setattr(df, "acquire_opencli_slot", lambda *a, **k: {"enabled": False})
+    monkeypatch.setattr(df, "record_opencli_call", lambda *a, **k: None)
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="opencli: BLOCKED_WAF risk wall"
+        )
+
+    monkeypatch.setattr(df.subprocess, "run", fake_run)
+
+    assert df._opencli_article("https://xueqiu.com/1/2") == {"blocked_waf": True}
+
+    res = df._fetch_page_opencli_adapter("https://xueqiu.com/1/2")
+    assert res["status"] == "error"
+    assert res["blocked_waf"] is True

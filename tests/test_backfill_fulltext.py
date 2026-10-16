@@ -122,3 +122,105 @@ def test_browser_subcommand_is_gone():
 
     assert '"browser"' not in body
     assert "settle" not in body
+
+
+# ── issue #74 剩余两点：适配器硬闸 + 风控停轮 ─────────────────────────────
+
+
+def _seed_candidates_db(tmp_path, n_posts: int = 2):
+    """造一个带候选的临时 monitor.db（crawl_snapshots 一行、n_posts 个高赞帖）。"""
+    import json
+    import sqlite3
+    import time as _time
+
+    db = tmp_path / "monitor.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE crawl_snapshots "
+        "(stock_code TEXT, crawl_time INTEGER, posts_data TEXT)"
+    )
+    posts = [
+        {"link": f"https://xueqiu.com/1/{1000 + i}", "type": "discussion",
+         "author": f"u{i}", "time": "2026-10-16 09:00",
+         "content": "卡" * 250, "like_count": 50,
+         "comment_count": 0, "forward_count": 0}
+        for i in range(n_posts)
+    ]
+    conn.execute(
+        "INSERT INTO crawl_snapshots VALUES ('SH600000', ?, ?)",
+        (int(_time.time()), json.dumps(posts)),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _run_main(monkeypatch, db, fetch_results, adapter_ok=True):
+    """跑 main()：替掉闸门与抓取，返回 (按序抓过的 url, 退出码)。"""
+    calls = []
+
+    def _fake_fetch(url):
+        calls.append(url)
+        return fetch_results[0] if len(fetch_results) == 1 else fetch_results.pop(0)
+
+    monkeypatch.setattr(bf, "_opencli_ok", lambda: True)
+    monkeypatch.setattr(bf, "_article_adapter_ok", lambda: adapter_ok)
+    monkeypatch.setattr(bf, "fetch_fulltext", _fake_fetch)
+    monkeypatch.setattr(sys, "argv", ["backfill_fulltext.py", "--db", str(db)])
+    return calls, bf.main()
+
+
+def test_adapter_missing_fails_fast(tmp_path, monkeypatch):
+    """适配器未注册：进门就明确失败(exit 3)，一次请求都不发(issue #74 第 1 条)。"""
+    db = _seed_candidates_db(tmp_path)
+    calls, code = _run_main(monkeypatch, db, [("正文", "ok")], adapter_ok=False)
+
+    assert code == 3
+    assert calls == []
+
+
+def test_waf_block_stops_the_round(tmp_path, monkeypatch):
+    """撞 WAF：立即停轮 + exit 4，剩余候选不再尝试(issue #74 第 2 条)。"""
+    db = _seed_candidates_db(tmp_path, n_posts=2)
+    calls, code = _run_main(monkeypatch, db, [("", "blocked-waf")])
+
+    assert code == 4
+    assert len(calls) == 1
+
+
+def test_cooldown_stops_the_round(tmp_path, monkeypatch):
+    """插件熔断冷却同样算风控：停轮 + exit 4。"""
+    db = _seed_candidates_db(tmp_path, n_posts=2)
+    calls, code = _run_main(monkeypatch, db, [("", "cooldown")])
+
+    assert code == 4
+    assert len(calls) == 1
+
+
+def test_normal_round_still_exits_zero(tmp_path, monkeypatch):
+    db = _seed_candidates_db(tmp_path, n_posts=2)
+    calls, code = _run_main(
+        monkeypatch, db, [("正" * 100, "ok"), ("文" * 100, "ok")]
+    )
+
+    assert code == 0
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("page", "expected"),
+    [
+        ({"title": "", "content": "", "status": "error", "blocked_waf": True},
+         "blocked-waf"),
+        ({"title": "", "content": "", "status": "cooldown", "channel": "cooldown"},
+         "cooldown"),
+    ],
+)
+def test_risk_signals_distinct_from_single_failure(
+    stub_page, monkeypatch, page, expected
+):
+    """blocked-waf/cooldown 与「这一篇坏了」(error)必须可区分 —— 停轮逻辑靠它。"""
+    stub_page(page)
+    monkeypatch.setattr(bf, "_opencli_ok", lambda: True)
+
+    assert bf.fetch_fulltext("https://xueqiu.com/1/2")[1] == expected

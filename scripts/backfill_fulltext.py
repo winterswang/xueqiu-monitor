@@ -28,7 +28,16 @@ Usage:
     python3 scripts/backfill_fulltext.py --top 10 --dry-run  # see candidates
     python3 scripts/backfill_fulltext.py --min-score 15 --hours 20
 
-Requirements: opencli installed + Chrome extension connected (opencli doctor).
+Requirements: opencli installed + Chrome extension connected (opencli doctor),
+plus the `web article` adapter registered —— 适配器缺失时明确失败（exit 3），
+绝不静默回退 legacy browser 通道（issue #74 第 1 条）。
+
+Exit codes:
+    0  正常结束（含无可回抓条目；失败未全灭时按历史口径也返回 0）
+    1  候选全失败
+    2  opencli 不可用（未安装或 Chrome 扩展未连接）
+    3  `web article` 适配器未注册
+    4  触发风控（BLOCKED_WAF 或熔断冷却），已停止本轮（issue #74 第 2 条）
 """
 
 from __future__ import annotations
@@ -60,6 +69,20 @@ def _opencli_ok() -> bool:
     try:
         r = subprocess.run(["opencli", "doctor"], capture_output=True, text=True, timeout=10)
         return "[OK] Extension: connected" in r.stdout
+    except Exception:
+        return False
+
+
+def _article_adapter_ok() -> bool:
+    """`web article` 适配器是否注册 —— 回抓的硬前置，缺失就明确失败。
+
+    `fetch_page_opencli` 在命令未注册时会静默回退 legacy browser 探针序列，
+    那条路不受统一限频保护、不进调用台账，正是 issue #74 第 1 条不让走的路。
+    """
+    try:
+        from src.detail_fetcher import _article_adapter_available
+
+        return bool(_article_adapter_available())
     except Exception:
         return False
 
@@ -138,9 +161,12 @@ def fetch_fulltext(url: str) -> tuple[str, str]:
     因而也共享它的超时预算、限频槽与调用台账。不要在这里另写一份 opencli 调用。
 
     Returns:
-        ``(text, status)``，status ∈ ``ok`` | ``empty`` | ``error`` | ``opencli-error``。
+        ``(text, status)``，status ∈ ``ok`` | ``empty`` | ``error`` | ``opencli-error``
+        | ``blocked-waf`` | ``cooldown``。
         ``opencli-error`` 表示**通道本身不可用**（调用方据此提前收工，不再空耗），
         与"这一篇抓不到"（``error``）区分开。
+        ``blocked-waf`` / ``cooldown`` 是**风控信号**（撞 WAF 页 / 插件熔断冷却中），
+        调用方必须停止整轮，而不是换下一篇继续撞（issue #74 第 2 条）。
     """
     from src.detail_fetcher import fetch_page_opencli
 
@@ -153,6 +179,9 @@ def fetch_fulltext(url: str) -> tuple[str, str]:
         return (r.get("content") or "").strip(), "ok"
     if status in ("empty", "junk"):
         return "", "empty"
+    if status == "cooldown" or r.get("blocked_waf"):
+        # 风控信号与「这一篇坏了」必须分开：doctor 显示桥还连着 ≠ 还能继续打。
+        return "", "blocked-waf" if r.get("blocked_waf") else "cooldown"
     # 单篇失败与桥断都落到 detail_fetcher 的 "error"；用 doctor 再判一次，
     # 只有通道真的不可用才让调用方提前终止。
     return "", "opencli-error" if not _opencli_ok() else "error"
@@ -192,13 +221,24 @@ def main() -> int:
     if not _opencli_ok():
         logger.error("opencli 不可用(未安装或 Chrome 扩展未连接),退出")
         return 2
+    if not _article_adapter_ok():
+        logger.error("web article 适配器未注册 —— 回抓拒绝回退 legacy 通道"
+                     "(不受限频、不进台账),退出")
+        return 3
 
     picked, ok, fail, no_gain = cands[:args.top], 0, 0, 0
+    risk_stop = ""
     for i, c in enumerate(picked, 1):
         text, status = fetch_fulltext(c["url"])
         if status != "ok" or not text:
             fail += 1
             logger.warning(f"[{i}/{len(picked)}] ✗ {status} | {c['url']}")
+            if status in ("blocked-waf", "cooldown"):
+                # 独立风控状态：撞墙后换一篇继续只会把墙养得更凶（issue #74 第 2 条）
+                risk_stop = status
+                logger.error(f"[{i}/{len(picked)}] 触发风控({status}),停止本轮,"
+                             f"剩余 {len(picked) - i} 条未尝试")
+                break
             if status.startswith("opencli"):
                 break  # bridge dead, stop wasting attempts
             continue
@@ -225,7 +265,11 @@ def main() -> int:
                     f"({c['author'][:10]}) | {text[:50]}")
         time.sleep(1.0 + (i % 3) * 0.4)  # polite pacing
 
-    logger.info(f"回抓完成: 成功 {ok}, 无增益 {no_gain}, 失败 {fail} (共试 {len(picked)})")
+    logger.info(f"回抓完成: 成功 {ok}, 无增益 {no_gain}, 失败 {fail}"
+                + (f", 风控停轮({risk_stop})" if risk_stop else "")
+                + f" (共试 {len(picked)})")
+    if risk_stop:
+        return 4
     return 0 if fail < len(picked) else 1
 
 
