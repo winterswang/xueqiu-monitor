@@ -194,3 +194,32 @@ class TestOptionHistoryWindow:
             ))
         row = db.get_latest_option_daily(db_path, "PDD.US", source="cboe")
         assert row is not None and row.stat_date == 2002
+
+
+class TestPremiumYieldDte:
+    """收租率按实际 DTE 年化 (×12 旧算法隐含当月合约, 周期权被低估 ~30 倍)。"""
+
+    def test_yield_uses_actual_dte(self):
+        expiry = (datetime.now().date() + timedelta(days=7)).isoformat()
+        agg = options_collector.aggregate_chain(_raw_snapshot(expiry), SYMBOL)
+        dte = (datetime.fromisoformat(expiry).date()
+               - options_collector._et_now().date()).days
+        assert agg["premium_yield_dte"] == dte
+        # ATM (strike 80): mid=1.1 / spot=80 ×100 = 1.375%
+        assert agg["premium_yield"] == round(1.375 / dte * 365, 3)
+
+    def test_same_day_expiry_excluded(self):
+        """0DTE 链的权利金是衰减噪声 —— 2026-10-17 PDD「76%」就是它 ×12 的产物。"""
+        today = options_collector._et_now().date()
+        ymd0 = today.strftime("%y%m%d")
+        d7 = today + timedelta(days=7)
+        ymd7 = d7.strftime("%y%m%d")
+        raw = {"data": {"current_price": SPOT, "iv30": 30.0, "options": [
+            _cboe_opt(SYMBOL, ymd0, "C", 80, open_interest=900),
+            _cboe_opt(SYMBOL, ymd0, "P", 80, open_interest=900),
+            _cboe_opt(SYMBOL, ymd7, "C", 80, open_interest=300),
+            _cboe_opt(SYMBOL, ymd7, "P", 80, open_interest=300),
+        ]}}
+        agg = options_collector.aggregate_chain(raw, SYMBOL)
+        assert agg["premium_yield_dte"] == 7
+        assert agg["premium_yield"] == round(1.375 / 7 * 365, 3)

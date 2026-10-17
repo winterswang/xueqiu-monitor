@@ -29,6 +29,9 @@ ET = ZoneInfo("America/New_York")
 CBOE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
 
 # daily_matrix.py 踩坑沉淀的三道报价过滤闸 (防占位价/空挂价污染指标):
+# 收租率 ATM call 的最短到期天数: 排除 0DTE/隔日链的衰减噪声, 让年化跨股可比
+MIN_YIELD_DTE = 5
+
 _MIN_BID = 0.0
 _MIN_ASK = 0.03
 _MAX_SPREAD_RATIO = 0.60
@@ -194,18 +197,32 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
         mp = _max_pain([r for r in rows_e if r["cp"] == "C"],
                        [r for r in rows_e if r["cp"] == "P"])
 
-    # ATM call 权利金率年化: 最近到期月里离现价最近的过闸 call, mid ÷ spot ×12。
-    # 必须限定到期月 —— 同一行权价在多个到期月都有, 不限定会把 LEAPS 当月化基数。
-    atm_calls = [r for r in contract_rows if r["cp"] == "C" and r["iv"]]
+    # ATM call 权利金率年化: 最近到期里离现价最近的过闸 call, 按实际 DTE 折算
+    # (premium_pct / DTE × 365)。必须限定到期 —— 不限定会把远期 LEAPS 当基数。
+    # 旧算法 ×12 隐含「当月合约」: 同样的权利金, 周期权被低估 ~30 倍、45 天合约
+    # 被高估 1.5 倍 (2026-10-18 修)。DTE 基准 = ET 交易日; dte 随值落库供报告标注。
+    # 另排除当日到期 (0DTE) 链并要求 dte >= MIN_YIELD_DTE: 收盘后的 0DTE 权利金是
+    # 衰减噪声不是可收的租 —— 2026-10-17 PDD 的「76%」就是 ×12 乘在 0DTE 上的产物。
+    # 排除当日到期 (0DTE) 链: 收盘后它的权利金是衰减噪声, 不是可收的租 ——
+    # 2026-10-17 PDD 的「76%」就是 ×12 乘在 0DTE 权利金上的产物。
+    pool = []
+    for r in contract_rows:
+        if r["cp"] != "C" or not r["iv"] or r["expiry"] <= today_et.isoformat():
+            continue
+        d = (datetime.fromisoformat(r["expiry"]).date() - today_et).days
+        if d >= MIN_YIELD_DTE:
+            pool.append((r, d))
     premium_yield = None
-    if atm_calls:
-        front = min(r["expiry"] for r in atm_calls)
-        atm = min(
-            (r for r in atm_calls if r["expiry"] == front),
-            key=lambda r: abs(r["strike"] / spot - 1),
+    premium_yield_dte = None
+    if pool:
+        front = min(d for _, d in pool)
+        atm, dte = min(
+            (rd for rd in pool if rd[1] == front),
+            key=lambda rd: abs(rd[0]["strike"] / spot - 1),
         )
         if atm["premium_pct"] and atm["premium_pct"] > 0:
-            premium_yield = round(atm["premium_pct"] * 12, 3)
+            premium_yield = round(atm["premium_pct"] / dte * 365, 3)
+            premium_yield_dte = dte
 
     iv30 = _f(data.get("iv30"))
     return {
@@ -219,6 +236,7 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
         "pcr_oi": round(put_oi / call_oi, 4) if call_oi else None,
         "atm_iv": iv30,
         "premium_yield": premium_yield,
+        "premium_yield_dte": premium_yield_dte,
         "max_pain": mp,
         "chain_expiry": chain_expiry,
         "wall_call": wall_call,
@@ -267,6 +285,7 @@ def collect_us_symbol(db_path: str, symbol: str) -> dict:
         pcr_oi=agg["pcr_oi"],
         atm_iv=agg["atm_iv"],
         premium_yield=agg["premium_yield"],
+        premium_yield_dte=agg.get("premium_yield_dte"),
         max_pain=agg["max_pain"],
         chain_expiry=agg.get("chain_expiry"),
         wall_call=agg["wall_call"],
