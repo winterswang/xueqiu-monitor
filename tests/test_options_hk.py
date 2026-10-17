@@ -122,6 +122,11 @@ class TestAggregateHkChain:
         assert agg["call_oi"] == 400 and agg["put_oi"] == 200
         assert agg["pcr_oi"] == 0.5
 
+    def test_premium_yield_uses_actual_dte(self):
+        agg = self._agg()
+        assert agg["premium_yield_dte"] == 15   # 10-14 → 2026-10-29
+        assert agg["premium_yield"] == round(5.0 / 149 * 100 / 15 * 365, 3)
+
     def test_chain_expiry_recorded(self):
         agg = self._agg()
         assert agg["chain_expiry"] == "2026-10-29"  # _POP_RAW 里唯一的到期
@@ -136,8 +141,9 @@ class TestAggregateHkChain:
 
     def test_premium_yield_annualized(self):
         agg = self._agg()
-        # ATM call 150: settle 5.0 / spot 149 × 100 = 3.3557% → ×12
-        assert agg["premium_yield"] == round(5.0 / 149.0 * 100 * 12, 3)
+        # ATM call 150: settle 5.0 / spot 149 × 100 = 3.3557%, DTE=15 实际折算
+        assert agg["premium_yield"] == round(5.0 / 149.0 * 100 / 15 * 365, 3)
+        assert agg["premium_yield_dte"] == 15
 
     def test_atm_iv_is_none_by_design(self):
         assert self._agg()["atm_iv"] is None

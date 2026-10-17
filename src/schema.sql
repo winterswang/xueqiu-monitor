@@ -259,6 +259,7 @@ CREATE TABLE IF NOT EXISTS options_daily (
     atm_iv        REAL,                              -- 美股=CBOE iv30(%); 港股=ATM 合约 iv(%)
     iv_percentile REAL,                              -- detector 写回 (0~100)
     premium_yield REAL,                              -- ATM call 权利金率年化 (%)
+    premium_yield_dte INTEGER,                       -- 收租率年化所用实际到期天数
     max_pain      REAL,
     chain_expiry  TEXT,                              -- MaxPain 所属到期链 (OI 最集中的到期); 墙为 ±20% 混合口径
     wall_call     REAL,                              -- call OI 最大行权价

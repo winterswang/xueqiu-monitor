@@ -132,6 +132,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     if opt_cols and not any(c[1] == "chain_expiry" for c in opt_cols):
         conn.execute("ALTER TABLE options_daily ADD COLUMN chain_expiry TEXT")
         logger.info("[migrate] added column chain_expiry to options_daily")
+    if opt_cols and not any(c[1] == "premium_yield_dte" for c in opt_cols):
+        conn.execute("ALTER TABLE options_daily ADD COLUMN premium_yield_dte INTEGER")
+        logger.info("[migrate] added column premium_yield_dte to options_daily")
 
     ann_cols = conn.execute("PRAGMA table_info(announcements)").fetchall()
     if not any(c[1] == "ann_link" for c in ann_cols):

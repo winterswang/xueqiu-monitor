@@ -636,8 +636,9 @@ _OPTIONS_GUIDE = """期权定价的是**未来**（标的未来一段时间的�
 - z 值：相对该股**自身历史**的偏离，|z| ≥ 2 才算真的异常
 - IV / IV 分位：市场为未来波动定的价；分位高 = 不确定性定价高（常见于事件前）。
   没给分位时不要断言 IV「偏高/不低」—— 绝对水平因股而异，无基线不可比
-- 收租率（年化）：按月滚动卖出 ATM call 的权利金收入；与 IV 同源（都来自期权
-  价格），不要当作独立于 IV 的第二证据重复引用
+- 收租率（年化）：按**实际到期天数**（标注的 DTE，最短取 5 天）折算的滚动卖 ATM call 权利金
+  收入；与 IV 同源（都来自期权价格），不要当作独立于 IV 的第二证据重复引用。
+  DTE 越短，同样权利金折出的年化越高 —— 隐含「可按同条件反复滚动」的假设
 - Call 墙 / Put 墙：持仓最集中的行权价（±20% 价内外、各到期混合口径），常成为
   上方阻力 / 下方支撑，也容易钉住价格
 - MaxPain：期权卖方损失最小的到期价位，**属于标注的到期链** —— 引力/钉住强度与
@@ -668,7 +669,10 @@ def _options_readings(opt: dict) -> str:
             iv += f" (分位 {opt['iv_percentile']:.0f}%)"
         parts.append(iv)
     if opt.get("premium_yield") is not None:
-        parts.append(f"收租率(年化) {opt['premium_yield']:.0f}%")
+        py = f"收租率(年化) {opt['premium_yield']:.0f}%"
+        if opt.get("premium_yield_dte"):
+            py += f"（{opt['premium_yield_dte']} 天期折算）"
+        parts.append(py)
     walls = []
     if opt.get("wall_call") is not None:
         walls.append(f"Call 墙 {opt['wall_call']:g}")

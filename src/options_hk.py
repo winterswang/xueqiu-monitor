@@ -34,7 +34,7 @@ from urllib.parse import urljoin
 from . import db
 from .db import local_day_start
 from .models import OptionDaily
-from .options_collector import _f, _max_oi_strike, _max_pain
+from .options_collector import MIN_YIELD_DTE, _f, _max_oi_strike, _max_pain
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +356,7 @@ def aggregate_hk_chain(
         else []
     )
     _hk_mp, _hk_chain = _hk_max_pain(near)
+    _py, _py_dte = _hk_premium_yield(near, px, stat_date) if px else (None, None)
     return {
         "spot": spot,
         "stat_date": stat_date,
@@ -366,7 +367,8 @@ def aggregate_hk_chain(
         "pcr_volume": round(put_vol / call_vol, 4) if call_vol else None,
         "pcr_oi": round(put_oi / call_oi, 4) if call_oi else None,
         "atm_iv": None,  # DTOP 无 IV
-        "premium_yield": _hk_premium_yield(near, px) if px else None,
+        "premium_yield": _py,
+        "premium_yield_dte": _py_dte,
         "max_pain": _hk_mp,
         "chain_expiry": _hk_chain,
         "wall_call": _max_oi_strike(near, "C"),
@@ -384,21 +386,32 @@ def _gate_row(c: dict, px: float | None) -> dict:
     }
 
 
-def _hk_premium_yield(near: list[dict], spot: float) -> float | None:
-    """ATM call 权利金率年化 (premium_pct × 12)。
+def _hk_premium_yield(
+    near: list[dict], spot: float, stat_date: int
+) -> tuple[float | None, int | None]:
+    """ATM call 权利金率按实际 DTE 年化 (premium_pct / DTE × 365), 连同 DTE 返回。
 
-    只取**最近到期月**: 同一个行权价在多个到期月都有 (POP 的 150 在 OCT/NOV/
-    JUN-27 各有一份), 不限定到期月会把远期 LEAPS 当近月, 年化被放大数倍。
+    只取**最近到期**: 同一个行权价在多个到期月都有, 不限定会把远期 LEAPS 当近月。
+    旧算法 ×12 隐含「当月合约」, 周期权被低估 ~30 倍 (2026-10-18 修)。
+    DTE 基准 = stat_date 当天 (香港与北京同日)。
     """
-    calls = [r for r in near if r["cp"] == "C" and (r["premium_pct"] or 0) > 0]
-    if not calls:
-        return None
-    front = min(r["expiry"] for r in calls)
-    atm = min(
-        (r for r in calls if r["expiry"] == front),
-        key=lambda r: abs(r["strike"] - spot),
+    base = datetime.fromtimestamp(stat_date).date()
+    day_iso = base.isoformat()
+    pool = []
+    for r in near:
+        if r["cp"] != "C" or (r["premium_pct"] or 0) <= 0 or r["expiry"] <= day_iso:
+            continue
+        d = (date.fromisoformat(r["expiry"]) - base).days
+        if d >= MIN_YIELD_DTE:
+            pool.append((r, d))
+    if not pool:
+        return None, None
+    front = min(d for _, d in pool)
+    atm, dte = min(
+        (rd for rd in pool if rd[1] == front),
+        key=lambda rd: abs(rd[0]["strike"] - spot),
     )
-    return round(atm["premium_pct"] * 12, 3)
+    return round(atm["premium_pct"] / dte * 365, 3), dte
 
 
 def _hk_max_pain(near: list[dict]) -> tuple[float | None, str | None]:
@@ -443,6 +456,7 @@ def _to_option_row(sym: str, stat_date: int, agg: dict) -> OptionDaily:
         pcr_oi=agg["pcr_oi"],
         atm_iv=agg["atm_iv"],
         premium_yield=agg["premium_yield"],
+        premium_yield_dte=agg.get("premium_yield_dte"),
         max_pain=agg["max_pain"],
         chain_expiry=agg.get("chain_expiry"),
         wall_call=agg["wall_call"],

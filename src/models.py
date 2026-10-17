@@ -125,6 +125,7 @@ class OptionDaily:
     atm_iv: float | None = None
     iv_percentile: float | None = None
     premium_yield: float | None = None
+    premium_yield_dte: int | None = None
     max_pain: float | None = None
     wall_call: float | None = None
     wall_put: float | None = None
