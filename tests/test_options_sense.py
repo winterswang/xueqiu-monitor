@@ -77,6 +77,8 @@ class TestAggregateChain:
         agg = options_collector.aggregate_chain(_raw_snapshot(expiry), SYMBOL)
         assert agg is not None
         assert agg["spot"] == SPOT
+        # MaxPain 所属到期链必须随值一起返回 (报告端标注「引力属于哪条链」)
+        assert agg["chain_expiry"] == expiry
         assert agg["atm_iv"] == pytest.approx(32.2)
         # 占位/空挂 (C82 bid=0, P80 价差 150%) 被闸掉
         assert all(r["ask"] >= 0.03 for r in agg["contracts"])

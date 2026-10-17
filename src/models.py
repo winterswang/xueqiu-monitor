@@ -128,6 +128,7 @@ class OptionDaily:
     max_pain: float | None = None
     wall_call: float | None = None
     wall_put: float | None = None
+    chain_expiry: str | None = None
     z_pcr_oi: float | None = None
     z_volume: float | None = None
     source: str = "cboe"
