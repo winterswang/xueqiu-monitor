@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS options_daily (
     iv_percentile REAL,                              -- detector 写回 (0~100)
     premium_yield REAL,                              -- ATM call 权利金率年化 (%)
     max_pain      REAL,
+    chain_expiry  TEXT,                              -- MaxPain 所属到期链 (OI 最集中的到期); 墙为 ±20% 混合口径
     wall_call     REAL,                              -- call OI 最大行权价
     wall_put      REAL,                              -- put OI 最大行权价
     z_pcr_oi      REAL,                              -- detector 写回

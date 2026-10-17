@@ -355,6 +355,7 @@ def aggregate_hk_chain(
         if px
         else []
     )
+    _hk_mp, _hk_chain = _hk_max_pain(near)
     return {
         "spot": spot,
         "stat_date": stat_date,
@@ -366,7 +367,8 @@ def aggregate_hk_chain(
         "pcr_oi": round(put_oi / call_oi, 4) if call_oi else None,
         "atm_iv": None,  # DTOP 无 IV
         "premium_yield": _hk_premium_yield(near, px) if px else None,
-        "max_pain": _hk_max_pain(near),
+        "max_pain": _hk_mp,
+        "chain_expiry": _hk_chain,
         "wall_call": _max_oi_strike(near, "C"),
         "wall_put": _max_oi_strike(near, "P"),
         "contracts": gated,
@@ -399,18 +401,22 @@ def _hk_premium_yield(near: list[dict], spot: float) -> float | None:
     return round(atm["premium_pct"] * 12, 3)
 
 
-def _hk_max_pain(near: list[dict]) -> float | None:
-    """OI 最集中的到期日 (通常是近月) 上的 Max Pain。"""
+def _hk_max_pain(near: list[dict]) -> tuple[float | None, str | None]:
+    """OI 最集中的到期日 (通常是近月) 上的 Max Pain, 连同该到期一起返回。
+
+    到期要随值一起落库 (chain_expiry): 报告端靠它标注「引力/钉住」属于哪条链。
+    """
     by_expiry: dict[str, list[dict]] = {}
     for r in near:
         by_expiry.setdefault(r["expiry"], []).append(r)
     if not by_expiry:
-        return None
+        return None, None
     big = max(by_expiry, key=lambda e: sum(r["oi"] or 0 for r in by_expiry[e]))
     rows = by_expiry[big]
-    return _max_pain(
+    mp = _max_pain(
         [r for r in rows if r["cp"] == "C"], [r for r in rows if r["cp"] == "P"]
     )
+    return mp, big
 
 
 # ── 编排 ──────────────────────────────────────────────────
@@ -438,6 +444,7 @@ def _to_option_row(sym: str, stat_date: int, agg: dict) -> OptionDaily:
         atm_iv=agg["atm_iv"],
         premium_yield=agg["premium_yield"],
         max_pain=agg["max_pain"],
+        chain_expiry=agg.get("chain_expiry"),
         wall_call=agg["wall_call"],
         wall_put=agg["wall_put"],
         source="hkex",

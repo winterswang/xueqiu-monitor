@@ -121,6 +121,10 @@ class TestAggregateHkChain:
         agg = self._agg()
         assert agg["call_oi"] == 400 and agg["put_oi"] == 200
         assert agg["pcr_oi"] == 0.5
+
+    def test_chain_expiry_recorded(self):
+        agg = self._agg()
+        assert agg["chain_expiry"] == "2026-10-29"  # _POP_RAW 里唯一的到期
         assert agg["call_volume"] == 10 and agg["put_volume"] == 20
         assert agg["pcr_volume"] == 2.0
 

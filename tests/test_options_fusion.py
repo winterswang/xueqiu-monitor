@@ -222,3 +222,59 @@ class TestFreshnessGuard:
         assert res["analyzed"] is False
         assert "期权读数（2026-10-14" in res["section"]
         assert "CBOE" in res["section"]
+
+
+class TestChainExpiryAnnotation:
+    """MaxPain 必须标出到期链 —— 模型此前拿快照日期猜, 5 只里 4 只猜错 (2026-10-16)。"""
+
+    def test_readings_annotate_chain_expiry(self):
+        out = rg._options_readings({
+            "stat_date": STAT, "source": "cboe", "max_pain": 200.0,
+            "chain_expiry": "2027-01-15",
+        })
+        assert "MaxPain 200（属 2027-01-15 到期链）" in out
+
+    def test_readings_omit_annotation_when_absent(self):
+        out = rg._options_readings({
+            "stat_date": STAT, "source": "cboe", "max_pain": 200.0,
+        })
+        assert "到期链" not in out
+
+    def test_guide_marks_yield_same_source_as_iv(self):
+        """收租率与 IV 同源 —— 指南必须禁止把它当第二证据重复引用。"""
+        blk = rg._format_options_block({
+            "stat_date": STAT, "source": "cboe", "pcr_oi": 0.73,
+        })
+        assert "同源" in blk
+        assert "市场愿为这段波动付多少钱" not in blk  # 旧措辞已删
+
+    def test_guide_says_no_iv_verdict_without_percentile(self):
+        blk = rg._format_options_block({
+            "stat_date": STAT, "source": "cboe", "pcr_oi": 0.73,
+        })
+        assert "无基线不可比" in blk
+
+
+class TestChainExpiryMigration:
+    def test_old_schema_gets_column(self, tmp_path):
+        """旧库 (无 chain_expiry 列) 经 init_db 迁移后必须有该列。"""
+        import sqlite3
+        db_path = str(tmp_path / "old.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE options_daily (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_code TEXT NOT NULL,
+            stat_date INTEGER NOT NULL,
+            call_volume INTEGER, put_volume INTEGER, call_oi INTEGER, put_oi INTEGER,
+            pcr_volume REAL, pcr_oi REAL, atm_iv REAL, iv_percentile REAL,
+            premium_yield REAL, max_pain REAL, wall_call REAL, wall_put REAL,
+            z_pcr_oi REAL, z_volume REAL,
+            source TEXT NOT NULL DEFAULT 'cboe')""")
+        conn.commit()
+        conn.close()
+        db.init_db(db_path)
+        cols = {
+            r[1]
+            for r in sqlite3.connect(db_path).execute("PRAGMA table_info(options_daily)")
+        }
+        assert "chain_expiry" in cols

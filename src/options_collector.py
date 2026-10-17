@@ -180,13 +180,16 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
     wall_call = _max_oi_strike(near, "C")
     wall_put = _max_oi_strike(near, "P")
 
-    # Max Pain: OI 最集中的到期日 (通常是近月)
+    # Max Pain: OI 最集中的到期日 (通常是近月); 该到期随值一起落库 (chain_expiry)
+    # —— 报告端要靠它标注「引力/钉住」属于哪条链, 否则模型只能拿快照日期猜 (2026-10-16)。
     mp = None
+    chain_expiry = None
     by_expiry: dict[str, list[dict]] = {}
     for r in near:
         by_expiry.setdefault(r["expiry"], []).append(r)
     if by_expiry:
         big_expiry = max(by_expiry, key=lambda e: sum(r["oi"] for r in by_expiry[e]))
+        chain_expiry = big_expiry
         rows_e = by_expiry[big_expiry]
         mp = _max_pain([r for r in rows_e if r["cp"] == "C"],
                        [r for r in rows_e if r["cp"] == "P"])
@@ -217,6 +220,7 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
         "atm_iv": iv30,
         "premium_yield": premium_yield,
         "max_pain": mp,
+        "chain_expiry": chain_expiry,
         "wall_call": wall_call,
         "wall_put": wall_put,
         "contracts": contract_rows,
@@ -264,6 +268,7 @@ def collect_us_symbol(db_path: str, symbol: str) -> dict:
         atm_iv=agg["atm_iv"],
         premium_yield=agg["premium_yield"],
         max_pain=agg["max_pain"],
+        chain_expiry=agg.get("chain_expiry"),
         wall_call=agg["wall_call"],
         wall_put=agg["wall_put"],
         source="cboe",
