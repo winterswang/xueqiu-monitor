@@ -2,8 +2,10 @@
 
 背景：插件层限速器（独立仓 `opencli-adapters`，本机装在 `~/.opencli/plugins/`）的等待发生在
 **opencli 子进程内部**，会被调用方 `subprocess.run(timeout=…)` 的墙钟一并计时。它的策略是
-「6–12 秒间隔 + 每 30 次一次 45–75 秒长停」，所以单次最坏等待 =
-取锁 `LOCK_WAIT_MS` + `max_delay_s` + `long_pause_max_s` + 一次真实执行。
+「6–12 秒间隔 + 每 30 次一次 45–75 秒长停 + 滚动小时额度的有界等待
+（`window_wait_max_s`，opencli-adapters#4）」，所以单次最坏等待 =
+取锁 `LOCK_WAIT_MS` + `max_delay_s` + `long_pause_max_s` + `window_wait_max_s`
++ 一次真实执行。
 调用方超时若低于它，**长停一命中就必然被误杀**（表现为那一只股票静默降级成失败）。
 
 为什么 monitor 需要这条：crawler 侧早有一条同样的守卫（`xueqiu-crawler/tests/
@@ -77,6 +79,7 @@ def plugin_worst_wait_seconds() -> float:
         _plugin_const_ms("LOCK_WAIT_MS")
         + _plugin_number("max_delay_s")
         + _plugin_number("long_pause_max_s")
+        + _plugin_number("window_wait_max_s")
     )
 
 
