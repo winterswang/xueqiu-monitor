@@ -37,8 +37,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: winterswang/opencli-adapters
-          # 2026-10-13 升 ref：6ed6c56 移除了 xiaohongshu search 覆盖（插件命令 7 → 6 条）。
-          ref: 6ed6c5676e8d95787da749998c0461e5c7b05563
+          # 2026-10-18 升 ref：4b61421 滚动小时额度（opencli-adapters#10）——
+          # test_opencli_contract 的守卫公式纳入 window_wait_max_s（严格断言，
+          # 旧 ref 的 XUEQIU_PACE 没这个键会红）；#7 熔断状态目录认 OPENCLI_STATE_DIR；
+          # #11 CI 补 npm ci + 声明 @jackwener/opencli 依赖。中间还落了 af0f0b7
+          # （xueqiu hot 适配器，插件命令 6 → 7 条）。
+          ref: c68d16622285e569e811304276af6447860248d5
           path: _deps/opencli-adapters
 
       - uses: actions/setup-python@v5
