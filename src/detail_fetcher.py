@@ -440,10 +440,12 @@ def _opencli_article(url: str) -> Optional[dict]:
     与 `_opencli` 的两点差别：命令形态是 `web article`（不是 browser 子命令），
     以及错误只出现在 stderr。
 
-    风控会用专属错误码 BLOCKED_WAF 报出来，这里只把它**单独记一条告警** ——
-    两种失败最终都是 `status="error"`：下游 fetch_url_detail 对 error 走 reader
-    兜底，而 reader 是服务端抓取、不受本地风控影响，正是不该重试时该走的路。
-    分开记是为了排查时一眼看出「是被拦了」而不是「页面坏了」。
+    风控会用专属错误码 BLOCKED_WAF 报出来，这里除了**单独记一条告警**，还返回
+    ``{"blocked_waf": True}`` 哨兵 —— 两种失败对主流程都是 `status="error"`：
+    下游 fetch_url_detail 对 error 走 reader 兜底，而 reader 是服务端抓取、
+    不受本地风控影响，正是不该重试时该走的路。分开记是为了排查时一眼看出
+    「是被拦了」而不是「页面坏了」；`scripts/backfill_fulltext.py` 则靠这个
+    哨兵停整轮（issue #74）。
     """
     cmd = ["opencli", "web", "article", url, "-f", "json"]
     slot = acquire_opencli_slot("web article", cmd)
@@ -471,6 +473,7 @@ def _opencli_article(url: str) -> Optional[dict]:
         stderr = r.stderr or ""
         if "BLOCKED_WAF" in stderr:
             logger.warning(f"[detail] web article 撞风控页: {url[:60]}")
+            return {"blocked_waf": True}
         else:
             logger.warning(
                 f"[detail] web article 失败: {url[:60]} {stderr.strip()[:160]}"
@@ -496,6 +499,11 @@ def _fetch_page_opencli_adapter(url: str, max_chars: int | None = DETAIL_MAX_CHA
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
     row = _opencli_article(url)
+    if row and row.get("blocked_waf"):
+        # 风控是「这一批都别再打了」的信号，不是「这一篇坏了」：status 维持
+        # error（主流程照旧走 reader 兜底），另带 blocked_waf 给回抓停轮用。
+        return {"title": "", "content": "", "status": "error",
+                "channel": "opencli", "blocked_waf": True}
     if not row:
         return {"title": "", "content": "", "status": "error", "channel": "opencli"}
     title = str(row.get("title") or "").strip()
