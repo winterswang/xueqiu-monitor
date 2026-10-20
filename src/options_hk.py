@@ -6,10 +6,10 @@
   一次请求即覆盖全部自选港股, 免费、无账号。
 - 类代码映射: 产品页挂的 The-List-of-Stock-Option-Classes-*.xlsx
   (SEHK code ↔ HKATS code, 如 981→SMC / 9992→POP)。
-- 正股价: Longbridge CLI ``quote`` (DTOP 不含标的价格, 收租率需要它做分母)。
+- 正股价: Longbridge CLI ``quote`` (DTOP 不含标的价格, 备兑收益率需要它做分母)。
 
 口径边界: DTOP 没有 IV 也没有盘口 (bid/ask), 故港股为 PCR(仓/量) + 期权墙 +
-Max Pain + 收租率年化, ``atm_iv`` 留空; 流动性闸由 bid/ask 改为 settle>0 且
+Max Pain + 备兑收益率年化, ``atm_iv`` 留空; 流动性闸由 bid/ask 改为 settle>0 且
 (oi>0 或 volume>0)。OI 是当日收盘清算值 (非 T-1)。
 
 采集失败必须显式报错, 不得用旧数据充数 (用户 2026-10-13 明确要求)。
@@ -291,7 +291,7 @@ def _parse_dtop_row(row: list[str], cls: str) -> list[dict]:
 
 
 def fetch_spot(symbols: list[str], cli: str = "longbridge") -> dict[str, float]:
-    """Longbridge 批量取正股价。失败返回 {} (收租率降级为 None, 不阻塞采集)。"""
+    """Longbridge 批量取正股价。失败返回 {} (备兑收益率降级为 None, 不阻塞采集)。"""
     if not symbols:
         return {}
     try:

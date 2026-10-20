@@ -90,7 +90,7 @@ class TestFormatOptionsBlock:
         # 目标说明 —— 用户要求「让 LLM 感知到期权数据的价值和目标」
         assert "未来" in blk and "方向" in blk and "已发生" in blk
         # 逐项解读
-        for kw in ("PCR-仓", "IV", "收租率", "MaxPain", "墙"):
+        for kw in ("PCR-仓", "IV", "备兑收益率", "MaxPain", "墙"):
             assert kw in blk
         # 实际读数 + 口径
         assert "0.73" in blk and "32.4" in blk and "2026-10-14" in blk
@@ -309,7 +309,11 @@ class TestYieldDteAnnotation:
                 "premium_yield_dte": 2,
             }
         )
-        assert "收租率(年化) 76%（2 天期折算）" in out
+        # 备兑收益率必须给出权利金绝对值 + 期限 + 资金口径 —— 单看年化百分数
+        # 没有锚 (用户 2026-10-18: 收租率「没有任何信息价值」)。
+        assert "备兑收益率(年化) 76%" in out
+        assert "2 天期权利金 0.4%" in out        # 76 × 2/365 = 0.4164 → .1f
+        assert "占正股市值" in out
 
     def test_readings_no_dte_label_without_value(self):
         out = rg._options_readings(
@@ -319,7 +323,8 @@ class TestYieldDteAnnotation:
                 "premium_yield": 76.0,
             }
         )
-        assert "天期折算" not in out
+        assert "备兑收益率(年化) 76%" in out
+        assert "天期权利金" not in out
 
 
 class TestOptionAnnotationsBackfill:
