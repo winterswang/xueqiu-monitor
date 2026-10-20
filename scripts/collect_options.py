@@ -7,7 +7,7 @@ crawler.whitelist, 只覆盖到 3 只美股, 漏采了散在 g1..g5 分组里的
 
 两个市场通道时间不同, 分两条 cron 跑:
   --market us  (默认) 北京 07:05, 美股收盘后:  CBOE 逐合约 → Longbridge 回填+交叉校验
-  --market hk         北京 20:00, 港股清算后:  HKEX DTOP 日报 → (无 IV, 收租率需 Longbridge spot)
+  --market hk         北京 20:00, 港股清算后:  HKEX DTOP 日报 → (无 IV, 备兑收益率需 Longbridge spot)
 
 单股失败不阻塞其他股票; 全市场全失败时 exit 1 (cron 可见)。
 """
@@ -73,7 +73,7 @@ def _log_us_summary(out: dict, symbols: list[str]) -> int:
         else:
             logger.info(
                 f"{sym}: S0={r['spot']:.2f} PCR-仓={r['pcr_oi']} PCR-量={r['pcr_volume']} "
-                f"iv30={r['atm_iv']} 收租率={r['premium_yield']}% "
+                f"iv30={r['atm_iv']} 备兑收益率={r['premium_yield']}% "
                 f"墙 C{r['wall_call']}/P{r['wall_put']} MaxPain={r['max_pain']} "
                 f"合约={r['n_contracts']} 回填+{r.get('backfill_added', 0)}"
             )
@@ -128,7 +128,7 @@ def _run_hk(cfg: Config, stocks: list[str], dry_run: bool) -> int:
         else:
             logger.info(
                 f"{sym}({r['hkats']}): S0={r['spot']} PCR-仓={r['pcr_oi']} "
-                f"PCR-量={r['pcr_volume']} 收租率={r['premium_yield']}% "
+                f"PCR-量={r['pcr_volume']} 备兑收益率={r['premium_yield']}% "
                 f"墙 C{r['wall_call']}/P{r['wall_put']} MaxPain={r['max_pain']} "
                 f"合约={r['n_contracts']}"
             )
