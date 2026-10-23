@@ -644,13 +644,15 @@ def _get_llm_client():
 #  和走势方向」。所以这里既写"拿来干什么"，也写"每一项怎么读"。
 _OPTIONS_GUIDE = """期权数据只描述合约持仓、成交和定价，不能单独识别交易者方向，也不能区分开仓和平仓。
 PCR 是 put/call 数量比，不等于看空/看多结论；OI、成交量均不得据此声称机构买保险或新增资金流入。
+期权报价可描述指定未来期限的波动定价，与舆情中的事件和讨论互补，但不直接给出正股方向。
 
 - IV / IV 分位：描述波动定价；无历史分位时不可断言高低
-- 备兑收益率是基于当前报价的静态年化演算，不代表可重复获得
+- 备兑收益率是基于当前报价的静态年化演算，不代表可重复获得；它与 IV 同源，不得当成独立的第二条证据
 - Call/Put OI 最大行权价只描述指定到期链中的持仓分布，不是支撑、阻力或价格目标
 - Max Pain 是指定到期链在静态 OI 假设下的数学最小值，不代表磁吸、支撑、阻力或方向
 - 比较期权行权价与标的价格前，必须确认标的身份、币种及 ADR 换算比例/汇率均匹配；缺少元数据时禁止比较
 - 覆盖数与过滤规则用于判断数据质量；样本不足、来源不支持、过期或冷启动时应明确说无法判断
+- IV 没有同标的、同期限历史基线时不可比，不判断贵贱
 - 不把 PCR、OI 或成交量解释成买卖方向、开平仓或资金流向"""
 
 # 各数据源的口径说明 —— 防模型把它当成实时盘口
@@ -711,6 +713,15 @@ def _options_readings(opt: dict) -> str:
         parts.append("期限桶（PCR/OI 集中位均按该到期；不推断方向）: " + " | ".join(rendered))
         if near and monthly and near.get("atm_iv") is not None and monthly.get("atm_iv") is not None:
             parts.append(f"近端−月度 ATM IV 期限差 {near['atm_iv'] - monthly['atm_iv']:+.1f} vol-pt")
+    if opt.get("premium_yield") is not None:
+        py = f"备兑收益率(静态年化) {opt['premium_yield']:.0f}%"
+        dte = opt.get("premium_yield_dte")
+        if dte:
+            per_cycle = opt["premium_yield"] * dte / 365
+            py += f"（{dte} 天期权利金 {per_cycle:.1f}%，占正股市值；不代表可重复收益，与 IV 同源）"
+        else:
+            py += "（不代表可重复收益，与 IV 同源）"
+        parts.append(py)
     if opt.get("max_pain") is not None:
         mp = f"Max Pain（静态 OI 数学值） {opt['max_pain']:g}"
         if opt.get("chain_expiry"):

@@ -1,8 +1,8 @@
 """期权数据融合进逐股分析 (2026-10-15)。
 
 用户口径：期权不该在报告末尾单列一节，而要成为每只个股分析的**输入素材**，
-并且 prompt 要让模型知道这段数据**拿来干什么** —— 帖子描述已发生的事，
-期权定价未来，用它判断未来一段时间的定价与方向。
+并且 prompt 要让模型知道这段数据**拿来干什么** —— 帖子描述事件和讨论，
+期权补充指定期限的波动定价与持仓结构，不单独判断正股方向。
 """
 
 from pathlib import Path
@@ -13,6 +13,28 @@ from src.models import OptionDaily
 
 STAT = 1791907200  # 2026-10-14 北京时间 00:00
 CODE = "PDD.US"
+EXPIRY = "2026-10-23"
+
+
+def _expiry_metric(**kw) -> dict:
+    base = dict(
+        stock_code=CODE, stat_date=STAT, source="cboe", expiry=EXPIRY,
+        dte=9, spot=80.0, option_currency="USD", call_volume=100,
+        put_volume=75, call_oi=1000, put_oi=730,
+        pcr_volume=0.75, pcr_oi=0.73, call_oi_wall=80.0,
+        put_oi_wall=80.0, top_strike_oi_share=0.4,
+        valid_contracts=8, iv_contracts=8, delta_contracts=8,
+        atm_iv=32.4, implied_1sigma_pct=5.1, implied_1sigma_price=4.08,
+        iv_25d_call=31.0, iv_25d_put=35.0,
+        skew_25d_put_call=4.0, rr_25d_call_put=-4.0,
+        quality_rule="bid>0;ask>=0.03;spread/mid<=0.60",
+    )
+    base.update(kw)
+    return base
+
+
+def _store_expiry_metric(db_path: str, **kw) -> None:
+    db.upsert_option_expiry_daily(db_path, [_expiry_metric(**kw)])
 
 
 def _opt(**kw) -> OptionDaily:
@@ -82,15 +104,18 @@ class TestFormatOptionsBlock:
                 "atm_iv": 32.4,
                 "iv_percentile": 58.0,
                 "premium_yield": 14.1,
+                "premium_yield_dte": 9,
                 "wall_call": 80.0,
                 "wall_put": 80.0,
                 "max_pain": 80.0,
+                "expiry_metrics": [_expiry_metric()],
             }
         )
-        # 目标说明 —— 用户要求「让 LLM 感知到期权数据的价值和目标」
-        assert "未来" in blk and "方向" in blk and "已发生" in blk
+        assert "未来期限的波动定价" in blk
+        assert "不能单独识别交易者方向" in blk
+        assert "不把 PCR、OI 或成交量解释成买卖方向" in blk
         # 逐项解读
-        for kw in ("PCR-仓", "IV", "备兑收益率", "MaxPain", "墙"):
+        for kw in ("PCR-OI", "IV", "备兑收益率", "Max Pain", "OI 集中位"):
             assert kw in blk
         # 实际读数 + 口径
         assert "0.73" in blk and "32.4" in blk and "2026-10-14" in blk
@@ -155,10 +180,12 @@ class TestZeroPostStillShowsOptions:
         db_path = str(tmp_path / "t.db")
         db.init_db(db_path)
         db.upsert_option_daily(db_path, _opt())
+        _store_expiry_metric(db_path)
         res = rg.analyze_stock("PDD.US", "拼多多", db_path, "2026-10-15", {})
         assert res["analyzed"] is False
         assert "- 期权读数" in res["section"]
-        assert "PCR-仓 0.73" in res["section"]
+        assert "PCR-OI 0.73" in res["section"]
+        assert "隐含 1σ" in res["section"]
 
     def test_placeholder_has_no_options_line_without_data(self, tmp_path: Path):
         db_path = str(tmp_path / "t.db")
@@ -236,7 +263,7 @@ class TestChainExpiryAnnotation:
                 "chain_expiry": "2027-01-15",
             }
         )
-        assert "MaxPain 200（属 2027-01-15 到期链）" in out
+        assert "Max Pain（静态 OI 数学值） 200（属 2027-01-15 到期链，不代表价格引力）" in out
 
     def test_readings_omit_annotation_when_absent(self):
         out = rg._options_readings(
@@ -268,7 +295,7 @@ class TestChainExpiryAnnotation:
                 "pcr_oi": 0.73,
             }
         )
-        assert "无基线不可比" in blk
+        assert "没有同标的、同期限历史基线时不可比" in blk
 
 
 class TestChainExpiryMigration:
@@ -311,9 +338,10 @@ class TestYieldDteAnnotation:
         )
         # 备兑收益率必须给出权利金绝对值 + 期限 + 资金口径 —— 单看年化百分数
         # 没有锚 (用户 2026-10-18: 收租率「没有任何信息价值」)。
-        assert "备兑收益率(年化) 76%" in out
+        assert "备兑收益率(静态年化) 76%" in out
         assert "2 天期权利金 0.4%" in out        # 76 × 2/365 = 0.4164 → .1f
         assert "占正股市值" in out
+        assert "与 IV 同源" in out
 
     def test_readings_no_dte_label_without_value(self):
         out = rg._options_readings(
@@ -323,7 +351,7 @@ class TestYieldDteAnnotation:
                 "premium_yield": 76.0,
             }
         )
-        assert "备兑收益率(年化) 76%" in out
+        assert "备兑收益率(静态年化) 76%" in out
         assert "天期权利金" not in out
 
 
