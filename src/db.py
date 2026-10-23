@@ -125,9 +125,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     """
     # Add ann_link column to announcements (schema added 2026-08-04).
     # Old databases predate the column; ADD COLUMN is idempotent-guarded by PRAGMA.
-    # options_daily.chain_expiry (2026-10-16): MaxPain 所属到期链。
-    # 报告端靠它标注「引力/钉住」属于哪条到期链 —— 没有它, 模型只能拿快照日期
-    # 猜到期, 实测 5 只里 4 只把 2027-01 季末链说成了「2026-10-16 到期链」。
+    # options_daily.chain_expiry (2026-10-16): 兼容聚合字段所对应的到期链。
+    # 报告端用它标注 Max Pain 的静态 OI 计算所属期限；不表示价格引力或钉住。
     opt_cols = conn.execute("PRAGMA table_info(options_daily)").fetchall()
     if opt_cols and not any(c[1] == "chain_expiry" for c in opt_cols):
         conn.execute("ALTER TABLE options_daily ADD COLUMN chain_expiry TEXT")
@@ -135,6 +134,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     if opt_cols and not any(c[1] == "premium_yield_dte" for c in opt_cols):
         conn.execute("ALTER TABLE options_daily ADD COLUMN premium_yield_dte INTEGER")
         logger.info("[migrate] added column premium_yield_dte to options_daily")
+    for name, typ in (("option_currency", "TEXT"), ("underlying_currency", "TEXT"),
+                      ("contracts_seen", "INTEGER"), ("contracts_valid", "INTEGER"),
+                      ("quality_rule", "TEXT")):
+        if opt_cols and not any(c[1] == name for c in opt_cols):
+            conn.execute(f"ALTER TABLE options_daily ADD COLUMN {name} {typ}")
+    contract_cols = conn.execute("PRAGMA table_info(options_contracts)").fetchall()
+    if contract_cols and not any(c[1] == "option_currency" for c in contract_cols):
+        conn.execute("ALTER TABLE options_contracts ADD COLUMN option_currency TEXT")
 
     ann_cols = conn.execute("PRAGMA table_info(announcements)").fetchall()
     if not any(c[1] == "ann_link" for c in ann_cols):
@@ -1089,6 +1096,41 @@ def insert_option_contracts(db_path: str, rows: list[dict]) -> int:
             rows,
         )
         return cur.rowcount
+
+
+def upsert_option_expiry_daily(db_path: str, rows: list[dict]) -> int:
+    """Replace same-day per-expiry metrics with the latest quality-gated snapshot."""
+    if not rows:
+        return 0
+    cols = list(rows[0].keys())
+    updates = [c for c in cols if c not in ("stock_code", "stat_date", "source", "expiry")]
+    with _connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM options_expiry_daily WHERE stock_code=? AND stat_date=? AND source=?",
+            (rows[0]["stock_code"], rows[0]["stat_date"], rows[0]["source"]),
+        )
+        cur = conn.executemany(
+            f"""INSERT INTO options_expiry_daily ({", ".join(cols)})
+                VALUES ({", ".join(":" + c for c in cols)})
+                ON CONFLICT(stock_code, stat_date, source, expiry) DO UPDATE SET
+                {", ".join(f"{c}=excluded.{c}" for c in updates)}""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def get_option_expiry_daily(
+    db_path: str, stock_code: str, stat_date: int, source: str
+) -> list[dict]:
+    """Read one source's expiry buckets for the selected daily snapshot."""
+    with _connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT * FROM options_expiry_daily
+               WHERE stock_code=? AND stat_date=? AND source=? ORDER BY dte""",
+            (stock_code, stat_date, source),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def update_option_daily_stats(

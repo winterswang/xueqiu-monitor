@@ -126,6 +126,7 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
     calls: list[dict] = []
     puts: list[dict] = []
     contract_rows: list[dict] = []
+    contracts_seen = 0
     for opt in data.get("options") or []:
         parsed = _parse_cboe_symbol(opt.get("option", ""), symbol)
         if parsed is None:
@@ -147,8 +148,9 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
             "theta": _f(opt.get("theta")),
             "vega": _f(opt.get("vega")),
         }
-        (calls if cp == "C" else puts).append(row)
+        contracts_seen += 1
         if is_quotable(opt):
+            (calls if cp == "C" else puts).append(row)
             mid = (row["bid"] + row["ask"]) / 2
             contract_rows.append({
                 "contract_id": opt["option"],
@@ -167,6 +169,7 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
                 "vega": row["vega"],
                 "premium_pct": round(mid / spot * 100, 4) if mid > 0 else None,
                 "moneyness": round((strike / spot - 1) * 100, 4),
+                "option_currency": "USD",
             })
 
     if not calls and not puts:
@@ -177,25 +180,18 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
     call_oi = sum(c["oi"] for c in calls)
     put_oi = sum(p["oi"] for p in puts)
 
-    # 期权墙: 未到期、±20% 价内外的过闸合约, 取 OI 最大的行权价
+    # 期限结构统计使用同一条 OI 最大到期链，避免跨到期混算。
     near = [r for r in contract_rows
             if abs(r["moneyness"]) <= 20 and (r["oi"] or 0) > 0]
-    wall_call = _max_oi_strike(near, "C")
-    wall_put = _max_oi_strike(near, "P")
-
-    # Max Pain: OI 最集中的到期日 (通常是近月); 该到期随值一起落库 (chain_expiry)
-    # —— 报告端要靠它标注「引力/钉住」属于哪条链, 否则模型只能拿快照日期猜 (2026-10-16)。
-    mp = None
-    chain_expiry = None
     by_expiry: dict[str, list[dict]] = {}
     for r in near:
         by_expiry.setdefault(r["expiry"], []).append(r)
-    if by_expiry:
-        big_expiry = max(by_expiry, key=lambda e: sum(r["oi"] for r in by_expiry[e]))
-        chain_expiry = big_expiry
-        rows_e = by_expiry[big_expiry]
-        mp = _max_pain([r for r in rows_e if r["cp"] == "C"],
-                       [r for r in rows_e if r["cp"] == "P"])
+    chain_expiry = max(by_expiry, key=lambda e: sum(r["oi"] for r in by_expiry[e])) if by_expiry else None
+    chain_rows = by_expiry.get(chain_expiry, [])
+    wall_call = _max_oi_strike(chain_rows, "C")
+    wall_put = _max_oi_strike(chain_rows, "P")
+    mp = _max_pain([r for r in chain_rows if r["cp"] == "C"],
+                   [r for r in chain_rows if r["cp"] == "P"])
 
     # ATM call 权利金率年化: 最近到期里离现价最近的过闸 call, 按实际 DTE 折算
     # (premium_pct / DTE × 365)。必须限定到期 —— 不限定会把远期 LEAPS 当基数。
@@ -225,6 +221,7 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
             premium_yield_dte = dte
 
     iv30 = _f(data.get("iv30"))
+    expiry_metrics = _expiry_metrics(contract_rows, spot, today_et)
     return {
         "spot": spot,
         "stat_date": _us_stat_date(),
@@ -239,6 +236,12 @@ def aggregate_chain(raw: dict, symbol: str) -> dict | None:
         "premium_yield_dte": premium_yield_dte,
         "max_pain": mp,
         "chain_expiry": chain_expiry,
+        "option_currency": "USD",
+        "underlying_currency": "USD",
+        "contracts_seen": contracts_seen,
+        "contracts_valid": len(contract_rows),
+        "quality_rule": "bid>0;ask>=0.03;spread/mid<=0.60",
+        "expiry_metrics": expiry_metrics,
         "wall_call": wall_call,
         "wall_put": wall_put,
         "contracts": contract_rows,
@@ -254,6 +257,66 @@ def _max_oi_strike(rows: list[dict], cp: str) -> float | None:
     if not oi_by_strike:
         return None
     return max(oi_by_strike, key=lambda k: oi_by_strike[k])
+
+
+def _iv_percent(iv: float | None) -> float | None:
+    """CBOE contract IV is fractional in some payloads and percentage in others."""
+    if iv is None or iv <= 0 or iv > 500:
+        return None
+    return iv * 100 if iv <= 10 else iv
+
+
+def _expiry_metrics(rows: list[dict], spot: float, today) -> list[dict]:
+    """Build quality-gated metrics independently for each expiry."""
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["expiry"], []).append(row)
+    out = []
+    for expiry, chain in grouped.items():
+        dte = (datetime.fromisoformat(expiry).date() - today).days
+        calls = [r for r in chain if r["cp"] == "C"]
+        puts = [r for r in chain if r["cp"] == "P"]
+        call_oi = sum(r["oi"] for r in calls)
+        put_oi = sum(r["oi"] for r in puts)
+        strike_oi: dict[float, int] = {}
+        for r in chain:
+            strike_oi[r["strike"]] = strike_oi.get(r["strike"], 0) + r["oi"]
+        total_oi = call_oi + put_oi
+        iv_rows = [(r, _iv_percent(r.get("iv"))) for r in chain]
+        iv_rows = [(r, iv) for r, iv in iv_rows if iv is not None]
+        atm_by_cp = {}
+        for cp in ("C", "P"):
+            candidates = [(r, iv) for r, iv in iv_rows if r["cp"] == cp and abs(r["strike"] / spot - 1) <= 0.05]
+            if candidates:
+                atm_by_cp[cp] = min(candidates, key=lambda pair: abs(pair[0]["strike"] / spot - 1))[1]
+        atm_iv = (sum(atm_by_cp.values()) / 2 if len(atm_by_cp) == 2 else None)
+        one_sigma_pct = atm_iv * (dte / 365) ** 0.5 if atm_iv is not None and dte > 0 else None
+        call25 = [(r, iv) for r, iv in iv_rows if r["cp"] == "C" and r.get("delta") is not None and 0.15 <= r["delta"] <= 0.35]
+        put25 = [(r, iv) for r, iv in iv_rows if r["cp"] == "P" and r.get("delta") is not None and -0.35 <= r["delta"] <= -0.15]
+        iv25c = min(call25, key=lambda pair: abs(pair[0]["delta"] - 0.25))[1] if call25 else None
+        iv25p = min(put25, key=lambda pair: abs(pair[0]["delta"] + 0.25))[1] if put25 else None
+        out.append({
+            "expiry": expiry, "dte": dte, "spot": spot,
+            "call_volume": sum(r["volume"] for r in calls),
+            "put_volume": sum(r["volume"] for r in puts),
+            "call_oi": call_oi, "put_oi": put_oi,
+            "pcr_volume": round(sum(r["volume"] for r in puts) / sum(r["volume"] for r in calls), 4) if sum(r["volume"] for r in calls) else None,
+            "pcr_oi": round(put_oi / call_oi, 4) if call_oi else None,
+            "call_oi_wall": _max_oi_strike(chain, "C"), "put_oi_wall": _max_oi_strike(chain, "P"),
+            "top_strike_oi_share": round(max(strike_oi.values()) / total_oi, 4) if total_oi else None,
+            "valid_contracts": len(chain), "iv_contracts": len(iv_rows),
+            "delta_contracts": sum(1 for r in chain if r.get("delta") is not None),
+            "atm_iv": round(atm_iv, 3) if atm_iv is not None else None,
+            "implied_1sigma_pct": round(one_sigma_pct, 3) if one_sigma_pct is not None else None,
+            "implied_1sigma_price": round(spot * one_sigma_pct / 100, 4) if one_sigma_pct is not None else None,
+            "iv_25d_call": round(iv25c, 3) if iv25c is not None else None,
+            "iv_25d_put": round(iv25p, 3) if iv25p is not None else None,
+            "skew_25d_put_call": round(iv25p - iv25c, 3) if iv25p is not None and iv25c is not None else None,
+            "rr_25d_call_put": round(iv25c - iv25p, 3) if iv25p is not None and iv25c is not None else None,
+            "option_currency": "USD",
+            "quality_rule": "bid>0;ask>=0.03;spread/mid<=0.60",
+        })
+    return out
 
 
 def _f(v) -> float | None:
@@ -274,6 +337,10 @@ def collect_us_symbol(db_path: str, symbol: str) -> dict:
     contracts = [{**row, "stock_code": code, "snap_date": agg["stat_date"]}
                  for row in agg["contracts"]]
     db.insert_option_contracts(db_path, contracts)
+    db.upsert_option_expiry_daily(db_path, [
+        {**metric, "stock_code": code, "stat_date": agg["stat_date"], "source": "cboe"}
+        for metric in agg["expiry_metrics"]
+    ])
     stat = OptionDaily(
         stock_code=code,
         stat_date=agg["stat_date"],
@@ -291,9 +358,14 @@ def collect_us_symbol(db_path: str, symbol: str) -> dict:
         wall_call=agg["wall_call"],
         wall_put=agg["wall_put"],
         source="cboe",
+        option_currency=agg["option_currency"],
+        underlying_currency=agg["underlying_currency"],
+        contracts_seen=agg["contracts_seen"],
+        contracts_valid=agg["contracts_valid"],
+        quality_rule=agg["quality_rule"],
     )
     db.upsert_option_daily(db_path, stat)
-    return {k: v for k, v in agg.items() if k != "contracts"} | {
+    return {k: v for k, v in agg.items() if k not in ("contracts", "expiry_metrics")} | {
         "n_contracts": len(contracts), "symbol": symbol,
     }
 

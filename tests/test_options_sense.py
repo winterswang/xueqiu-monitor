@@ -77,16 +77,19 @@ class TestAggregateChain:
         agg = options_collector.aggregate_chain(_raw_snapshot(expiry), SYMBOL)
         assert agg is not None
         assert agg["spot"] == SPOT
-        # MaxPain 所属到期链必须随值一起返回 (报告端标注「引力属于哪条链」)
+        # Max Pain 所属到期链必须随值一起返回，避免丢失期限口径。
         assert agg["chain_expiry"] == expiry
         assert agg["atm_iv"] == pytest.approx(32.2)
         # 占位/空挂 (C82 bid=0, P80 价差 150%) 被闸掉
         assert all(r["ask"] >= 0.03 for r in agg["contracts"])
         assert all(r["bid"] > 0 for r in agg["contracts"])
-        # 聚合量含未过闸合约 (C82 volume=10 计入总量)
-        assert agg["call_volume"] == 40 and agg["put_volume"] == 40
-        assert agg["call_oi"] == 800 and agg["put_oi"] == 1100
-        assert agg["pcr_oi"] == pytest.approx(1100 / 800)
+        # PCR 聚合与保存合约使用同一报价闸；未过闸合约不参与汇总。
+        assert agg["contracts_seen"] == 8 and agg["contracts_valid"] == 6
+        assert agg["call_volume"] == 30 and agg["put_volume"] == 30
+        assert agg["call_oi"] == 700 and agg["put_oi"] == 1000
+        assert agg["pcr_oi"] == pytest.approx(1000 / 700, abs=0.00005)
+        assert agg["expiry_metrics"][0]["expiry"] == expiry
+        assert agg["expiry_metrics"][0]["pcr_oi"] == pytest.approx(1000 / 700, abs=0.00005)
         # 期权墙: 过闸合约里 call OI 最大 K80 / put OI 最大 K75
         assert agg["wall_call"] == 80.0 and agg["wall_put"] == 75.0
 
@@ -134,11 +137,11 @@ class TestDetector:
         self._seed_history(db_path, 10)
         assert options_detector.detect_options_signals(db_path, "PDD.US") == []
 
-    def test_pcr_spike_fires_p0(self, tmp_path: Path):
+    def test_all_expiry_pcr_does_not_emit_direction_alert(self, tmp_path: Path):
         db_path = str(tmp_path / "t.db")
         db.init_db(db_path)
         self._seed_history(db_path, 40)
-        # 当日 PCR 飙到 3.0 (基线 0.75) → P0
+        # 全期限兼容字段不能生成方向性 PCR 告警。
         db.upsert_option_daily(db_path, OptionDaily(
             stock_code="PDD.US", stat_date=int(datetime.now().timestamp()),
             call_volume=1000, put_volume=3000, call_oi=10000, put_oi=40000,
@@ -146,7 +149,7 @@ class TestDetector:
         ))
         alerts = options_detector.detect_options_signals(db_path, "PDD.US")
         types = {(a.alert_type, a.priority) for a in alerts}
-        assert ("options_pcr_spike", "P0") in types
+        assert not any(alert_type.startswith("options_pcr") for alert_type, _ in types)
 
     def test_stable_history_no_alert(self, tmp_path: Path):
         db_path = str(tmp_path / "t.db")

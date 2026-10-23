@@ -91,6 +91,7 @@ _CONTRACT_COLS = (
     "vega",
     "premium_pct",
     "moneyness",
+    "option_currency",
 )
 
 
@@ -335,19 +336,18 @@ def aggregate_hk_chain(
     """DTOP 合约行 → 聚合指标。无合约返回 None (与 aggregate_chain 同形)。"""
     if not contracts:
         return None
-    calls = [c for c in contracts if c["cp"] == "C"]
-    puts = [c for c in contracts if c["cp"] == "P"]
-    call_vol = sum(c["volume"] or 0 for c in calls)
-    put_vol = sum(c["volume"] or 0 for c in puts)
-    call_oi = sum(c["oi"] or 0 for c in calls)
-    put_oi = sum(c["oi"] or 0 for c in puts)
-
     px = spot if (spot or 0) > 0 else None
     gated = [
         _gate_row(c, px)
         for c in contracts
         if (c["settle"] or 0) > 0 and ((c["oi"] or 0) > 0 or (c["volume"] or 0) > 0)
     ]
+    calls = [c for c in gated if c["cp"] == "C"]
+    puts = [c for c in gated if c["cp"] == "P"]
+    call_vol = sum(c["volume"] or 0 for c in calls)
+    put_vol = sum(c["volume"] or 0 for c in puts)
+    call_oi = sum(c["oi"] or 0 for c in calls)
+    put_oi = sum(c["oi"] or 0 for c in puts)
     # 无正股价时**不**做墙/MaxPain: 缺了 ±20% 价内外带, 全链取 OI 最大会落到
     # 远离现价的远期行权价上, 读数看着正常其实是脏值 —— 宁可留空。
     near = (
@@ -356,7 +356,34 @@ def aggregate_hk_chain(
         else []
     )
     _hk_mp, _hk_chain = _hk_max_pain(near)
+    chain_rows = [r for r in near if r["expiry"] == _hk_chain] if _hk_chain else []
     _py, _py_dte = _hk_premium_yield(near, px, stat_date) if px else (None, None)
+    by_expiry: dict[str, list[dict]] = {}
+    for row in gated:
+        by_expiry.setdefault(row["expiry"], []).append(row)
+    expiry_metrics = []
+    for expiry, chain in by_expiry.items():
+        calls_e = [r for r in chain if r["cp"] == "C"]
+        puts_e = [r for r in chain if r["cp"] == "P"]
+        coi, poi = sum(r["oi"] or 0 for r in calls_e), sum(r["oi"] or 0 for r in puts_e)
+        strike_oi: dict[float, int] = {}
+        for row in chain:
+            strike_oi[row["strike"]] = strike_oi.get(row["strike"], 0) + (row["oi"] or 0)
+        expiry_metrics.append({
+            "expiry": expiry,
+            "dte": max(0, (date.fromisoformat(expiry) - datetime.fromtimestamp(stat_date).date()).days),
+            "spot": px,
+            "call_volume": sum(r["volume"] or 0 for r in calls_e),
+            "put_volume": sum(r["volume"] or 0 for r in puts_e),
+            "call_oi": coi, "put_oi": poi,
+            "pcr_volume": round(sum(r["volume"] or 0 for r in puts_e) / sum(r["volume"] or 0 for r in calls_e), 4) if sum(r["volume"] or 0 for r in calls_e) else None,
+            "pcr_oi": round(poi / coi, 4) if coi else None,
+            "call_oi_wall": _max_oi_strike(chain, "C"),
+            "put_oi_wall": _max_oi_strike(chain, "P"),
+            "top_strike_oi_share": round(max(strike_oi.values()) / (coi + poi), 4) if coi + poi and strike_oi else None,
+            "valid_contracts": len(chain), "iv_contracts": 0, "delta_contracts": 0,
+            "option_currency": "HKD", "quality_rule": "settle>0;(oi>0 or volume>0)",
+        })
     return {
         "spot": spot,
         "stat_date": stat_date,
@@ -371,9 +398,15 @@ def aggregate_hk_chain(
         "premium_yield_dte": _py_dte,
         "max_pain": _hk_mp,
         "chain_expiry": _hk_chain,
-        "wall_call": _max_oi_strike(near, "C"),
-        "wall_put": _max_oi_strike(near, "P"),
+        "wall_call": _max_oi_strike(chain_rows, "C"),
+        "wall_put": _max_oi_strike(chain_rows, "P"),
+        "contracts_seen": len(contracts),
+        "contracts_valid": len(gated),
+        "quality_rule": "settle>0;(oi>0 or volume>0)",
+        "option_currency": "HKD",
+        "underlying_currency": "HKD",
         "contracts": gated,
+        "expiry_metrics": expiry_metrics,
     }
 
 
@@ -383,6 +416,7 @@ def _gate_row(c: dict, px: float | None) -> dict:
         **c,
         "moneyness": (c["strike"] / px - 1) * 100 if px else None,
         "premium_pct": (c["settle"] or 0) / px * 100 if px else None,
+        "option_currency": "HKD",
     }
 
 
@@ -417,7 +451,7 @@ def _hk_premium_yield(
 def _hk_max_pain(near: list[dict]) -> tuple[float | None, str | None]:
     """OI 最集中的到期日 (通常是近月) 上的 Max Pain, 连同该到期一起返回。
 
-    到期要随值一起落库 (chain_expiry): 报告端靠它标注「引力/钉住」属于哪条链。
+    到期要随值一起落库 (chain_expiry): 报告端据此标注静态 OI 计算所属的到期链。
     """
     by_expiry: dict[str, list[dict]] = {}
     for r in near:
@@ -462,6 +496,11 @@ def _to_option_row(sym: str, stat_date: int, agg: dict) -> OptionDaily:
         wall_call=agg["wall_call"],
         wall_put=agg["wall_put"],
         source="hkex",
+        option_currency="HKD",
+        underlying_currency="HKD",
+        contracts_seen=agg["contracts_seen"],
+        contracts_valid=agg["contracts_valid"],
+        quality_rule=agg["quality_rule"],
     )
 
 
@@ -528,6 +567,10 @@ def collect_hk(
             continue
         if not dry_run:
             db.insert_option_contracts(db_path, to_contract_rows(sym, stat_date, agg))
+            db.upsert_option_expiry_daily(db_path, [
+                {**metric, "stock_code": sym, "stat_date": stat_date, "source": "hkex"}
+                for metric in agg["expiry_metrics"]
+            ])
             db.upsert_option_daily(db_path, _to_option_row(sym, stat_date, agg))
         results[sym] = {k: v for k, v in agg.items() if k != "contracts"} | {
             "symbol": sym,

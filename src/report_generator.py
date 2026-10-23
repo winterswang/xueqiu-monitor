@@ -383,6 +383,8 @@ def fetch_stock_options(
     价位定价」的指令喂给模型。超过 `max_age_days` 直接当作无数据并告警。
     """
     conn = _connect(db_path)
+    row = None
+    out_expiry = []
     try:
         row = conn.execute(
             """SELECT * FROM options_daily WHERE stock_code=?
@@ -395,11 +397,25 @@ def fetch_stock_options(
         logger.warning(f"期权读数读取失败 stock={stock_code}: {e}")
         return None
     finally:
+        if row is not None:
+            try:
+                expiry_rows = conn.execute(
+                    """SELECT * FROM options_expiry_daily
+                       WHERE stock_code=? AND stat_date=? AND source=? ORDER BY dte""",
+                    (stock_code, row["stat_date"], row["source"]),
+                ).fetchall()
+                out_expiry = [dict(item) for item in expiry_rows]
+            except sqlite3.Error as e:
+                logger.warning(f"期权到期维度读取失败 stock={stock_code}: {e}")
+                out_expiry = []
+        else:
+            out_expiry = []
         conn.close()
     if row is None:
         return None
 
     out = {k: row[k] for k in row.keys()}
+    out["expiry_metrics"] = out_expiry
     if ref_date:
         try:
             ref_d = datetime.strptime(ref_date, "%Y-%m-%d").date()
@@ -626,25 +642,18 @@ def _get_llm_client():
 # 要么忽略这段素材、要么把数字复述一遍。用户 2026-10-15 明确要求：
 # 「让 LLM 感知到期权数据的价值和目标 —— 为了搞清楚企业未来一段时间的定价
 #  和走势方向」。所以这里既写"拿来干什么"，也写"每一项怎么读"。
-_OPTIONS_GUIDE = """期权定价的是**未来**（标的未来一段时间的波动预期与价位共识），
-与上面帖子/资讯/公告对**已发生事件**的描述互为补充。请用本节数据回答：
-**市场对未来在给什么价位定价、方向偏向哪边**，并在下面的判断里给出你的读法。
+_OPTIONS_GUIDE = """期权数据只描述合约持仓、成交和定价，不能单独识别交易者方向，也不能区分开仓和平仓。
+PCR 是 put/call 数量比，不等于看空/看多结论；OI、成交量均不得据此声称机构买保险或新增资金流入。
+期权报价可描述指定未来期限的波动定价，与舆情中的事件和讨论互补，但不直接给出正股方向。
 
-各项怎么读：
-- PCR-仓（put/call 持仓比）：高 = 押注下跌/对冲的仓位更重；低 = 偏多
-- PCR-量：当日新增交投的方向偏好，比持仓更即时
-- z 值：相对该股**自身历史**的偏离，|z| ≥ 2 才算真的异常
-- IV / IV 分位：市场为未来波动定的价；分位高 = 不确定性定价高（常见于事件前）。
-  没给分位时不要断言 IV「偏高/不低」—— 绝对水平因股而异，无基线不可比
-- 备兑收益率（年化）：卖出 ATM call 的权利金 ÷ 正股市值，按**实际到期天数**
-  （标注的 DTE，最短取 5 天）折算，并给出权利金绝对值 —— 这是「持有正股 + 卖
-  call」策略的年化回报。与 IV 同源（都来自期权价格），不要当作独立于 IV 的第二
-  证据重复引用
-  DTE 越短，同样权利金折出的年化越高 —— 隐含「可按同条件反复滚动」的假设
-- Call 墙 / Put 墙：持仓最集中的行权价（±20% 价内外、各到期混合口径），常成为
-  上方阻力 / 下方支撑，也容易钉住价格
-- MaxPain：期权卖方损失最小的到期价位，**属于标注的到期链** —— 引力/钉住强度与
-  到期远近直接相关（本周链远强于季末链），引用时必须带上这条链的到期日"""
+- IV / IV 分位：描述波动定价；无历史分位时不可断言高低
+- 备兑收益率是基于当前报价的静态年化演算，不代表可重复获得；它与 IV 同源，不得当成独立的第二条证据
+- Call/Put OI 最大行权价只描述指定到期链中的持仓分布，不是支撑、阻力或价格目标
+- Max Pain 是指定到期链在静态 OI 假设下的数学最小值，不代表磁吸、支撑、阻力或方向
+- 比较期权行权价与标的价格前，必须确认标的身份、币种及 ADR 换算比例/汇率均匹配；缺少元数据时禁止比较
+- 覆盖数与过滤规则用于判断数据质量；样本不足、来源不支持、过期或冷启动时应明确说无法判断
+- IV 没有同标的、同期限历史基线时不可比，不判断贵贱
+- 不把 PCR、OI 或成交量解释成买卖方向、开平仓或资金流向"""
 
 # 各数据源的口径说明 —— 防模型把它当成实时盘口
 _OPTIONS_CALIBER = {
@@ -657,40 +666,66 @@ _OPTIONS_CALIBER = {
 def _options_readings(opt: dict) -> str:
     """期权读数 → 一行紧凑文本（prompt 段与 0 帖占位行共用）。"""
     parts: list[str] = []
-    if opt.get("pcr_oi") is not None:
-        z = opt.get("z_pcr_oi")
-        parts.append(
-            f"PCR-仓 {opt['pcr_oi']:.2f}"
-            + (f" (z={z:+.1f})" if z is not None else "")
-        )
-    if opt.get("pcr_volume") is not None:
-        parts.append(f"PCR-量 {opt['pcr_volume']:.2f}")
-    if opt.get("atm_iv") is not None:
-        iv = f"IV {opt['atm_iv']:.1f}%"
-        if opt.get("iv_percentile") is not None:
-            iv += f" (分位 {opt['iv_percentile']:.0f}%)"
-        parts.append(iv)
+    if opt.get("option_currency") or opt.get("underlying_currency"):
+        parts.append(f"币种 期权={opt.get('option_currency') or '未知'} / 标的={opt.get('underlying_currency') or '未知'}；币种/ADR 元数据不足时不比较价位")
+    if opt.get("contracts_seen") is not None:
+        parts.append(f"合约覆盖 {opt.get('contracts_valid') or 0}/{opt['contracts_seen']}；过滤={opt.get('quality_rule') or '未知'}")
+    expiry_metrics = opt.get("expiry_metrics") or []
+    if expiry_metrics:
+        near = min((r for r in expiry_metrics if 1 <= (r.get("dte") or 0) <= 20), key=lambda r: r["dte"], default=None)
+        monthly = min((r for r in expiry_metrics if 21 <= (r.get("dte") or 0) <= 45), key=lambda r: abs(r["dte"] - 30), default=None)
+        buckets = [("近端", near), ("月度(21–45DTE)", monthly)]
+        rendered = []
+        for label, bucket in buckets:
+            if bucket is None:
+                rendered.append(f"{label}: 不可用（无合格到期链）")
+                continue
+            info = [f"{label} {bucket['expiry']} / DTE {bucket['dte']}"]
+            if bucket.get("option_currency") or bucket.get("spot"):
+                info.append(f"现价 {bucket.get('spot') if bucket.get('spot') is not None else '未知'} {bucket.get('option_currency') or '币种未知'}")
+            info.append(f"合约覆盖 {bucket.get('valid_contracts', 0)}")
+            if bucket.get("source") == "cboe":
+                info.append(f"IV样本 {bucket.get('iv_contracts', 0)} / Delta样本 {bucket.get('delta_contracts', 0)}")
+            if bucket.get("pcr_oi") is not None:
+                info.append(f"PCR-OI {bucket['pcr_oi']:.2f}")
+            if bucket.get("pcr_volume") is not None:
+                info.append(f"PCR-量 {bucket['pcr_volume']:.2f}")
+            walls = []
+            if bucket.get("call_oi_wall") is not None:
+                walls.append(f"Call OI 集中位 {bucket['call_oi_wall']:g}")
+            if bucket.get("put_oi_wall") is not None:
+                walls.append(f"Put OI 集中位 {bucket['put_oi_wall']:g}")
+            if walls:
+                info.append(" / ".join(walls))
+            if bucket.get("top_strike_oi_share") is not None:
+                info.append(f"最大行权价 OI 占比 {bucket['top_strike_oi_share']:.0%}")
+            if bucket.get("atm_iv") is not None:
+                info.append(f"ATM IV {bucket['atm_iv']:.1f}%")
+                if bucket.get("implied_1sigma_pct") is not None and bucket.get("implied_1sigma_price") is not None:
+                    info.append(f"隐含 1σ 每股价格尺度 ±{bucket['implied_1sigma_pct']:.1f}% / ±{bucket['implied_1sigma_price']:.2f}（期限尺度，不是预测或风险金额）")
+            elif opt.get("source") == "hkex":
+                info.append("IV/Greeks 不可用（HKEX DTOP 未提供）")
+            if bucket.get("skew_25d_put_call") is not None:
+                info.append(f"25Δ skew(Put−Call) {bucket['skew_25d_put_call']:+.1f} vol-pt / RR(Call−Put) {bucket['rr_25d_call_put']:+.1f} vol-pt")
+            else:
+                info.append("25Δ skew/RR 不可用（两侧合格样本不足）")
+            rendered.append("；".join(info))
+        parts.append("期限桶（PCR/OI 集中位均按该到期；不推断方向）: " + " | ".join(rendered))
+        if near and monthly and near.get("atm_iv") is not None and monthly.get("atm_iv") is not None:
+            parts.append(f"近端−月度 ATM IV 期限差 {near['atm_iv'] - monthly['atm_iv']:+.1f} vol-pt")
     if opt.get("premium_yield") is not None:
-        # 备兑口径: 资金占用 = 正股市值。权利金绝对值一并列出 —— 单看年化百分数
-        # 没有锚, 「7 天收 1.7%」才是有信息量的表达 (用户 2026-10-18)。
-        py = f"备兑收益率(年化) {opt['premium_yield']:.0f}%"
-        if opt.get("premium_yield_dte"):
-            per_cycle = opt["premium_yield"] * opt["premium_yield_dte"] / 365
-            py += f"（{opt['premium_yield_dte']} 天期权利金 {per_cycle:.1f}%，占正股市值）"
+        py = f"备兑收益率(静态年化) {opt['premium_yield']:.0f}%"
+        dte = opt.get("premium_yield_dte")
+        if dte:
+            per_cycle = opt["premium_yield"] * dte / 365
+            py += f"（{dte} 天期权利金 {per_cycle:.1f}%，占正股市值；不代表可重复收益，与 IV 同源）"
+        else:
+            py += "（不代表可重复收益，与 IV 同源）"
         parts.append(py)
-    walls = []
-    if opt.get("wall_call") is not None:
-        walls.append(f"Call 墙 {opt['wall_call']:g}")
-    if opt.get("wall_put") is not None:
-        walls.append(f"Put 墙 {opt['wall_put']:g}")
-    if walls:
-        parts.append(" / ".join(walls))
     if opt.get("max_pain") is not None:
-        mp = f"MaxPain {opt['max_pain']:g}"
+        mp = f"Max Pain（静态 OI 数学值） {opt['max_pain']:g}"
         if opt.get("chain_expiry"):
-            # 到期链必须标出来 —— 「引力/钉住」的强度与到期远近直接相关,
-            # 缺了它模型会拿快照日期猜 (实测 5 只里 4 只猜成快照当日)。
-            mp += f"（属 {opt['chain_expiry']} 到期链）"
+            mp += f"（属 {opt['chain_expiry']} 到期链，不代表价格引力）"
         parts.append(mp)
     return " · ".join(parts)
 
@@ -876,15 +911,11 @@ def _build_analysis_prompt(
 {_tier_instructions(tier, scope)}"""
 
 
-# 期权数据的输出要求 —— 必须落到"未来方向"上, 否则模型只会把数字复述一遍
-# (用户 2026-10-15: "为了搞清楚企业未来一段时间的定价和走势方向")。
-_OPTIONS_ASK_DEEP = """⚠️ 若素材里有「期权数据」段：在「💡 值得关注的判断」里给一条**期权读法** ——
-用期权定价去回答**未来一段时间市场在给什么价位定价、方向偏向哪边、有无关键行权价
-在钉住价格**，并与上面的舆情判断**对照**：一致时点明共振，背离时另起一句明确指出
-（例：舆情看多，但 put 仓位与 IV 分位同步走高）。**不要只复述数字。**"""
+# 期权数据的输出要求 —— 说明数据支持的期限、波动与持仓结构信息，避免模型只复述数字。
+_OPTIONS_ASK_DEEP = """⚠️ 若素材里有「期权数据」段：在「💡 值得关注的判断」中简述数据支持的持仓、成交或波动信息，并说明口径、有效覆盖与期限。不得据 PCR/OI/成交量推断买卖方向、机构行为、开平仓或资金流，也不得把墙/Max Pain称作支撑、阻力、磁吸或方向信号。**不要只复述数字。**"""
 
-_OPTIONS_ASK_STD = """⚠️ 若素材里有「期权数据」段：在「情感读数」一行里带上**期权给出的未来方向**
-（市场在给什么价位定价、偏向哪边），与舆情情绪对照；有背离就点出来。**不要只复述数字。**"""
+_OPTIONS_ASK_STD = """⚠️ 若素材里有「期权数据」段：在「情感读数」一行里简述期权数据所支持的持仓/成交/波动信息。
+仅描述数据能支持的持仓/成交/波动信息，不推断买卖方向、开平仓、机构行为或资金流；缺乏有效覆盖时说明无法判断。**不要只复述数字。**"""
 
 
 def _tier_instructions(tier: str, scope: str) -> str:

@@ -120,8 +120,8 @@ class OptionDaily:
     put_volume: int | None = None
     call_oi: int | None = None
     put_oi: int | None = None
-    pcr_volume: float | None = None
-    pcr_oi: float | None = None
+    pcr_volume: float | None = None  # compatibility all-expiry aggregate; not a near-term signal
+    pcr_oi: float | None = None      # compatibility all-expiry aggregate; not a near-term signal
     atm_iv: float | None = None
     iv_percentile: float | None = None
     premium_yield: float | None = None
@@ -130,6 +130,11 @@ class OptionDaily:
     wall_call: float | None = None
     wall_put: float | None = None
     chain_expiry: str | None = None
+    option_currency: str | None = None
+    underlying_currency: str | None = None
+    contracts_seen: int | None = None
+    contracts_valid: int | None = None
+    quality_rule: str | None = None
     z_pcr_oi: float | None = None
     z_volume: float | None = None
     source: str = "cboe"
