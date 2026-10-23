@@ -3,7 +3,7 @@
 复用 sentiment 侧的 Z-score 思路, 但口径独立:
 - 冷启动 30 天 (IV 分位需 60 天) — 只积累不告警
 - PCR-OI 突变 (put 侧) = 对冲盘异动; PCR-Vol / 总量突增 = 事件博弈
-所有告警是环境参考, 不是买卖指令 (推送文案由 report/notifier 侧统一带后缀)。
+PCR/OI/成交量不识别买卖方向、开平仓或资金流；不同来源各自建立基线。
 """
 
 from __future__ import annotations
@@ -48,17 +48,23 @@ def detect_options_signals(
     cold_start_days: int = COLD_START_DAYS,
 ) -> list[ChangeAlert]:
     """L1 聚合信号: PCR-OI 突变 / 总量异动。冷启动期返回 []。"""
-    hist = db.get_option_daily_history(db_path, stock_code, limit=z_window + 1)
-    if len(hist) < cold_start_days:
-        logger.debug(f"[options] {stock_code} 冷启动 {len(hist)}/{cold_start_days} 天, 不告警")
+    # Daily table may contain one row per source; fetch enough rows to retain a full
+    # same-source window after selecting the preferred source below.
+    hist = db.get_option_daily_history(db_path, stock_code, limit=(z_window + 1) * 3)
+    if not hist:
         return []
 
-    # 当日可能双源两行: 取 stat_date 最大的那行, 源优先级 cboe > longbridge
+    # 当前值只与同一来源比较，避免把原始 Longbridge 与过滤后的逐合约聚合混成基线。
     latest_date = max(h.stat_date for h in hist)
     todays = [h for h in hist if h.stat_date == latest_date]
     prio = {"cboe": 0, "longbridge": 1, "hkex": 2}
     curr = min(todays, key=lambda h: prio.get(h.source, 9))
-    history = [h for h in hist if h.stat_date < latest_date][-z_window:]
+    same_source = [h for h in hist if h.source == curr.source]
+    unique_dates = {h.stat_date for h in same_source}
+    if len(unique_dates) < cold_start_days:
+        logger.debug(f"[options] {stock_code}/{curr.source} 冷启动 {len(unique_dates)}/{cold_start_days} 天, 不告警")
+        return []
+    history = [h for h in same_source if h.stat_date < latest_date][-z_window:]
 
     alerts: list[ChangeAlert] = []
     z_pcr = z_vol = None
@@ -74,7 +80,7 @@ def detect_options_signals(
                 magnitude=round(curr.pcr_oi - float(np.mean(hist_pcr)), 4),
                 priority="P0",
                 detail={
-                    "signal": "put 对冲仓位异动 (PCR-OI 突增)",
+                    "signal": "PCR-OI 相对同源历史升高；不代表交易方向、开平仓或参与者身份",
                     "pcr_oi": curr.pcr_oi,
                     "pcr_mean": round(float(np.mean(hist_pcr)), 4),
                     "source": curr.source,
@@ -104,7 +110,7 @@ def detect_options_signals(
                 magnitude=round(curr.pcr_oi - float(np.mean(hist_pcr)), 4),
                 priority="P1",
                 detail={
-                    "signal": "call 侧仓位/成交显著占优 (PCR 骤降)",
+                    "signal": "PCR-OI 相对同源历史降低；不代表交易方向、开平仓或参与者身份",
                     "pcr_oi": curr.pcr_oi,
                     "pcr_mean": round(float(np.mean(hist_pcr)), 4),
                     "source": curr.source,
@@ -125,7 +131,7 @@ def detect_options_signals(
                 magnitude=float(total_vol - np.mean(hist_vol)),
                 priority="P1",
                 detail={
-                    "signal": "期权总成交量异动 — 有资金为某事下注 (方向看同日 PCR)",
+                    "signal": "期权总成交量相对同源历史异动；方向与开平仓未知",
                     "total_volume": total_vol,
                     "pcr_volume": curr.pcr_volume,
                     "source": curr.source,

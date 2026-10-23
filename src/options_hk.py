@@ -91,6 +91,7 @@ _CONTRACT_COLS = (
     "vega",
     "premium_pct",
     "moneyness",
+    "option_currency",
 )
 
 
@@ -335,19 +336,18 @@ def aggregate_hk_chain(
     """DTOP 合约行 → 聚合指标。无合约返回 None (与 aggregate_chain 同形)。"""
     if not contracts:
         return None
-    calls = [c for c in contracts if c["cp"] == "C"]
-    puts = [c for c in contracts if c["cp"] == "P"]
-    call_vol = sum(c["volume"] or 0 for c in calls)
-    put_vol = sum(c["volume"] or 0 for c in puts)
-    call_oi = sum(c["oi"] or 0 for c in calls)
-    put_oi = sum(c["oi"] or 0 for c in puts)
-
     px = spot if (spot or 0) > 0 else None
     gated = [
         _gate_row(c, px)
         for c in contracts
         if (c["settle"] or 0) > 0 and ((c["oi"] or 0) > 0 or (c["volume"] or 0) > 0)
     ]
+    calls = [c for c in gated if c["cp"] == "C"]
+    puts = [c for c in gated if c["cp"] == "P"]
+    call_vol = sum(c["volume"] or 0 for c in calls)
+    put_vol = sum(c["volume"] or 0 for c in puts)
+    call_oi = sum(c["oi"] or 0 for c in calls)
+    put_oi = sum(c["oi"] or 0 for c in puts)
     # 无正股价时**不**做墙/MaxPain: 缺了 ±20% 价内外带, 全链取 OI 最大会落到
     # 远离现价的远期行权价上, 读数看着正常其实是脏值 —— 宁可留空。
     near = (
@@ -356,6 +356,7 @@ def aggregate_hk_chain(
         else []
     )
     _hk_mp, _hk_chain = _hk_max_pain(near)
+    chain_rows = [r for r in near if r["expiry"] == _hk_chain] if _hk_chain else []
     _py, _py_dte = _hk_premium_yield(near, px, stat_date) if px else (None, None)
     return {
         "spot": spot,
@@ -371,8 +372,13 @@ def aggregate_hk_chain(
         "premium_yield_dte": _py_dte,
         "max_pain": _hk_mp,
         "chain_expiry": _hk_chain,
-        "wall_call": _max_oi_strike(near, "C"),
-        "wall_put": _max_oi_strike(near, "P"),
+        "wall_call": _max_oi_strike(chain_rows, "C"),
+        "wall_put": _max_oi_strike(chain_rows, "P"),
+        "contracts_seen": len(contracts),
+        "contracts_valid": len(gated),
+        "quality_rule": "settle>0;(oi>0 or volume>0)",
+        "option_currency": "HKD",
+        "underlying_currency": "HKD",
         "contracts": gated,
     }
 
@@ -383,6 +389,7 @@ def _gate_row(c: dict, px: float | None) -> dict:
         **c,
         "moneyness": (c["strike"] / px - 1) * 100 if px else None,
         "premium_pct": (c["settle"] or 0) / px * 100 if px else None,
+        "option_currency": "HKD",
     }
 
 
@@ -462,6 +469,11 @@ def _to_option_row(sym: str, stat_date: int, agg: dict) -> OptionDaily:
         wall_call=agg["wall_call"],
         wall_put=agg["wall_put"],
         source="hkex",
+        option_currency="HKD",
+        underlying_currency="HKD",
+        contracts_seen=agg["contracts_seen"],
+        contracts_valid=agg["contracts_valid"],
+        quality_rule=agg["quality_rule"],
     )
 
 

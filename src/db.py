@@ -135,6 +135,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     if opt_cols and not any(c[1] == "premium_yield_dte" for c in opt_cols):
         conn.execute("ALTER TABLE options_daily ADD COLUMN premium_yield_dte INTEGER")
         logger.info("[migrate] added column premium_yield_dte to options_daily")
+    for name, typ in (("option_currency", "TEXT"), ("underlying_currency", "TEXT"),
+                      ("contracts_seen", "INTEGER"), ("contracts_valid", "INTEGER"),
+                      ("quality_rule", "TEXT")):
+        if opt_cols and not any(c[1] == name for c in opt_cols):
+            conn.execute(f"ALTER TABLE options_daily ADD COLUMN {name} {typ}")
+    contract_cols = conn.execute("PRAGMA table_info(options_contracts)").fetchall()
+    if contract_cols and not any(c[1] == "option_currency" for c in contract_cols):
+        conn.execute("ALTER TABLE options_contracts ADD COLUMN option_currency TEXT")
 
     ann_cols = conn.execute("PRAGMA table_info(announcements)").fetchall()
     if not any(c[1] == "ann_link" for c in ann_cols):

@@ -262,6 +262,11 @@ CREATE TABLE IF NOT EXISTS options_daily (
     premium_yield_dte INTEGER,                       -- 备兑收益率年化所用实际到期天数
     max_pain      REAL,
     chain_expiry  TEXT,                              -- MaxPain 所属到期链 (OI 最集中的到期); 墙为 ±20% 混合口径
+    option_currency TEXT,
+    underlying_currency TEXT,
+    contracts_seen INTEGER,
+    contracts_valid INTEGER,
+    quality_rule TEXT,
     wall_call     REAL,                              -- call OI 最大行权价
     wall_put      REAL,                              -- put OI 最大行权价
     z_pcr_oi      REAL,                              -- detector 写回
@@ -293,6 +298,7 @@ CREATE TABLE IF NOT EXISTS options_contracts (
     vega        REAL,
     premium_pct REAL,                                -- mid/ask ÷ 标的价 ×100
     moneyness   REAL,                                -- (strike/spot - 1) ×100
+    option_currency TEXT,
     UNIQUE(stock_code, snap_date, contract_id)
 );
 CREATE INDEX IF NOT EXISTS idx_options_contracts_stock
