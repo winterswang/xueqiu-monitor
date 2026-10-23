@@ -451,7 +451,7 @@ def _hk_premium_yield(
 def _hk_max_pain(near: list[dict]) -> tuple[float | None, str | None]:
     """OI 最集中的到期日 (通常是近月) 上的 Max Pain, 连同该到期一起返回。
 
-    到期要随值一起落库 (chain_expiry): 报告端靠它标注「引力/钉住」属于哪条链。
+    到期要随值一起落库 (chain_expiry): 报告端据此标注静态 OI 计算所属的到期链。
     """
     by_expiry: dict[str, list[dict]] = {}
     for r in near:

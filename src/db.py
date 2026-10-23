@@ -125,9 +125,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     """
     # Add ann_link column to announcements (schema added 2026-08-04).
     # Old databases predate the column; ADD COLUMN is idempotent-guarded by PRAGMA.
-    # options_daily.chain_expiry (2026-10-16): MaxPain 所属到期链。
-    # 报告端靠它标注「引力/钉住」属于哪条到期链 —— 没有它, 模型只能拿快照日期
-    # 猜到期, 实测 5 只里 4 只把 2027-01 季末链说成了「2026-10-16 到期链」。
+    # options_daily.chain_expiry (2026-10-16): 兼容聚合字段所对应的到期链。
+    # 报告端用它标注 Max Pain 的静态 OI 计算所属期限；不表示价格引力或钉住。
     opt_cols = conn.execute("PRAGMA table_info(options_daily)").fetchall()
     if opt_cols and not any(c[1] == "chain_expiry" for c in opt_cols):
         conn.execute("ALTER TABLE options_daily ADD COLUMN chain_expiry TEXT")
