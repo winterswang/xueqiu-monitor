@@ -2,7 +2,7 @@
 
 复用 sentiment 侧的 Z-score 思路, 但口径独立:
 - 冷启动 30 天 (IV 分位需 60 天) — 只积累不告警
-- PCR-OI 突变 (put 侧) = 对冲盘异动; PCR-Vol / 总量突增 = 事件博弈
+- 全期限 PCR 不产生告警; 总量异动只提示合约活动变化, 不解释方向
 PCR/OI/成交量不识别买卖方向、开平仓或资金流；不同来源各自建立基线。
 """
 
@@ -47,7 +47,7 @@ def detect_options_signals(
     z_window: int = Z_WINDOW,
     cold_start_days: int = COLD_START_DAYS,
 ) -> list[ChangeAlert]:
-    """L1 聚合信号: PCR-OI 突变 / 总量异动。冷启动期返回 []。"""
+    """L1 聚合信号: 同源总量异动。冷启动期返回 []。"""
     # Daily table may contain one row per source; fetch enough rows to retain a full
     # same-source window after selecting the preferred source below.
     hist = db.get_option_daily_history(db_path, stock_code, limit=(z_window + 1) * 3)
@@ -69,54 +69,8 @@ def detect_options_signals(
     alerts: list[ChangeAlert] = []
     z_pcr = z_vol = None
 
-    if curr.pcr_oi is not None:
-        hist_pcr = [h.pcr_oi for h in history if h.pcr_oi is not None]
-        z_pcr = compute_z_score(curr.pcr_oi, hist_pcr)
-        if z_pcr >= 3.0:
-            alerts.append(ChangeAlert(
-                stock_code=stock_code,
-                alert_type="options_pcr_spike",
-                z_score=round(z_pcr, 2),
-                magnitude=round(curr.pcr_oi - float(np.mean(hist_pcr)), 4),
-                priority="P0",
-                detail={
-                    "signal": "PCR-OI 相对同源历史升高；不代表交易方向、开平仓或参与者身份",
-                    "pcr_oi": curr.pcr_oi,
-                    "pcr_mean": round(float(np.mean(hist_pcr)), 4),
-                    "source": curr.source,
-                    "note": "环境参考, 不构成操作建议",
-                },
-            ))
-        elif z_pcr >= 2.0:
-            alerts.append(ChangeAlert(
-                stock_code=stock_code,
-                alert_type="options_pcr_spike",
-                z_score=round(z_pcr, 2),
-                magnitude=round(curr.pcr_oi - float(np.mean(hist_pcr)), 4),
-                priority="P1",
-                detail={
-                    "signal": "PCR-OI 偏离历史区间",
-                    "pcr_oi": curr.pcr_oi,
-                    "pcr_mean": round(float(np.mean(hist_pcr)), 4),
-                    "source": curr.source,
-                    "note": "环境参考, 不构成操作建议",
-                },
-            ))
-        elif z_pcr <= -2.0:
-            alerts.append(ChangeAlert(
-                stock_code=stock_code,
-                alert_type="options_pcr_call_surge",
-                z_score=round(z_pcr, 2),
-                magnitude=round(curr.pcr_oi - float(np.mean(hist_pcr)), 4),
-                priority="P1",
-                detail={
-                    "signal": "PCR-OI 相对同源历史降低；不代表交易方向、开平仓或参与者身份",
-                    "pcr_oi": curr.pcr_oi,
-                    "pcr_mean": round(float(np.mean(hist_pcr)), 4),
-                    "source": curr.source,
-                    "note": "环境参考, 不构成操作建议",
-                },
-            ))
+    # Aggregate daily PCR spans expiries. Do not emit PCR alerts from this
+    # all-term value; expiry-specific interpretation belongs to the expiry table.
 
     if curr.call_volume is not None and curr.put_volume is not None:
         total_vol = curr.call_volume + curr.put_volume

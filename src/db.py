@@ -1099,6 +1099,41 @@ def insert_option_contracts(db_path: str, rows: list[dict]) -> int:
         return cur.rowcount
 
 
+def upsert_option_expiry_daily(db_path: str, rows: list[dict]) -> int:
+    """Replace same-day per-expiry metrics with the latest quality-gated snapshot."""
+    if not rows:
+        return 0
+    cols = list(rows[0].keys())
+    updates = [c for c in cols if c not in ("stock_code", "stat_date", "source", "expiry")]
+    with _connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM options_expiry_daily WHERE stock_code=? AND stat_date=? AND source=?",
+            (rows[0]["stock_code"], rows[0]["stat_date"], rows[0]["source"]),
+        )
+        cur = conn.executemany(
+            f"""INSERT INTO options_expiry_daily ({", ".join(cols)})
+                VALUES ({", ".join(":" + c for c in cols)})
+                ON CONFLICT(stock_code, stat_date, source, expiry) DO UPDATE SET
+                {", ".join(f"{c}=excluded.{c}" for c in updates)}""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def get_option_expiry_daily(
+    db_path: str, stock_code: str, stat_date: int, source: str
+) -> list[dict]:
+    """Read one source's expiry buckets for the selected daily snapshot."""
+    with _connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT * FROM options_expiry_daily
+               WHERE stock_code=? AND stat_date=? AND source=? ORDER BY dte""",
+            (stock_code, stat_date, source),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def update_option_daily_stats(
     db_path: str,
     row_id: int,

@@ -383,6 +383,8 @@ def fetch_stock_options(
     价位定价」的指令喂给模型。超过 `max_age_days` 直接当作无数据并告警。
     """
     conn = _connect(db_path)
+    row = None
+    out_expiry = []
     try:
         row = conn.execute(
             """SELECT * FROM options_daily WHERE stock_code=?
@@ -395,11 +397,25 @@ def fetch_stock_options(
         logger.warning(f"期权读数读取失败 stock={stock_code}: {e}")
         return None
     finally:
+        if row is not None:
+            try:
+                expiry_rows = conn.execute(
+                    """SELECT * FROM options_expiry_daily
+                       WHERE stock_code=? AND stat_date=? AND source=? ORDER BY dte""",
+                    (stock_code, row["stat_date"], row["source"]),
+                ).fetchall()
+                out_expiry = [dict(item) for item in expiry_rows]
+            except sqlite3.Error as e:
+                logger.warning(f"期权到期维度读取失败 stock={stock_code}: {e}")
+                out_expiry = []
+        else:
+            out_expiry = []
         conn.close()
     if row is None:
         return None
 
     out = {k: row[k] for k in row.keys()}
+    out["expiry_metrics"] = out_expiry
     if ref_date:
         try:
             ref_d = datetime.strptime(ref_date, "%Y-%m-%d").date()
@@ -652,39 +668,52 @@ def _options_readings(opt: dict) -> str:
         parts.append(f"币种 期权={opt.get('option_currency') or '未知'} / 标的={opt.get('underlying_currency') or '未知'}；币种/ADR 元数据不足时不比较价位")
     if opt.get("contracts_seen") is not None:
         parts.append(f"合约覆盖 {opt.get('contracts_valid') or 0}/{opt['contracts_seen']}；过滤={opt.get('quality_rule') or '未知'}")
-    if opt.get("pcr_oi") is not None:
-        z = opt.get("z_pcr_oi")
-        parts.append(
-            f"PCR-仓 {opt['pcr_oi']:.2f}"
-            + (f" (z={z:+.1f})" if z is not None else "")
-        )
-    if opt.get("pcr_volume") is not None:
-        parts.append(f"PCR-量 {opt['pcr_volume']:.2f}")
-    if opt.get("atm_iv") is not None:
-        iv = f"IV {opt['atm_iv']:.1f}%"
-        if opt.get("iv_percentile") is not None:
-            iv += f" (分位 {opt['iv_percentile']:.0f}%)"
-        parts.append(iv)
-    if opt.get("premium_yield") is not None:
-        # 备兑口径: 资金占用 = 正股市值。权利金绝对值一并列出 —— 单看年化百分数
-        # 没有锚, 「7 天收 1.7%」才是有信息量的表达 (用户 2026-10-18)。
-        py = f"备兑收益率(年化) {opt['premium_yield']:.0f}%"
-        if opt.get("premium_yield_dte"):
-            per_cycle = opt["premium_yield"] * opt["premium_yield_dte"] / 365
-            py += f"（{opt['premium_yield_dte']} 天期权利金 {per_cycle:.1f}%，占正股市值）"
-        parts.append(py)
-    walls = []
-    if opt.get("wall_call") is not None:
-        walls.append(f"Call 墙 {opt['wall_call']:g}")
-    if opt.get("wall_put") is not None:
-        walls.append(f"Put 墙 {opt['wall_put']:g}")
-    if walls:
-        parts.append(" / ".join(walls))
+    expiry_metrics = opt.get("expiry_metrics") or []
+    if expiry_metrics:
+        near = min((r for r in expiry_metrics if 1 <= (r.get("dte") or 0) <= 20), key=lambda r: r["dte"], default=None)
+        monthly = min((r for r in expiry_metrics if 21 <= (r.get("dte") or 0) <= 45), key=lambda r: abs(r["dte"] - 30), default=None)
+        buckets = [("近端", near), ("月度(21–45DTE)", monthly)]
+        rendered = []
+        for label, bucket in buckets:
+            if bucket is None:
+                rendered.append(f"{label}: 不可用（无合格到期链）")
+                continue
+            info = [f"{label} {bucket['expiry']} / DTE {bucket['dte']}"]
+            if bucket.get("option_currency") or bucket.get("spot"):
+                info.append(f"现价 {bucket.get('spot') if bucket.get('spot') is not None else '未知'} {bucket.get('option_currency') or '币种未知'}")
+            info.append(f"合约覆盖 {bucket.get('valid_contracts', 0)}")
+            if bucket.get("source") == "cboe":
+                info.append(f"IV样本 {bucket.get('iv_contracts', 0)} / Delta样本 {bucket.get('delta_contracts', 0)}")
+            if bucket.get("pcr_oi") is not None:
+                info.append(f"PCR-OI {bucket['pcr_oi']:.2f}")
+            if bucket.get("pcr_volume") is not None:
+                info.append(f"PCR-量 {bucket['pcr_volume']:.2f}")
+            walls = []
+            if bucket.get("call_oi_wall") is not None:
+                walls.append(f"Call OI 集中位 {bucket['call_oi_wall']:g}")
+            if bucket.get("put_oi_wall") is not None:
+                walls.append(f"Put OI 集中位 {bucket['put_oi_wall']:g}")
+            if walls:
+                info.append(" / ".join(walls))
+            if bucket.get("top_strike_oi_share") is not None:
+                info.append(f"最大行权价 OI 占比 {bucket['top_strike_oi_share']:.0%}")
+            if bucket.get("atm_iv") is not None:
+                info.append(f"ATM IV {bucket['atm_iv']:.1f}%")
+                if bucket.get("implied_1sigma_pct") is not None and bucket.get("implied_1sigma_price") is not None:
+                    info.append(f"隐含 1σ 每股价格尺度 ±{bucket['implied_1sigma_pct']:.1f}% / ±{bucket['implied_1sigma_price']:.2f}（期限尺度，不是预测或风险金额）")
+            elif opt.get("source") == "hkex":
+                info.append("IV/Greeks 不可用（HKEX DTOP 未提供）")
+            if bucket.get("skew_25d_put_call") is not None:
+                info.append(f"25Δ skew(Put−Call) {bucket['skew_25d_put_call']:+.1f} vol-pt / RR(Call−Put) {bucket['rr_25d_call_put']:+.1f} vol-pt")
+            else:
+                info.append("25Δ skew/RR 不可用（两侧合格样本不足）")
+            rendered.append("；".join(info))
+        parts.append("期限桶（PCR/OI 集中位均按该到期；不推断方向）: " + " | ".join(rendered))
+        if near and monthly and near.get("atm_iv") is not None and monthly.get("atm_iv") is not None:
+            parts.append(f"近端−月度 ATM IV 期限差 {near['atm_iv'] - monthly['atm_iv']:+.1f} vol-pt")
     if opt.get("max_pain") is not None:
         mp = f"Max Pain（静态 OI 数学值） {opt['max_pain']:g}"
         if opt.get("chain_expiry"):
-            # 到期链必须标出来 —— 「引力/钉住」的强度与到期远近直接相关,
-            # 缺了它模型会拿快照日期猜 (实测 5 只里 4 只猜成快照当日)。
             mp += f"（属 {opt['chain_expiry']} 到期链，不代表价格引力）"
         parts.append(mp)
     return " · ".join(parts)

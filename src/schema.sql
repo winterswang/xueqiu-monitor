@@ -254,21 +254,21 @@ CREATE TABLE IF NOT EXISTS options_daily (
     put_volume    INTEGER,
     call_oi       INTEGER,
     put_oi        INTEGER,
-    pcr_volume    REAL,
-    pcr_oi        REAL,
+    pcr_volume    REAL,                              -- 兼容性全期限汇总；不得用作近端方向信号
+    pcr_oi        REAL,                              -- 兼容性全期限汇总；不得用作近端方向信号
     atm_iv        REAL,                              -- 美股=CBOE iv30(%); 港股=ATM 合约 iv(%)
     iv_percentile REAL,                              -- detector 写回 (0~100)
     premium_yield REAL,                              -- ATM call 权利金率年化 (%)
     premium_yield_dte INTEGER,                       -- 备兑收益率年化所用实际到期天数
     max_pain      REAL,
-    chain_expiry  TEXT,                              -- MaxPain 所属到期链 (OI 最集中的到期); 墙为 ±20% 混合口径
+    chain_expiry  TEXT,                              -- MaxPain 与兼容墙字段所用的 OI 集中到期链
     option_currency TEXT,
     underlying_currency TEXT,
     contracts_seen INTEGER,
     contracts_valid INTEGER,
     quality_rule TEXT,
-    wall_call     REAL,                              -- call OI 最大行权价
-    wall_put      REAL,                              -- put OI 最大行权价
+    wall_call     REAL,                              -- chain_expiry 上 call OI 最大行权价
+    wall_put      REAL,                              -- chain_expiry 上 put OI 最大行权价
     z_pcr_oi      REAL,                              -- detector 写回
     z_volume      REAL,                              -- detector 写回
     source        TEXT NOT NULL DEFAULT 'cboe'       -- cboe/longbridge/hkex
@@ -303,3 +303,38 @@ CREATE TABLE IF NOT EXISTS options_contracts (
 );
 CREATE INDEX IF NOT EXISTS idx_options_contracts_stock
     ON options_contracts(stock_code, snap_date);
+
+-- Per-expiry metrics keep PCR and volatility term structure from mixing maturities.
+CREATE TABLE IF NOT EXISTS options_expiry_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    stat_date INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    dte INTEGER NOT NULL,
+    spot REAL,
+    option_currency TEXT,
+    call_volume INTEGER,
+    put_volume INTEGER,
+    call_oi INTEGER,
+    put_oi INTEGER,
+    pcr_volume REAL,
+    pcr_oi REAL,
+    call_oi_wall REAL,
+    put_oi_wall REAL,
+    top_strike_oi_share REAL,
+    valid_contracts INTEGER NOT NULL DEFAULT 0,
+    iv_contracts INTEGER NOT NULL DEFAULT 0,
+    delta_contracts INTEGER NOT NULL DEFAULT 0,
+    atm_iv REAL,
+    implied_1sigma_pct REAL,
+    implied_1sigma_price REAL,
+    iv_25d_call REAL,
+    iv_25d_put REAL,
+    skew_25d_put_call REAL,
+    rr_25d_call_put REAL,
+    quality_rule TEXT,
+    UNIQUE(stock_code, stat_date, source, expiry)
+);
+CREATE INDEX IF NOT EXISTS idx_options_expiry_stock_date
+    ON options_expiry_daily(stock_code, stat_date, source, dte);

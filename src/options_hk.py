@@ -358,6 +358,32 @@ def aggregate_hk_chain(
     _hk_mp, _hk_chain = _hk_max_pain(near)
     chain_rows = [r for r in near if r["expiry"] == _hk_chain] if _hk_chain else []
     _py, _py_dte = _hk_premium_yield(near, px, stat_date) if px else (None, None)
+    by_expiry: dict[str, list[dict]] = {}
+    for row in gated:
+        by_expiry.setdefault(row["expiry"], []).append(row)
+    expiry_metrics = []
+    for expiry, chain in by_expiry.items():
+        calls_e = [r for r in chain if r["cp"] == "C"]
+        puts_e = [r for r in chain if r["cp"] == "P"]
+        coi, poi = sum(r["oi"] or 0 for r in calls_e), sum(r["oi"] or 0 for r in puts_e)
+        strike_oi: dict[float, int] = {}
+        for row in chain:
+            strike_oi[row["strike"]] = strike_oi.get(row["strike"], 0) + (row["oi"] or 0)
+        expiry_metrics.append({
+            "expiry": expiry,
+            "dte": max(0, (date.fromisoformat(expiry) - datetime.fromtimestamp(stat_date).date()).days),
+            "spot": px,
+            "call_volume": sum(r["volume"] or 0 for r in calls_e),
+            "put_volume": sum(r["volume"] or 0 for r in puts_e),
+            "call_oi": coi, "put_oi": poi,
+            "pcr_volume": round(sum(r["volume"] or 0 for r in puts_e) / sum(r["volume"] or 0 for r in calls_e), 4) if sum(r["volume"] or 0 for r in calls_e) else None,
+            "pcr_oi": round(poi / coi, 4) if coi else None,
+            "call_oi_wall": _max_oi_strike(chain, "C"),
+            "put_oi_wall": _max_oi_strike(chain, "P"),
+            "top_strike_oi_share": round(max(strike_oi.values()) / (coi + poi), 4) if coi + poi and strike_oi else None,
+            "valid_contracts": len(chain), "iv_contracts": 0, "delta_contracts": 0,
+            "option_currency": "HKD", "quality_rule": "settle>0;(oi>0 or volume>0)",
+        })
     return {
         "spot": spot,
         "stat_date": stat_date,
@@ -380,6 +406,7 @@ def aggregate_hk_chain(
         "option_currency": "HKD",
         "underlying_currency": "HKD",
         "contracts": gated,
+        "expiry_metrics": expiry_metrics,
     }
 
 
@@ -540,6 +567,10 @@ def collect_hk(
             continue
         if not dry_run:
             db.insert_option_contracts(db_path, to_contract_rows(sym, stat_date, agg))
+            db.upsert_option_expiry_daily(db_path, [
+                {**metric, "stock_code": sym, "stat_date": stat_date, "source": "hkex"}
+                for metric in agg["expiry_metrics"]
+            ])
             db.upsert_option_daily(db_path, _to_option_row(sym, stat_date, agg))
         results[sym] = {k: v for k, v in agg.items() if k != "contracts"} | {
             "symbol": sym,
