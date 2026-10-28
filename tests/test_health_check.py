@@ -729,6 +729,84 @@ def test_recovered_is_scoped_by_target(fake_project):
     assert checks["source_failures"]["detail"].startswith("1 次失败")
 
 
+def test_source_failures_data_ok_with_window(fake_project):
+    """#102: data 是跨仓契约, 爬虫仓巡检只认字段, 不嗅探 detail 中文文案。"""
+    conn, tmp_path = fake_project
+    (tmp_path / "logs" / "pipeline.log").write_text(
+        "2026-01-15 12:00:00 从 morning-brief 加载 watchlist (10 只)\n"
+        "2026-01-15 12:21:07 [SUMMARY] stocks=10/10 success=10 failed=0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "logs" / "source_failures.jsonl").write_text("", encoding="utf-8")
+
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "ok"
+    assert checks["source_failures"]["data"] == {
+        "log_missing": False,
+        "window_start": "2026-01-15 12:00:00",
+        "window_end": "2026-01-15 12:21:07",
+        "window_fallback": None,
+    }
+
+
+def test_source_failures_data_today_fallback(fake_project):
+    """有台账但定不了窗口 → window_fallback='today', window 字段为 null。
+
+    fixture 的 cron.log 没有时间戳行, _latest_pipeline_window 返回 (None, None)。
+    """
+    conn, tmp_path = fake_project
+    (tmp_path / "logs" / "source_failures.jsonl").write_text("", encoding="utf-8")
+
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "ok"
+    assert checks["source_failures"]["data"] == {
+        "log_missing": False,
+        "window_start": None,
+        "window_end": None,
+        "window_fallback": "today",
+    }
+
+
+def test_source_failures_data_log_missing(fake_project):
+    """台账不存在 → log_missing=true; 全新环境与写入口坏掉由消费方区分处置。"""
+    conn, tmp_path = fake_project  # 不创建 source_failures.jsonl
+
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "ok"
+    assert checks["source_failures"]["data"] == {
+        "log_missing": True,
+        "window_start": None,
+        "window_end": None,
+        "window_fallback": None,
+    }
+
+
+def test_source_failures_data_present_on_warn(fake_project):
+    """WARN 路径同样带 data, 字段 shape 与 OK 一致。"""
+    conn, tmp_path = fake_project
+    (tmp_path / "logs" / "pipeline.log").write_text(
+        "2026-01-15 12:00:00 从 morning-brief 加载 watchlist (10 只)\n"
+        "2026-01-15 12:21:07 [SUMMARY] stocks=10/10 success=10 failed=0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "logs" / "source_failures.jsonl").write_text(
+        json.dumps({"ts": "2026-01-15 12:10:00", "source": "news",
+                    "target": "AAPL", "rc": 1, "reason": "接口异常",
+                    "error": "boom"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "warn"
+    assert checks["source_failures"]["data"]["log_missing"] is False
+    assert checks["source_failures"]["data"]["window_start"] == "2026-01-15 12:00:00"
+    assert checks["source_failures"]["data"]["window_fallback"] is None
+
+
 def test_post_freshness_ignores_replay_types(fake_project):
     """news/article 是时间线回放, 不该把「没带来新讨论」的占比推过阈值。
 
