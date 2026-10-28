@@ -394,7 +394,19 @@ def check(require_daily_report: bool = False) -> None:
     # 之前只统计讨论数，资讯整源挂掉也报 healthy；这里把源级失败显式列出来。
     try:
         fail_log = LOG_DIR / "source_failures.jsonl"
+        start, end = source_window
+        # data 是跨仓契约（#102）：爬虫仓巡检只认字段，不再嗅探 detail 中文文案。
+        # detail 保留给人看，措辞可随意改；动 data 的 shape 前先和爬虫仓对齐。
+        window_data = {
+            "window_start": start.strftime("%Y-%m-%d %H:%M:%S") if start is not None else None,
+            "window_end": end.strftime("%Y-%m-%d %H:%M:%S") if end is not None else None,
+        }
         if fail_log.exists():
+            sf_data = {
+                "log_missing": False,
+                **window_data,
+                "window_fallback": None if start is not None else "today",
+            }
             all_failures = _read_source_failures_in_window(fail_log, source_window)
             recoveries = _read_source_recoveries_in_window(fail_log, source_window)
             # 瞬时失败且已重试恢复的不告警（2026-10-26: comments 01138 首拉超时、
@@ -419,7 +431,8 @@ def check(require_daily_report: bool = False) -> None:
                     for (src_name, why), cnt in sorted(agg.items(), key=lambda kv: -kv[1])
                 )
                 results.append({"check": "source_failures", "status": WARN,
-                                "detail": "%d 次失败 → %s" % (len(rows), detail)})
+                                "detail": "%d 次失败 → %s" % (len(rows), detail),
+                                "data": sf_data})
                 errors.append("source_failures")
             elif resolved:
                 agg = {}
@@ -430,20 +443,20 @@ def check(require_daily_report: bool = False) -> None:
                     "%s→%s: %d 次" % (src_name, target, cnt)
                     for (src_name, target), cnt in sorted(agg.items(), key=lambda kv: -kv[1])
                 )
-                start, end = source_window
                 if start is not None:
                     span = start.strftime("%Y-%m-%d %H:%M:%S")
                     if end is not None:
                         span += " → " + end.strftime("%H:%M:%S")
                     results.append({"check": "source_failures", "status": OK,
                                     "detail": "%d 次失败均已重试恢复 → %s（窗口 %s）"
-                                              % (len(resolved), detail, span)})
+                                              % (len(resolved), detail, span),
+                                    "data": sf_data})
                 else:
                     results.append({"check": "source_failures", "status": OK,
                                     "detail": "%d 次失败均已重试恢复 → %s（今日无 pipeline 窗口）"
-                                              % (len(resolved), detail)})
+                                              % (len(resolved), detail),
+                                    "data": sf_data})
             else:
-                start, end = source_window
                 if start is not None:
                     span = start.strftime("%Y-%m-%d %H:%M:%S")
                     if end is not None:
@@ -452,9 +465,13 @@ def check(require_daily_report: bool = False) -> None:
                 else:
                     # 没有可用日志 → 用的是「当天」兜底口径，如实说明
                     detail = "今日无源级失败（未能确定 pipeline 窗口）"
-                results.append({"check": "source_failures", "status": OK, "detail": detail})
+                results.append({"check": "source_failures", "status": OK,
+                                "detail": detail, "data": sf_data})
         else:
-            results.append({"check": "source_failures", "status": OK, "detail": "无失败记录文件"})
+            results.append({"check": "source_failures", "status": OK,
+                            "detail": "无失败记录文件",
+                            "data": {"log_missing": True, "window_start": None,
+                                     "window_end": None, "window_fallback": None}})
     except Exception as exc:
         results.append({"check": "source_failures", "status": WARN, "detail": "读取失败: %s" % exc})
     # ── 4. Check disk usage ──
