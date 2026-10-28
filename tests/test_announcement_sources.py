@@ -108,10 +108,10 @@ def test_market_and_ima_routing():
     assert market_from_stock_code("NVDA.US") == "US"
     assert ima_target(
         {"doc_category": "financial_report", "market": "HK"}
-    )[1].endswith("6997086")
+    ) == ("ima_kb_Kpi6CQnO", "folder_7519798640527605")
     assert ima_target(
         {"doc_category": "other_announcement", "market": "US"}
-    )[1].endswith("9223514")
+    ) == ("ima_kb_Kpi6CQnO", "folder_7519798640527605")
 
 
 def test_archive_day_downloads_skips_noise_and_is_idempotent(tmp_path):

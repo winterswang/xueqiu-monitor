@@ -27,6 +27,32 @@ from src.db import init_db  # noqa: E402
 
 
 def _load_uploader():
+    cos_upload_candidates = [
+        os.environ.get("COS_UPLOAD_SCRIPT", ""),
+        str(
+            PROJECT_ROOT.parent
+            / "my-agent-skills"
+            / "ima"
+            / "knowledge-base"
+            / "scripts"
+            / "cos-upload.cjs"
+        ),
+        str(
+            Path.home()
+            / ".openclaw"
+            / "workspace"
+            / "skills"
+            / "ima"
+            / "knowledge-base"
+            / "scripts"
+            / "cos-upload.cjs"
+        ),
+    ]
+    for candidate in cos_upload_candidates:
+        if candidate and Path(candidate).is_file():
+            os.environ["COS_UPLOAD_SCRIPT"] = candidate
+            break
+
     analyzer_path = os.environ.get("XUEQIU_ANALYZER_PATH", "")
     candidates = [
         analyzer_path,
