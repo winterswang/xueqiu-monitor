@@ -174,6 +174,13 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
             from xueqiu_analyzer.fetcher_opencli import is_available as _ocli_ok
             from xueqiu_analyzer.fetcher_opencli import fetch_discussions as _ocli_discs
             from xueqiu_analyzer.fetcher_opencli import fetch_notices as _ocli_notices
+            # 恢复记录的 target 必须与 fetcher 落盘的失败记录同口径（都是
+            # _to_xueqiu_symbol 转换后的雪球 symbol），health_check 按
+            # source+target 配对（2026-10-26）。
+            from xueqiu_analyzer.fetcher_opencli import (
+                _to_xueqiu_symbol as _ocli_symbol,
+                record_source_recovery as _ocli_recovery,
+            )
             if _ocli_ok():
                 logger.info(f"  opencli: 预取 {stock_code}")
                 # 预取阶段（讨论 + 公告 + 失败重试）整体受预算约束：单次最坏 87s，
@@ -245,6 +252,10 @@ def crawl_single_stock(stock_code: str, timeout: int = 1200, db_path: str | None
                                 f"  opencli: 讨论重试成功 {len(_opencli_posts)} 条 "
                                 f"(首次被限流, sleep 30s 后恢复)"
                             )
+                            # 首次失败已由 fetcher 写进 source_failures.jsonl，
+                            # 这里补恢复记录，health_check 才能把「瞬时失败已自愈」
+                            # 与「整源挂掉」区分开（2026-10-26 gate 误报）。
+                            _ocli_recovery("comments", _ocli_symbol(stock_code))
                         else:
                             logger.warning("  opencli: 讨论重试仍为空")
                     except Exception as e:

@@ -158,3 +158,61 @@ class TestSentimentStatOverwriteGuard:
         db_mod.init_db(db_path)
         row_id = db_mod.insert_sentiment_stat(db_path, self._stat("TEST.HK", 0, 0.0))
         assert row_id is not None and row_id > 0
+
+
+class TestTouchLastCrawlTime:
+    """2026-10-26: 安静股票(0 新帖)的 last_crawl_time 也要推进。
+
+    update_last_crawl_time 只在「抓到新帖」时写, APP.US 的快照 10-24/25/26
+    每天成功、meta 却冻在 10-23 → crawl_freshness 天天误报。touch 只推
+    last_crawl_time, 增量水位 last_post_time 不动。
+    """
+
+    def _meta_row(self, db_path, stock_code):
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(
+                "SELECT last_crawl_time, last_post_time FROM xueqiu_monitor_meta "
+                "WHERE stock_code=?",
+                (stock_code,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    def test_advances_crawl_time_keeps_watermark(self, tmp_path):
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        crawl_t0 = time.time() - 5 * 86400
+        watermark = time.time() - 3 * 86400
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO xueqiu_monitor_meta VALUES ('APP.US', ?, ?)",
+                (crawl_t0, watermark),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db_mod.touch_last_crawl_time(db_path, "APP.US")
+
+        row = self._meta_row(db_path, "APP.US")
+        assert row["last_crawl_time"] > time.time() - 60
+        assert row["last_post_time"] == watermark
+
+    def test_first_touch_creates_row_with_zero_watermark(self, tmp_path):
+        from src import db as db_mod
+
+        db_path = str(tmp_path / "t.db")
+        db_mod.init_db(db_path)
+        db_mod.touch_last_crawl_time(db_path, "NEW.HK")
+        row = self._meta_row(db_path, "NEW.HK")
+        assert row["last_crawl_time"] > time.time() - 60
+        assert row["last_post_time"] == 0

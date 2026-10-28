@@ -144,11 +144,11 @@ def _latest_pipeline_window(
     return timestamps[0], timestamps[-1]
 
 
-def _read_source_failures_in_window(
+def _read_source_records_in_window(
     fail_log: Path,
     window: tuple[datetime.datetime | None, datetime.datetime | None],
 ) -> list[dict]:
-    """Read source failures that occurred inside the latest pipeline run.
+    """Read source failure/recovery records inside the latest pipeline run.
 
     When there is no usable window (no pipeline log yet), fall back to today's
     records — the previous behaviour. Returning [] here would report "no source
@@ -174,6 +174,28 @@ def _read_source_failures_in_window(
             continue
         rows.append(rec)
     return rows
+
+
+def _read_source_failures_in_window(
+    fail_log: Path,
+    window: tuple[datetime.datetime | None, datetime.datetime | None],
+) -> list[dict]:
+    """失败记录；event=recovered 的恢复记录不是失败（record_source_recovery）。"""
+    return [
+        r for r in _read_source_records_in_window(fail_log, window)
+        if r.get("event") != "recovered"
+    ]
+
+
+def _read_source_recoveries_in_window(
+    fail_log: Path,
+    window: tuple[datetime.datetime | None, datetime.datetime | None],
+) -> list[dict]:
+    """重试恢复记录（crawler 重试成功后由 record_source_recovery 写入）。"""
+    return [
+        r for r in _read_source_records_in_window(fail_log, window)
+        if r.get("event") == "recovered"
+    ]
 
 
 def check(require_daily_report: bool = False) -> None:
@@ -373,7 +395,20 @@ def check(require_daily_report: bool = False) -> None:
     try:
         fail_log = LOG_DIR / "source_failures.jsonl"
         if fail_log.exists():
-            rows = _read_source_failures_in_window(fail_log, source_window)
+            all_failures = _read_source_failures_in_window(fail_log, source_window)
+            recoveries = _read_source_recoveries_in_window(fail_log, source_window)
+            # 瞬时失败且已重试恢复的不告警（2026-10-26: comments 01138 首拉超时、
+            # crawler 30s 重试成功，旧口径照样红卡）。恢复记录按 source+target
+            # 与失败配对，只剩「失败且未恢复」才计入。
+            rec_keys = {(r.get("source"), r.get("target")) for r in recoveries}
+            rows = [
+                r for r in all_failures
+                if (r.get("source"), r.get("target")) not in rec_keys
+            ]
+            resolved = [
+                r for r in all_failures
+                if (r.get("source"), r.get("target")) in rec_keys
+            ]
             if rows:
                 agg = {}
                 for rec in rows:
@@ -386,6 +421,27 @@ def check(require_daily_report: bool = False) -> None:
                 results.append({"check": "source_failures", "status": WARN,
                                 "detail": "%d 次失败 → %s" % (len(rows), detail)})
                 errors.append("source_failures")
+            elif resolved:
+                agg = {}
+                for rec in resolved:
+                    key = (rec.get("source") or "?", rec.get("target") or "?")
+                    agg[key] = agg.get(key, 0) + 1
+                detail = "; ".join(
+                    "%s→%s: %d 次" % (src_name, target, cnt)
+                    for (src_name, target), cnt in sorted(agg.items(), key=lambda kv: -kv[1])
+                )
+                start, end = source_window
+                if start is not None:
+                    span = start.strftime("%Y-%m-%d %H:%M:%S")
+                    if end is not None:
+                        span += " → " + end.strftime("%H:%M:%S")
+                    results.append({"check": "source_failures", "status": OK,
+                                    "detail": "%d 次失败均已重试恢复 → %s（窗口 %s）"
+                                              % (len(resolved), detail, span)})
+                else:
+                    results.append({"check": "source_failures", "status": OK,
+                                    "detail": "%d 次失败均已重试恢复 → %s（今日无 pipeline 窗口）"
+                                              % (len(resolved), detail)})
             else:
                 start, end = source_window
                 if start is not None:
@@ -473,7 +529,11 @@ def check(require_daily_report: bool = False) -> None:
 
             # 5b/5c. Post-time health on the latest snapshot per stock:
             #       parse-failure rate > 30% → FAIL (the 8/8 accident signature);
-            #       > 50% posts older than 7 days → WARN (stale pileup).
+            #       > 50% discussion posts older than 7 days → WARN (stale pileup).
+            #       旧帖占比只统计讨论: news/article 是时间线回放, cli 每轮把整页
+            #       资讯/文章原样并入快照 (增量水位只管讨论), 安静股票的快照天然
+            #       被旧内容填满 —— 2026-10-26 实测 53% 旧帖里 news 占 87%, 剔除后
+            #       讨论类只有 42%。「没带来新讨论」才是这个检查要抓的退化信号。
             if _parse_post_time is not None:
                 snap_rows = conn.execute(
                     """SELECT cs.stock_code, cs.posts_data, cs.crawl_time
@@ -484,7 +544,7 @@ def check(require_daily_report: bool = False) -> None:
                            GROUP BY stock_code
                        )"""
                 ).fetchall()
-                total = fail_parse = old_posts = 0
+                total = fail_parse = old_posts = old_denom = 0
                 old_cutoff = now - 7 * 86400
                 for _sc, posts_data, _ct in snap_rows:
                     try:
@@ -496,11 +556,14 @@ def check(require_daily_report: bool = False) -> None:
                         ts = _parse_post_time(p.get("time", "") or "", now)
                         if ts <= 0:
                             fail_parse += 1
-                        elif ts < old_cutoff:
+                            continue
+                        if (p.get("type") or "discussion") in ("news", "article"):
+                            continue
+                        old_denom += 1
+                        if ts < old_cutoff:
                             old_posts += 1
                 if total:
                     fail_rate = fail_parse / total
-                    old_ratio = old_posts / total
                     if fail_rate > 0.30:
                         results.append({
                             "check": "time_parse_rate", "status": FAIL,
@@ -512,16 +575,23 @@ def check(require_daily_report: bool = False) -> None:
                             "check": "time_parse_rate", "status": OK,
                             "detail": f"{fail_parse}/{total} posts time-parse failed ({fail_rate:.0%})",
                         })
-                    if old_ratio > 0.50:
-                        results.append({
-                            "check": "post_freshness", "status": WARN,
-                            "detail": f"{old_posts}/{total} posts older than 7d ({old_ratio:.0%})",
-                        })
-                    else:
+                    if not old_denom:
                         results.append({
                             "check": "post_freshness", "status": OK,
-                            "detail": f"{old_posts}/{total} posts older than 7d ({old_ratio:.0%})",
+                            "detail": "no discussion posts to evaluate (replay-only snapshots)",
                         })
+                    else:
+                        old_ratio = old_posts / old_denom
+                        if old_ratio > 0.50:
+                            results.append({
+                                "check": "post_freshness", "status": WARN,
+                                "detail": f"{old_posts}/{old_denom} discussion posts older than 7d ({old_ratio:.0%})",
+                            })
+                        else:
+                            results.append({
+                                "check": "post_freshness", "status": OK,
+                                "detail": f"{old_posts}/{old_denom} discussion posts older than 7d ({old_ratio:.0%})",
+                            })
                 else:
                     results.append({
                         "check": "time_parse_rate", "status": WARN,

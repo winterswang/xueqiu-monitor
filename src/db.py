@@ -1008,6 +1008,23 @@ def update_last_crawl_time(db_path: str, stock_code: str, last_post_time: float)
         )
 
 
+def touch_last_crawl_time(db_path: str, stock_code: str) -> None:
+    """快照入库后仅推进 last_crawl_time，增量水位 last_post_time 不动。
+
+    update_last_crawl_time 只在「本次抓到新帖」时被调用；安静股票的时间线
+    全是旧帖、过滤后 0 条，两列会一起冻结 —— health_check 的 crawl_freshness
+    就把每天正常抓取的股票误报成 >48h 未抓（2026-10-26 实测 APP.US：
+    快照 10-24/25/26 每天成功，meta 停在 10-23 15:03）。
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO xueqiu_monitor_meta (stock_code, last_crawl_time, last_post_time)
+               VALUES (?, ?, 0)
+               ON CONFLICT(stock_code) DO UPDATE SET
+               last_crawl_time=excluded.last_crawl_time""",
+            (stock_code, time.time())
+        )
+
 
 
 # ════════════════════════════════════════════════════════

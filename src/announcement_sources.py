@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 import time
@@ -501,23 +502,12 @@ def _mark_download_failed(
     )
 
 
-FINANCIAL_KB_ID = "V-Zh0gSNxdBzOpedPdFwA5_BDn7H4FdOZPGq4jTI-X0="
-OTHER_KB_ID = "GxGYu5owKy6lKmLRT3rzAuCyljDYXPo_a5SW-SSHgAY="
-FINANCIAL_FOLDERS = {
-    "CN": "folder_7497872887000987",
-    "HK": "folder_7497872886997086",
-    "US": "folder_7497872891195268",
-}
-OTHER_FOLDER_ID = "folder_7477622699223514"
+ANNOUNCEMENTS_KB_ID = "ima_kb_Kpi6CQnO"
+ANNOUNCEMENTS_FOLDER_ID = "folder_7519798640527605"
 
 
 def ima_target(row: sqlite3.Row | dict) -> tuple[str, str]:
-    if row["doc_category"] == "financial_report":
-        market = row["market"]
-        if market not in FINANCIAL_FOLDERS:
-            raise ValueError(f"unsupported financial report market: {market}")
-        return FINANCIAL_KB_ID, FINANCIAL_FOLDERS[market]
-    return OTHER_KB_ID, OTHER_FOLDER_ID
+    return ANNOUNCEMENTS_KB_ID, ANNOUNCEMENTS_FOLDER_ID
 
 
 def upload_pending(
@@ -572,6 +562,11 @@ def upload_pending(
                 summary.skipped += 1
                 continue
             if not local_path.is_file():
+                logging.getLogger(__name__).error(
+                    "IMA upload skipped: source file missing (%s, announcement_id=%s)",
+                    local_path,
+                    row["announcement_id"],
+                )
                 conn.execute(
                     """UPDATE announcement_sources
                        SET upload_status=?, upload_error=?,
@@ -605,6 +600,14 @@ def upload_pending(
                 )
                 summary.uploaded += 1
             except Exception as exc:
+                # Also write the exception to the cron log: keeping it only in
+                # upload_error made repeated failures impossible to diagnose
+                # from Hermes output after the fact.
+                logging.getLogger(__name__).exception(
+                    "IMA upload failed for %s (announcement_id=%s)",
+                    local_path.name,
+                    row["announcement_id"],
+                )
                 conn.execute(
                     """UPDATE announcement_sources
                        SET upload_status=?, upload_error=?,

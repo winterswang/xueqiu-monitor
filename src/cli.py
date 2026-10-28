@@ -148,6 +148,9 @@ def _source_integrity_section(since_ts: float) -> str:
                 rec = json.loads(line)
             except Exception:
                 continue
+            # 重试恢复记录不是失败（record_source_recovery, 2026-10-26）。
+            if rec.get("event") == "recovered":
+                continue
             if str(rec.get("ts", "")) >= since_iso:
                 rows.append(rec)
     out = ["", "---", "", "## 数据完整性", ""]
@@ -312,6 +315,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             )
             snapshot_id = db.insert_snapshot(db_path, snap)
             logger.debug(f"  {stock_code}: snapshot_id={snapshot_id}")
+            # 快照入库 = 这只股票本轮确实被抓到。水位更新(update_last_crawl_time)
+            # 只在「有新帖」时发生，安静股票的 last_crawl_time 会冻结，health_check
+            # 的 crawl_freshness 把每天正常抓取的股票误报成 >48h 未抓（2026-10-26
+            # APP.US: 快照 10-24/25/26 成功, meta 停在 10-23）。只推 last_crawl_time，
+            # 增量水位 last_post_time 不动。
+            db.touch_last_crawl_time(db_path, stock_code)
     
             # ── Store comments ──
             comments_list: list[Comment] = []

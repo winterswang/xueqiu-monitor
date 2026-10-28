@@ -109,6 +109,10 @@ class TestRateLimitRetry:
         assert fake.fetch_discussions.call_count == 2, \
             "fetch_discussions must be called exactly twice"
         assert sleeps == [30], f"expected one 30s sleep, got {sleeps}"
+        # 2026-10-26: 重试成功必须补恢复记录, health_check 才能把「瞬时失败
+        # 已自愈」与「整源挂掉」区分开。target 用 fetcher 同款 symbol 口径。
+        assert fake.record_source_recovery.called
+        assert fake.record_source_recovery.call_args[0][0] == "comments"
 
     def test_retry_still_empty_keeps_notices_as_partial(self, monkeypatch):
         """重试仍空 → **不能**落 failed，要落 partial 并保留已抓到的公告。
@@ -130,6 +134,7 @@ class TestRateLimitRetry:
         assert result["announcements"][0]["link"] == _NOTICE_ITEM["url"]
         assert fake.fetch_discussions.call_count == 2
         assert sleeps == [30]
+        assert not fake.record_source_recovery.called, "重试仍空 = 未恢复, 不能记 recovered"
 
     def test_no_retry_when_notices_also_empty(self, monkeypatch):
         """两路都空 → 不 sleep, 不重试(整站故障走 Playwright 回退语义)."""
