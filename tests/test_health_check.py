@@ -3,7 +3,8 @@
 Verifies the three semantic checks added in v0.7:
 - crawl_freshness: last_crawl_time > 48h → FAIL when pipeline broadly stalled
 - time_parse_rate: post time parse failure > 30% → FAIL (8/8 accident signature)
-- post_freshness: > 50% posts older than 7d → WARN
+- post_freshness: > 50% discussion posts older than 7d → WARN
+  (news/article 时间线回放不计入, 2026-10-26)
 
 crawl_freshness scope = whitelist union of etc/config*.json when configs are
 readable (v0.8.4: decommissioned meta rows no longer warn); falls back to the
@@ -650,7 +651,6 @@ class TestUndeliveredAlertsAreVisible:
         checks = {c["check"]: c for c in report["checks"]}
         assert checks["alert_delivery"]["status"] == "ok"
         assert "undelivered_alerts" not in report["errors"]
-
     def test_missing_table_is_not_a_problem(self, fake_project, monkeypatch):
         """还没产生过告警的库不该因此报警。"""
         conn, tmp_path = fake_project
@@ -660,3 +660,116 @@ class TestUndeliveredAlertsAreVisible:
         checks = {c["check"]: c for c in report["checks"]}
         assert checks["alert_delivery"]["status"] == "ok"
         assert "undelivered_alerts" not in report["errors"]
+
+
+def test_recovered_source_failure_does_not_warn(fake_project):
+    """失败后有同 source+target 的恢复记录 → ok, detail 说明已恢复。
+
+    2026-10-26 实测: comments 01138 首拉超时(rc=75), crawler 30s 重试成功
+    99 条 —— 旧口径照样红卡。恢复记录由 record_source_recovery 写入。
+    """
+    conn, tmp_path = fake_project
+    now = datetime.datetime.now()
+    log = tmp_path / "logs" / "source_failures.jsonl"
+    log.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in [
+            {"ts": now.isoformat(timespec="seconds"), "source": "comments",
+             "target": "01138", "rc": 75, "reason": "接口异常", "error": "ok: false"},
+            {"ts": (now + datetime.timedelta(seconds=40)).isoformat(timespec="seconds"),
+             "source": "comments", "target": "01138", "event": "recovered"},
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "ok"
+    assert "已重试恢复" in checks["source_failures"]["detail"]
+    assert "source_failures" not in report["errors"]
+    assert report["status"] == "ok"
+
+
+def test_unrecovered_source_failure_still_warns(fake_project):
+    """没有恢复记录的失败照旧告警 —— 配对逻辑不得吞掉真实信号。"""
+    conn, tmp_path = fake_project
+    now = datetime.datetime.now()
+    log = tmp_path / "logs" / "source_failures.jsonl"
+    log.write_text(
+        json.dumps({"ts": now.isoformat(timespec="seconds"), "source": "news",
+                     "target": "AAPL", "rc": 1, "reason": "接口异常",
+                     "error": "boom"}) + "\n",
+        encoding="utf-8",
+    )
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "warn"
+    assert "source_failures" in report["errors"]
+
+
+def test_recovered_is_scoped_by_target(fake_project):
+    """恢复记录只豁免同一 source+target, 别的标的失败照样告警。"""
+    conn, tmp_path = fake_project
+    now = datetime.datetime.now()
+    log = tmp_path / "logs" / "source_failures.jsonl"
+    log.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in [
+            {"ts": now.isoformat(timespec="seconds"), "source": "comments",
+             "target": "01138", "rc": 75, "reason": "接口异常", "error": "ok: false"},
+            {"ts": (now + datetime.timedelta(seconds=40)).isoformat(timespec="seconds"),
+             "source": "comments", "target": "01138", "event": "recovered"},
+            {"ts": now.isoformat(timespec="seconds"), "source": "comments",
+             "target": "00700", "rc": 75, "reason": "接口异常", "error": "ok: false"},
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c for c in report["checks"]}
+    assert checks["source_failures"]["status"] == "warn"
+    assert "source_failures" in report["errors"]
+    assert "00700" not in checks["source_failures"]["detail"]
+    assert checks["source_failures"]["detail"].startswith("1 次失败")
+
+
+def test_post_freshness_ignores_replay_types(fake_project):
+    """news/article 是时间线回放, 不该把「没带来新讨论」的占比推过阈值。
+
+    2026-10-26 实测: 53% 旧帖里 news 占 87% (安静股票的快照被旧资讯填满),
+    旧口径天天在 50% 边缘误报。
+    """
+    conn, tmp_path = fake_project
+    now = time.time()
+    conn.execute("INSERT INTO xueqiu_monitor_meta VALUES ('AAA.HK', ?, 0)", (now - 3600,))
+    posts = json.dumps(
+        [{"type": "news", "time": "2026-05-01T00:00:00.000Z"} for _ in range(6)]
+        + [{"type": "discussion",
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.localtime(now - 600))}
+           for _ in range(4)]
+    )
+    conn.execute(
+        "INSERT INTO crawl_snapshots VALUES (1, 'AAA.HK', ?, 10, ?, 0.1, 'success')",
+        (now - 3600, posts),
+    )
+    conn.commit()
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c["status"] for c in report["checks"]}
+    assert checks["post_freshness"] == "ok"  # 旧口径 6/10=60% 会 WARN
+
+
+def test_post_freshness_still_warns_on_stale_discussions(fake_project):
+    """讨论类大面积变旧照样 WARN —— 剔除回放类型不得吞掉真实信号。"""
+    conn, tmp_path = fake_project
+    now = time.time()
+    conn.execute("INSERT INTO xueqiu_monitor_meta VALUES ('AAA.HK', ?, 0)", (now - 3600,))
+    posts = json.dumps(
+        [{"type": "discussion", "time": "2026-05-01T00:00:00.000Z"} for _ in range(3)]
+        + [{"type": "discussion",
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.localtime(now - 600))}]
+    )
+    conn.execute(
+        "INSERT INTO crawl_snapshots VALUES (1, 'AAA.HK', ?, 4, ?, 0.1, 'success')",
+        (now - 3600, posts),
+    )
+    conn.commit()
+    report = _run_check(tmp_path)
+    checks = {c["check"]: c["status"] for c in report["checks"]}
+    assert checks["post_freshness"] == "warn"
+    assert report["status"] == "ok"  # 既有语义: post_freshness 只上卡片, 不计错误

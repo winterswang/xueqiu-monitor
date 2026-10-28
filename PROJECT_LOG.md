@@ -323,3 +323,22 @@ cron (07:00)
   菜单堆) 与 Chrome 连接错误页一律弃用; 单条抓取异常不再拖垮整批
 - 观测: 详情抓取日志现在带通道名 (cache / pdf_local / opencli / reader),
   grep "[detail] reader" 即可核对当日付费调用数
+
+### 2026-10-26 舆情日更 gate 误报修复 (三处口径缺陷, 当日成立并验证)
+- crawl_freshness: `update_last_crawl_time` 只在抓到新帖时被调, 安静股票
+  (APP.US) 快照 10-24/25/26 每天成功但 meta 冻结在 10-23 15:03, 被误报
+  ">48h 未抓"。新增 `db.touch_last_crawl_time` (只推 last_crawl_time,
+  增量水位 last_post_time 不动), cli.py 快照入库后调用; 当日数据已手工触账
+- source_failures: comments 01138 首拉超时 (rc=75), crawler 30s 重试成功
+  99 条但无恢复记录, health_check 只见失败照发红卡。analyzer 新增
+  `record_source_recovery` (event=recovered), crawler 重试成功时补写;
+  health_check 按 source+target 配对, 已自愈不告警且只豁免同 target
+  (别的标的失败照旧); 日报 `_source_integrity_section` 同步过滤 recovered;
+  当日 01138 的恢复记录已按 g4 日志证据 (15:05:11) 手工补齐
+- post_freshness: cli.py 把整页 news/article 原样并入快照, 时间线回放把
+  旧帖占比推到 53% (news 里 87% 是旧闻)。口径改为剔除 type=news/article
+  只看讨论类, 实测 53% → 38% (1982/5224)
+- 验证: 测试套件 608 全绿 (新增恢复配对/恢复作用域/剔除回放/触账用例,
+  test_missing_table_is_not_a_problem 回归 TestUndeliveredAlertsAreVisible);
+  实跑 health_check status=ok (crawl_freshness 49/49), cron_healthgate.sh
+  rc=0 出 complete 帧
