@@ -53,3 +53,15 @@ def test_disabled_early_return_still_emits_frame(capsys, monkeypatch, tmp_path):
 
     assert collect_options.main() == 0
     assert _frame(capsys)["type"] == "complete"
+
+
+class _CfgNoOverride:
+    options = None
+
+
+def test_derive_us_symbols_keeps_inner_dot():
+    """BRK.B.US → BRK.B：期权采集不能用 split('.')[0] 截成 BRK。"""
+    got = collect_options.derive_us_symbols(
+        _CfgNoOverride(), ["AAPL.US", "BRK.B.US", "600519.SH", "00700.HK"]
+    )
+    assert got == ["AAPL", "BRK.B"]

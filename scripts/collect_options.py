@@ -59,7 +59,8 @@ def derive_us_symbols(cfg: Config, stocks: list[str]) -> list[str]:
     custom = (cfg.options or {}).get("us_symbols") or []
     if custom:
         return [s.upper().removesuffix(".US") for s in custom]
-    return [s.split(".")[0] for s in stocks if s.upper().endswith(".US")]
+    # 去掉末尾 .US，但保留 ticker 内部的点（BRK.B.US → BRK.B）
+    return [s[:-3] for s in stocks if s.upper().endswith(".US")]
 
 
 def derive_hk_symbols(stocks: list[str]) -> list[str]:
