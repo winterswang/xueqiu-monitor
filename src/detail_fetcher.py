@@ -942,15 +942,21 @@ def _ticker_of(stock_code: str) -> str:
 
 
 def _ticker_to_cik(ticker: str) -> str:
-    """ticker → CIK (SEC company_tickers.json, 进程内缓存一次下载)."""
+    """ticker → CIK (SEC company_tickers.json, 进程内缓存一次下载).
+
+    SEC 对**股份类别**用连字符：伯克希尔 B 在它那儿是 `BRK-B`，而 xueqiu 用
+    `BRK.B`（2026-10-30 实测：xueqiu comments BRK.B 能抓到伯克希尔帖子；
+    SEC 侧只有 `BRK-B` 能解析到 CIK 1067983）。所以这里两种写法都认，不靠调用方猜。
+    """
     if ticker in _TICKER_CIK_CACHE:
         return _TICKER_CIK_CACHE[ticker]
+    wanted = {ticker.upper(), ticker.upper().replace(".", "-")}
     try:
         data = _sec_get(
             "https://www.sec.gov/files/company_tickers.json", as_json=True
         )
         for item in data.values():
-            if str(item.get("ticker", "")).upper() == ticker.upper():
+            if str(item.get("ticker", "")).upper() in wanted:
                 cik = str(item["cik_str"])
                 _TICKER_CIK_CACHE[ticker] = cik
                 return cik
