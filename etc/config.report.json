@@ -46,10 +46,6 @@
       "name": "紫金矿业",
       "sector": "矿业"
     },
-    "CRCL.US": {
-      "name": "Circle",
-      "sector": "金融科技"
-    },
     "883.HK": {
       "name": "中海油",
       "sector": "能源"
@@ -114,10 +110,6 @@
       "name": "歌尔股份",
       "sector": "科技制造"
     },
-    "325.HK": {
-      "name": "布鲁可",
-      "sector": "消费"
-    },
     "6078.HK": {
       "name": "海吉亚医疗",
       "sector": "医疗"
@@ -125,10 +117,6 @@
     "000933.SZ": {
       "name": "神火股份",
       "sector": "周期/资源"
-    },
-    "1030.HK": {
-      "name": "新城发展",
-      "sector": "地产"
     },
     "1138.HK": {
       "name": "中远海能",
@@ -197,6 +185,26 @@
     "TEM.US": {
       "name": "Tempus AI",
       "sector": "医疗/AI"
+    },
+    "AMD.US": {
+      "name": "超威半导体",
+      "sector": "半导体"
+    },
+    "BRK.B.US": {
+      "name": "伯克希尔B",
+      "sector": "金融"
+    },
+    "AAPL.US": {
+      "name": "苹果",
+      "sector": "消费电子"
+    },
+    "AMZN.US": {
+      "name": "亚马逊",
+      "sector": "互联网"
+    },
+    "BEKE.US": {
+      "name": "贝壳",
+      "sector": "房产服务"
     }
   },
   "llm": {

@@ -7,10 +7,8 @@
     "concurrency": 1,
     "whitelist": [
       "SPCX.US",
-      "CRCL.US",
       "2899.HK",
       "883.HK",
-      "325.HK",
       "6078.HK",
       "000933.SZ",
       "300760.SZ"
