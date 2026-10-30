@@ -737,3 +737,19 @@ def test_opencli_article_waf_surfaces_blocked_waf_marker(monkeypatch):
     res = df._fetch_page_opencli_adapter("https://xueqiu.com/1/2")
     assert res["status"] == "error"
     assert res["blocked_waf"] is True
+
+
+def test_ticker_of_strips_only_the_market_suffix():
+    """BRK.B.US 必须截成 BRK.B，而不是 split('.')[0] 得到的 BRK。
+
+    2026-10-30 池子首次纳入双点符号（BRK.B.US）：截错会让 SEC company_tickers
+    查不到 CIK，SEC 原文检索静默退化成新闻搜索——不报错、日志也看不出来。
+    """
+    assert df._ticker_of("BRK.B.US") == "BRK.B"
+    assert df._ticker_of("AAPL.US") == "AAPL"
+    assert df._ticker_of("CRWV.US") == "CRWV"
+    assert df._ticker_of("600519.SH") == "600519"
+    assert df._ticker_of("00700.HK") == "00700"
+    # 已经是裸 ticker 的原样返回（不要在这里再剥一层）
+    assert df._ticker_of("BRK.B") == "BRK.B"
+    assert df._ticker_of("") == ""

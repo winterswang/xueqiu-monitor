@@ -921,6 +921,26 @@ def _sec_get(url: str, timeout: int = 30, as_json: bool = False):
     return json.loads(raw) if as_json else raw
 
 
+_MARKET_SUFFIXES = (".SH", ".SZ", ".HK", ".US")
+
+
+def _ticker_of(stock_code: str) -> str:
+    """从 watchlist 代码取 SEC ticker：去掉**已知的市场后缀**，保留 ticker 内部的点。
+
+    不能用 `split(".")[0]`：BRK.B.US 会被截成 "BRK"，而 SEC company_tickers 里
+    的符号是 "BRK.B"，于是 `_ticker_to_cik` 查不到、SEC 原文检索**静默**退化成新闻
+    搜索（2026-10-30 池子首次纳入双点符号时发现）。
+    口径与 `crawler._to_xueqiu_code` 一致；没有市场后缀的输入原样返回，
+    避免把裸 ticker（如 "BRK.B"）再削一层。
+    """
+    code = (stock_code or "").strip()
+    upper = code.upper()
+    for suffix in _MARKET_SUFFIXES:
+        if upper.endswith(suffix):
+            return code[: -len(suffix)]
+    return code
+
+
 def _ticker_to_cik(ticker: str) -> str:
     """ticker → CIK (SEC company_tickers.json, 进程内缓存一次下载)."""
     if ticker in _TICKER_CIK_CACHE:
@@ -968,7 +988,7 @@ def _fetch_us_filing(title: str, stock_code: str) -> str:
     if not m or _form_of_title(title) not in _US_FULLTEXT_FORMS:
         return ""
     accession = m.group(1)
-    ticker = stock_code.split(".")[0]
+    ticker = _ticker_of(stock_code)
     cik = _ticker_to_cik(ticker)
     if not cik:
         return ""
@@ -1044,7 +1064,7 @@ def resolve_us_filing_url(title: str, stock_code: str) -> str:
     if not match or _form_of_title(title) not in _US_FULLTEXT_FORMS:
         return ""
     accession = match.group(1)
-    ticker = stock_code.split(".")[0]
+    ticker = _ticker_of(stock_code)
     cik = _ticker_to_cik(ticker)
     if not cik:
         return ""
