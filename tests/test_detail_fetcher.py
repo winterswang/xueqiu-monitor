@@ -753,3 +753,25 @@ def test_ticker_of_strips_only_the_market_suffix():
     # 已经是裸 ticker 的原样返回（不要在这里再剥一层）
     assert df._ticker_of("BRK.B") == "BRK.B"
     assert df._ticker_of("") == ""
+
+
+def test_ticker_to_cik_accepts_dotted_class_symbols(monkeypatch):
+    """SEC 对股份类别用连字符（BRK-B），xueqiu 用点（BRK.B）——两种写法都要认。
+
+    2026-10-30 实测：SEC company_tickers 里只有 `BRK-B` 能解析到 CIK 1067983；
+    而 `opencli xueqiu comments BRK.B` 能正常抓到伯克希尔帖子。两边口径不同，
+    所以规范化要放在 `_ticker_to_cik` 里，调用方不用猜。
+    """
+    df._TICKER_CIK_CACHE.clear()
+    fake = {
+        "0": {"ticker": "BRK-B", "cik_str": 1067983, "title": "BERKSHIRE HATHAWAY INC"},
+        "1": {"ticker": "AAPL", "cik_str": 320193, "title": "Apple Inc."},
+    }
+    monkeypatch.setattr(df, "_sec_get", lambda *a, **k: fake)
+    try:
+        assert df._ticker_to_cik("BRK.B") == "1067983"
+        assert df._ticker_to_cik("BRK-B") == "1067983"
+        assert df._ticker_to_cik("AAPL") == "320193"
+        assert df._ticker_to_cik("NOPE") == ""
+    finally:
+        df._TICKER_CIK_CACHE.clear()
