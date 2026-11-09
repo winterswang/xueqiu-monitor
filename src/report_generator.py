@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import db
+from . import x_sources
 from .llm_config import resolve_model
 
 logger = logging.getLogger(__name__)
@@ -757,6 +758,7 @@ def _build_analysis_prompt(
     tier: str = "deep",
     max_posts: Optional[int] = None,
     options: Optional[dict] = None,
+    x_posts: Optional[list[dict]] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -776,6 +778,11 @@ def _build_analysis_prompt(
         options: options_daily 的最近一期读数 (fetch_stock_options)。有则注入
             「## 期权数据」段 —— 期权定价未来, 与帖子的"已发生"互补。None 时
             整段不出现 (A 股 / 无上市期权的港股 / 未采集), 不留空段。
+        x_posts: X (Twitter) 英文舆情 (src/x_sources.py 产出)。**独立成段**注入,
+            不与雪球帖混排在同一个列表里 —— 两源互动量级不可比 (X 的 like
+            通常是个位到百位, 雪球热榜动辄上千), 混排会让 X 帖被互动量排序
+            压到 max_posts 截断线之外, 双源融合形同虚设。源已清洗 (诈骗词/
+            同文本去重/live 低互动降权)。
     """
     news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
@@ -817,6 +824,69 @@ def _build_analysis_prompt(
         posts_text += (
             f"\n...（共 {len(posts)} 帖，按互动量取前 {used_posts} 帖，"
             f"正文总量达 {_POSTS_TEXT_CAP // 1000}k 字上限）\n"
+        )
+
+    # X 源：独立成段、独立额度（雪球截断不影响它）。空则整段不出现，不留空标题。
+    # 必须分「当日」与「历史高互动」两组：热门切片 top/min_faves 抓的是历史
+    # 高互动帖，实测 META 12 条里 7 条在 2–7 天前。不分组的直接后果是 LLM 把
+    # 一周前的旧闻写成「今日新增」。
+    x_block = ""
+    if x_posts:
+        _X_TEXT_CAP = 12_000
+        fresh = [p for p in x_posts if p.get("is_fresh", True)]
+        hist = [p for p in x_posts if not p.get("is_fresh", True)]
+
+        def _render(group: list[dict], start: int) -> tuple[str, int]:
+            lines, i = [], start
+            for p in group:
+                i += 1
+                # 互动数不可信时直接说明，不要让模型把残缺数字当成"零互动"
+                if p.get("metrics_partial"):
+                    engagement = "互动数不可信（采集侧只抓到部分按钮）"
+                else:
+                    engagement = (
+                        f"❤️{p['like_count']} 💬{p['comment_count']} 🔄{p['forward_count']}"
+                    )
+                    views = p.get("views") or 0
+                    if views:
+                        engagement += f" 👁{views}"
+                slice_tag = f" ·{p['slice']}" if p.get("slice") else ""
+                days = p.get("days_ago")
+                # 当日帖不标天数（"0天前"读起来像噪音）；只有跨日的才标。
+                age_tag = (
+                    f" ·{days:.0f}天前"
+                    if isinstance(days, (int, float)) and days >= 1
+                    else ""
+                )
+                lines.append(
+                    f"\n---\n[X{i}] {p.get('author', '')}{slice_tag}{age_tag} | "
+                    f"🕐{p.get('time', '时间未知')} | ({engagement})\n{p['content']}\n"
+                )
+                if sum(len(s) for s in lines) >= _X_TEXT_CAP:
+                    lines.append(f"\n...（该组共 {len(group)} 条，正文达上限，取前 {len(lines)} 条）\n")
+                    break
+            return "".join(lines), i
+
+        parts = []
+        n = 0
+        if fresh:
+            body, n = _render(fresh, n)
+            parts.append(f"\n### 当日（{len(fresh)} 条）\n{body}")
+        if hist:
+            body, n = _render(hist, n)
+            parts.append(
+                f"\n### 历史高互动（{len(hist)} 条，均发布于 2 天以前）\n"
+                f"**这组只能当背景与叙事来源，禁止写成「今日新增」或与当日事件并列。**{body}"
+            )
+
+        x_block = (
+            f"\n## X 源英文舆情（共 {len(x_posts)} 条：当日 {len(fresh)} / "
+            f"历史高互动 {len(hist)}，编排层采集，独立于雪球）\n"
+            f"引用时用 `[X编号]` 标注来源。传闻类信号须写明「未证实」，"
+            f"不得与雪球帖混为同一证据。\n"
+            f"⚠️ $META 这个 ticker 同时被印度小公司 String Metaverse 使用，"
+            f"遇到「Metaverse / String」语境请先判断是否指 Meta Platforms。\n"
+            + "".join(parts)
         )
 
     # Format trend
@@ -906,7 +976,7 @@ def _build_analysis_prompt(
 
 ## {scope}讨论帖（共 {len(posts)} 帖，按互动量排序；标注 ⭐KOL 的为高影响力作者帖，可在提炼讨论焦点时优先引用）
 {posts_text}
-
+{x_block}
 ---
 {_tier_instructions(tier, scope)}"""
 
@@ -1049,6 +1119,27 @@ def analyze_stock(
         content_caps=content_caps,
     )
 
+    # X 舆情源（仅美股）。由编排层每天采集落盘，这里只读一次：
+    # 目录缺失/文件损坏/当天没数据一律降级为空，不重试、不轮询、不阻塞日报。
+    # 不写 posts 表也不进统计口径 —— 与雪球帖并列注入 prompt（评审点 2/5）。
+    # 也**不进 change_alert**：那张表是 z-score 异动与高权重公告的「统计异常」
+    # 通道，X 传闻属叙事信号，混进去会污染告警语义、让下游把传闻当统计异动。
+    # 传闻在章内用 [X] 标注并强制写明「未证实」（2026-11-02 主人确认不动 alerts）。
+    x_posts: list[dict] = []
+    x_cfg = config.get("x_source") or {}
+    if x_cfg.get("enabled", True) and x_sources.is_us(stock_code):
+        try:
+            # 立刻转成与 fetch_stock_posts() 同构的形状（content/like_count/…），
+            # 下游的 tier 计算与 prompt 组装都按这套字段读写。
+            x_posts = x_sources.as_prompt_posts(
+                x_sources.load_x_posts(
+                    x_cfg.get("root") or "data/x_posts", date_str, stock_code
+                )
+            )
+        except Exception as e:  # 兜底：清洗/解析问题绝不拖垮日报
+            logger.warning(f"  {stock_code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:120]}")
+            x_posts = []
+
     scope = "今日"
     if not posts:
         posts = fetch_stock_posts(
@@ -1069,8 +1160,10 @@ def analyze_stock(
         f"- 分析帖数: {len(posts)}（{scope}窗口，过滤回复/短帖后） | "
         f"当日帖数: {day_count}（并集去重，温度计口径）"
     )
+    if x_posts:
+        caliber += f" | X 源: {len(x_posts)} 条（英文，编排层采集）"
 
-    if not posts:
+    if not posts and not x_posts:
         logger.info(
             f"  {stock_code}: 当日及近{FALLBACK_MAX_AGE_DAYS}日均无帖，跳过"
         )
@@ -1124,8 +1217,13 @@ def analyze_stock(
         day_engagement=day_engagement,
         material_chars=sum(
             len(p.get("content") or "") + len(p.get("title") or "") for p in posts
-        ),
+        )
+        + sum(len(p.get("content") or "") for p in x_posts),
     )
+    # 雪球当日无帖但 X 源有实质内容时，不能落进「平稳」的两句话模板 ——
+    # classify_stock_tier 首行 `if not posts: return TIER_FLAT` 只看雪球。
+    if not posts and x_posts:
+        tier = TIER_DEEP
 
     prompt = _build_analysis_prompt(
         stock_name, stock_code, posts, trend, alerts, hot_words,
@@ -1135,6 +1233,7 @@ def analyze_stock(
             config.get("llm", {}).get("max_posts_by_tier", {}).get(tier)
         ),
         options=options,
+        x_posts=x_posts,
     )
 
     logger.info(

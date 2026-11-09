@@ -342,3 +342,35 @@ cron (07:00)
   test_missing_table_is_not_a_problem 回归 TestUndeliveredAlertsAreVisible);
   实跑 health_check status=ok (crawl_freshness 49/49), cron_healthgate.sh
   rc=0 出 complete 帧
+
+### 2026-11-02 X (Twitter) 舆情源接入（美股章双源融合）
+- 新增 `src/x_sources.py`：读取编排层落盘的 `data/x_posts/<北京日期>/<TICKER>.json`，
+  清洗后转成与 `fetch_stock_posts()` 同构的 dict，在 `analyze_stock` 里与雪球帖
+  **并列**注入 prompt。全量测试 615 → 642（新增 27 个用例）
+- **不写 posts 表、不进统计口径**：posts/crawl_snapshots/sentiment_stats 是雪球
+  口径的统计链（温度计、z-score、并集去重都按它算），混入 X 会污染历史基线，
+  且 unique index `(stock_code, dedup_key)` 会冲突。降级也因此天然干净——目录
+  不存在就是纯雪球，行为与接入前完全一致
+- **X 帖独立成段、独立额度**：X 的 like 通常个位到百位、雪球热榜动辄上千，混排
+  会被互动量排序压到 `max_posts=100` 截断线之外，双源融合形同虚设。已用用例
+  `test_x_block_independent_of_xueqiu_truncation` 守住
+- **不做跨语言语义去重**：英文推文与中文帖描述同一事件是**交叉印证**信号，
+  「取首发」会把最有价值的双源互证扔掉。只做源内 URL 去重 + 正文前缀去重
+- **抄袭检测用前缀包含而非等值指纹**：抄袭号典型形态是「原文 + 追加后缀」
+  （`+ Follow me for more!`），等值比对必然漏杀。短于 20 字的碎片不参与比较
+- **热门切片是历史帖**：实测首批数据 META 12 条里 7 条在 2–7 天前（最老 6.9 天），
+  top/min_faves 抓的是历史高互动。已按 `FRESH_DAYS=1.5` 拆「当日 / 历史高互动」
+  两组，后者每条标 `N天前` 且明令禁止写成「今日新增」——不拆会让 LLM 把一周前
+  的旧闻当新事
+- **采集契约 v2（视图量错位修复）**：首批数据暴露 live 流 `group_raw` 只有一个
+  数字时被按位解析成 `reply=150`，实为浏览量（原帖详情页显示「268 查看」，
+  回复/转推/赞全 0）。约定：`metrics.views` 只作参考**不进 engagement**（量纲
+  不同，算进去会让高曝光零讨论的帖挤到前面）；`metrics_partial=true` 表示按钮组
+  渲染不全、数字含义不可信，工程侧直接吃标记降权并在 prompt 里注明「互动数不可
+  信」，不猜数字位置。**纪律：宁可 partial=true 也不给错数**
+- **不做 alerts**：`change_alert` 是 z-score 异动与高权重公告的统计异常通道，
+  X 传闻属叙事信号，混进去会污染告警语义。传闻在章内标 `[X]` + 强制写「未证实」
+- 清洗规则：诈骗特征词（WhatsApp/wa.me/Message my assistant/`$X→$Y`）整条丢弃；
+  正文 < 30 字丢弃（对齐雪球 `min_post_length`，实测挡掉阿拉伯语短帖与占位串）；
+  live 切片互动 < 5 降权不删。已知取舍：特征词会误杀「WhatsApp 用户增长利好 Meta」
+  这类正常讨论，用例 `test_known_false_positive_is_documented` 固化该行为
