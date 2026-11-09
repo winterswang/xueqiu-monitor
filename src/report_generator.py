@@ -933,6 +933,12 @@ def analyze_stock(
         except Exception as e:  # 兜底：清洗/解析问题绝不拖垮日报
             logger.warning(f"  {stock_code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:120]}")
             x_posts = []
+    # 配额上限（2026-11-10）：clean_posts 已按互动降序排好，截断即「留最强的」。
+    # 采集侧频控只保证每切片 ≤25 条，三切片叠加后仍可能超 prompt 预算。
+    cap = x_cfg.get("max_posts_per_stock")
+    if x_posts and isinstance(cap, int) and cap > 0 and len(x_posts) > cap:
+        logger.info(f"  {stock_code}: X 源 {len(x_posts)} 条按配额截断到 {cap} 条")
+        x_posts = x_posts[:cap]
 
     scope = "今日"
     if not posts:

@@ -229,6 +229,14 @@
     "news_per_stock": 5,
     "news_cache_days": 30
   },
+  "x_source": {
+    "enabled": true,
+    "root": "data/x_posts",
+    "max_posts_per_stock": 30,
+    "keep_days": 7,
+    "collect_hour": "06:30",
+    "check_hour": "18:30"
+  },
   "tier": {
     "deep_all": true,
     "deep_engagement": 100,
