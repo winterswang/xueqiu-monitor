@@ -29,8 +29,33 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_ROOT = Path("data/x_posts")
+DEFAULT_CONFIG = Path("etc/config.report.json")
 VALID_STATUS = {"ok", "partial", "empty", "login_required", "failed"}
-REQUIRED_POST_FIELDS = ("tweet_id", "url", "author", "text", "slice", "created_at_utc")
+# author 不在必填里：opencli 偶尔不给 handle，缺作者不该让整天 FAIL
+REQUIRED_POST_FIELDS = ("tweet_id", "url", "text", "slice", "created_at_utc")
+WARN_POST_FIELDS = ("author",)
+
+
+def ticker_of(stock_code: str) -> str:
+    """与 src/x_sources.ticker_of、scripts/x_ingest.ticker_of 同口径。"""
+    code = (stock_code or "").upper().strip()
+    for suffix in (".US", ".SH", ".SZ", ".HK"):
+        if code.endswith(suffix):
+            return code[: -len(suffix)]
+    return code
+
+
+def expected_from_config(config: Path) -> list[str]:
+    """从 config.report.json 取全部美股标的（.US）。取不到返回空列表。"""
+    try:
+        cfg = json.loads(config.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return sorted(
+        ticker_of(code)
+        for code in (cfg.get("stocks") or {})
+        if str(code).upper().endswith(".US")
+    )
 
 
 def _is_iso_time(value: Any) -> bool:
@@ -92,6 +117,9 @@ def validate_file(path: Path, expected_ticker: str, expected_date: str) -> tuple
         for f in REQUIRED_POST_FIELDS:
             if not post.get(f):
                 errors.append(f"{where}: 缺字段 {f}")
+        for f in WARN_POST_FIELDS:
+            if not post.get(f):
+                warnings.append(f"{where}: 缺字段 {f}（可读，但作者信息不全）")
         if post.get("url") and not _is_x_url(post["url"]):
             warnings.append(f"{where}: url 不似 X 链接 {post['url'][:60]}")
         created = post.get("created_at_utc")
@@ -125,8 +153,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="X 舆情契约校验")
     ap.add_argument("--root", default=str(DEFAULT_ROOT))
     ap.add_argument("--date", required=True)
-    ap.add_argument("--tickers", default="", help="逗号分隔，省略则校验目录下全部文件")
+    ap.add_argument(
+        "--tickers",
+        default="",
+        help="逗号分隔（META 或 META.US 均可），省略则用配置里的美股名单",
+    )
+    ap.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="期望名单来源：其中全部 .US 标的；文件不存在则退回 _status.json / 目录扫描",
+    )
     ap.add_argument("--min-posts", type=int, default=0, help="每票最少帖数（低于记 warning）")
+    ap.add_argument(
+        "--min-coverage", type=float, default=0.0, help="覆盖率下限（0–1），低于则判失败"
+    )
     ap.add_argument("--coverage-only", action="store_true", help="只报覆盖率")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args(argv)
@@ -141,14 +181,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR {msg}")
         return 2
 
-    expected = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    # 期望集合的优先级：显式 --tickers > 配置文件里的美股名单 > 当天 _status.json
+    # 登记过的票 > 目录里已有的文件。
+    # **绝不默认「有几个文件就查几个」**：那样删掉所有文件反而 0/0 PASS，
+    # 覆盖率闸永远不可能报警。
+    expected = [ticker_of(t) for t in args.tickers.split(",") if t.strip()]
+    if not expected:
+        expected = expected_from_config(Path(args.config))
+    if not expected:
+        try:
+            recorded = json.loads((day_dir / "_status.json").read_text(encoding="utf-8"))
+            expected = sorted((recorded.get("tickers") or {}).keys())
+        except Exception:
+            expected = []
+    scanned_fallback = False
     if not expected:
         expected = sorted(p.stem for p in day_dir.glob("*.json") if p.stem != "_status")
+        scanned_fallback = True
 
     errors: list[str] = []
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
+    if scanned_fallback:
+        warnings.append(
+            "没有配置文件名单也没有 _status.json：期望集合退化为「目录里已有的文件」，"
+            "覆盖率不可信，请显式传 --tickers"
+        )
 
     status_payload: dict[str, Any] = {}
     status_path = day_dir / "_status.json"
@@ -191,6 +250,11 @@ def main(argv: list[str] | None = None) -> int:
 
     covered = sum(1 for r in rows if r["present"])
     total_posts = sum(r["posts"] for r in rows)
+    coverage = (covered / len(expected)) if expected else 0.0
+    if args.min_coverage and coverage < args.min_coverage:
+        errors.append(
+            f"覆盖率 {covered}/{len(expected)} = {coverage:.0%}，低于下限 {args.min_coverage:.0%}"
+        )
     ok = not errors
 
     if args.json:
@@ -201,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                     "date": args.date,
                     "expected": len(expected),
                     "covered": covered,
+                    "coverage": round(coverage, 3),
                     "missing": missing,
                     "total_posts": total_posts,
                     "errors": errors,

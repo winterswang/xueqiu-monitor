@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""X 舆情采集落盘器：把采集器（Agent 浏览器）产出的原始 JSON 归一成契约文件。
+"""X 舆情采集落盘器：把采集器（scripts/x_collect.py，走 opencli）产出的原始
+JSON 归一成契约文件。
 
-采集与落盘分离的原因：采集必须复用主人本人 x.com 登录态，只能由 Agent
-驱动浏览器完成；归一去重、原子写、状态登记这些确定性工作放在脚本里，
-保证「哪次抓了什么」永远可复现、可验收。
+采集与落盘分离的原因：采集要处理登录态与频控（外部依赖，会变）；归一去重、
+原子写、状态登记是确定性工作，放在这里保证「哪次抓了什么」永远可复现、可验收。
+任何采集通道（opencli / 未来的别的）只要按下面的原始格式交稿即可。
 
 契约（2026-11-10 方案确认）：
 
@@ -54,10 +55,15 @@ _TWEET_URL_RE = re.compile(r"^https?://(?:www\.)?(?:x|twitter)\.com/[^/]+/status
 
 
 def ticker_of(stock_code: str) -> str:
-    """META.US → META；BRK.B.US → BRK.B。与 src/x_sources.ticker_of 同口径。"""
+    """META.US → META；BRK.B.US → BRK.B；600519.SH → 600519。
+
+    必须与 `src/x_sources.ticker_of` 逐字同口径：落盘文件名是按这里算的，
+    读取是按那里算的，两边差一个字符，数据就写进去读不出来。
+    """
     code = (stock_code or "").upper().strip()
-    if code.endswith(".US"):
-        return code[:-3]
+    for suffix in (".US", ".SH", ".SZ", ".HK"):
+        if code.endswith(suffix):
+            return code[: -len(suffix)]
     return code
 
 
@@ -185,11 +191,33 @@ def dedupe_across_slices(posts: Iterable[dict[str, Any]]) -> tuple[list[dict[str
     return deduped, total - len(deduped)
 
 
-def derive_status(posts: list[dict[str, Any]], declared: str) -> str:
-    if declared in VALID_STATUS:
+# 历史/外部采集器可能沿用的状态别名 → 本模块口径
+_STATUS_ALIASES = {"blocked": "failed", "error": "failed", "banned": "failed"}
+
+
+def derive_status(
+    posts: list[dict[str, Any]],
+    declared: str,
+    slices: list[dict[str, Any]] | None = None,
+) -> str:
+    """定状态。三条规则，按优先级：
+
+    1. 采集器显式声明失败态（login_required / failed / blocked / error）→ 照用。
+       失败态不能因为「恰好有几条帖」被降级成 ok，否则封号/登录墙会静默。
+    2. 有帖但**任一纯采集切片**报错或 0 返回 → partial（数据不全，下游要知道）。
+    3. 其余：有帖 ok，无帖 empty。
+    """
+    declared = (declared or "").strip().lower()
+    declared = _STATUS_ALIASES.get(declared, declared)
+    if declared in VALID_STATUS and declared not in ("ok", "empty"):
         return declared
     if not posts:
         return "empty"
+    for s in slices or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("error") or (s.get("requested") and not s.get("returned")):
+            return "partial"
     return "ok"
 
 
@@ -254,7 +282,7 @@ def ingest(
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     posts, slices, declared = parse_raw(raw)
     posts, dropped = dedupe_across_slices(posts)
-    final_status = derive_status(posts, declared or status)
+    final_status = derive_status(posts, declared or status, slices)
     collected_at = (
         str(raw.get("collected_at") or "") if isinstance(raw, dict) else ""
     ) or _now_iso()
@@ -292,8 +320,24 @@ def ingest(
     }
 
 
+def _config_keep_days(config: Path) -> int | None:
+    """从 config.report.json 的 x_source.keep_days 取保留期（取不到返回 None）。"""
+    try:
+        cfg = json.loads(config.read_text(encoding="utf-8"))
+        val = (cfg.get("x_source") or {}).get("keep_days")
+        return int(val) if val is not None else None
+    except Exception:
+        return None
+
+
 def prune(root: Path, keep_days: int = KEEP_DAYS, dry_run: bool = False) -> list[str]:
-    """删掉超出保留期的日期目录（按目录名 YYYY-MM-DD 判定）。"""
+    """删掉超出保留期的日期目录（按目录名 YYYY-MM-DD 判定）。
+
+    keep_days 下限为 1（= 只保今天）：`--keep-days 0` 的 cutoff 会落到明天，
+    把当天的数据也删掉，这条护栏挡住这种误操作。
+    """
+    if keep_days < 1:
+        raise ValueError(f"keep_days 必须 ≥ 1，收到 {keep_days}")
     removed: list[str] = []
     if not root.exists():
         return removed
@@ -323,7 +367,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", default="", help=f"失败态登记: {VALID_STATUS}")
     ap.add_argument("--note", default="")
     ap.add_argument("--prune", action="store_true", help="清理过期日期目录")
-    ap.add_argument("--keep-days", type=int, default=KEEP_DAYS)
+    ap.add_argument(
+        "--keep-days",
+        type=int,
+        default=None,
+        help=f"保留天数（默认读 config.report.json 的 x_source.keep_days，取不到用 {KEEP_DAYS}）",
+    )
+    ap.add_argument(
+        "--config",
+        default="etc/config.report.json",
+        help="读取 x_source.keep_days 用；文件不存在则退回内置默认",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -335,8 +389,15 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root)
 
     if args.prune:
-        removed = prune(root, args.keep_days, args.dry_run)
-        print(json.dumps({"pruned": removed}, ensure_ascii=False))
+        keep = args.keep_days
+        if keep is None:
+            keep = _config_keep_days(Path(args.config)) or KEEP_DAYS
+        try:
+            removed = prune(root, keep, args.dry_run)
+        except ValueError as e:
+            logger.error(str(e))
+            return 2
+        print(json.dumps({"pruned": removed, "keep_days": keep}, ensure_ascii=False))
         return 0
 
     if not args.date or not args.ticker:

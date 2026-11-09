@@ -92,14 +92,29 @@ def search(query: str, product: str, limit: int) -> list[dict[str, Any]]:
 
 
 def _iso_utc(created_at: str) -> str:
-    """`Mon Nov 09 07:03:37 +0000 2026` → `2026-11-09T07:03:37Z`。"""
+    """转 ISO UTC。吃得下 opencli 现在给的两种形态，也吃得下带毫秒的 RFC3339。
+
+    - `Mon Nov 09 07:03:37 +0000 2026`（opencli 当前格式）
+    - `2026-11-09T07:03:37+0000` / `2026-11-09T07:03:37.000Z`（适配器换编码器时）
+
+    转不出来就返回空串；空串会被 validate 拦下来，不会静默当"今天"。
+    """
+    s = (created_at or "").strip()
+    if not s:
+        return ""
     for fmt in ("%a %b %d %H:%M:%S %z %Y", "%Y-%m-%dT%H:%M:%S%z"):
         try:
-            dt = datetime.strptime((created_at or "").strip(), fmt)
+            dt = datetime.strptime(s, fmt)
             return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         except ValueError:
             continue
-    return ""
+    try:  # 带毫秒的 RFC3339：fromisoformat 直接吃（3.11+ 支持 Z 后缀）
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return ""
 
 
 def _to_int(v: Any) -> int | None:
@@ -222,7 +237,17 @@ def main(argv: list[str] | None = None) -> int:
             "ticker": ticker,
             "date": date_str,
             "collected_at": datetime.now(CST).isoformat(timespec="seconds"),
-            "status": "ok" if total else ("failed" if len(slices_out) == failed_slices and failed_slices else "empty"),
+            # 有切片失败但整票还有数据 → partial（下游/健康检查要看得出"少一层流"）；
+            # 全切片失败 → failed；全成功但 0 条 → empty。
+            "status": (
+                "failed"
+                if slices_out and failed_slices == len(slices_out)
+                else "partial"
+                if failed_slices
+                else "ok"
+                if total
+                else "empty"
+            ),
             "slices": slices_out,
         }
         out = raw_dir / f"{ticker}.raw.json"
