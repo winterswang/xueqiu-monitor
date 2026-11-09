@@ -933,6 +933,21 @@ def analyze_stock(
         except Exception as e:  # 兜底：清洗/解析问题绝不拖垮日报
             logger.warning(f"  {stock_code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:120]}")
             x_posts = []
+    # 配额上限（2026-11-10）：采集侧频控只保证每切片 ≤25 条，三切片叠加后
+    # 仍可能超 prompt 预算。截断顺序**当日优先**——clean_posts 的排序是
+    # 「强互动在前、live 低互动降到末尾」，直接取前 N 条会把今天的时效信号
+    # 全砍掉，只留下几天前的热门帖，日报就变成"今日无 X 舆情"的假象。
+    cap = x_cfg.get("max_posts_per_stock")
+    if x_posts and isinstance(cap, int) and cap > 0 and len(x_posts) > cap:
+        fresh = [p for p in x_posts if p.get("is_fresh", True)]
+        hist = [p for p in x_posts if not p.get("is_fresh", True)]
+        fresh_kept = fresh[:cap]
+        hist_kept = hist[: max(0, cap - len(fresh_kept))]
+        x_posts = fresh_kept + hist_kept
+        logger.info(
+            f"  {stock_code}: X 源 {len(fresh) + len(hist)} 条按配额截断到 "
+            f"{len(x_posts)} 条（当日 {len(fresh_kept)} / 历史 {len(hist_kept)}）"
+        )
 
     scope = "今日"
     if not posts:
