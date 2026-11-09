@@ -342,3 +342,8 @@ cron (07:00)
   test_missing_table_is_not_a_problem 回归 TestUndeliveredAlertsAreVisible);
   实跑 health_check status=ok (crawl_freshness 49/49), cron_healthgate.sh
   rc=0 出 complete 帧
+
+### 2026-11-09 期权功能已下线
+- 舆情日报期权段（逐股 prompt 素材 / 0 帖占位 / 港股无期权尾注 / options_* 告警）、
+  美股+港股期权采集（Cindy f2dba8eb / f8c5b037）、期权三表与相关模块全部移除；
+  设计文档归档到 `plans/_archive/options-sense-20261109/`

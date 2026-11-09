@@ -258,6 +258,7 @@ def fetch_stock_alerts(
                 FROM change_alert
                 WHERE stock_code=? AND date(alert_time,'unixepoch','localtime')=?
                 AND alert_type != 'new_announcement'
+                 AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
                 ORDER BY z_score DESC LIMIT 5""",
             (stock_code, date_str),
@@ -280,15 +281,6 @@ _ALERT_LABELS = {
     "hot_word_surge": "热词飙升",
     "sentiment_shift": "情感突变",
     "new_announcement": "新公告",
-    # 期权信号 (options_detector): 不补这些就会把英文类型名原样写进
-    # prompt 与「今日要点」(2026-10-15)
-    "options_pcr_spike": "期权 PCR 异常走高",
-    "options_pcr_call_surge": "期权 call 押注激增 (PCR 异常走低)",
-    "options_volume_spike": "期权成交量激增",
-    "options_iv_extreme": "期权 IV 极端",
-    "options_event_heat": "事件博弈升温",
-    "options_divergence_top": "舆情-期权背离 (偏顶)",
-    "options_divergence_bottom": "舆情-期权背离 (偏底)",
 }
 
 
@@ -321,7 +313,7 @@ def _alert_summary(alert: dict) -> str:
             f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
             f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
         )
-    # signal 是 options_detector 写进 detail 的人读文案; 有就用它, 比标签更具体
+    # signal 是检测器写进 detail 的人读文案; 有就用它, 比标签更具体
     return d.get("title") or d.get("signal") or _ALERT_LABELS.get(t, t)
 
 
@@ -358,78 +350,6 @@ def fetch_stock_announcements(
         ]
     finally:
         conn.close()
-
-
-# 期权读数最大可接受的年龄（天）。港股天然滞后 1 天（DTOP 20:00 采、日报 19:00 生成），
-# 再留一个长周末 + 假期余量 —— 超过就当作无数据，不用旧读数充数。
-OPTIONS_MAX_AGE_DAYS = 5
-
-
-def fetch_stock_options(
-    db_path: str,
-    stock_code: str,
-    ref_date: Optional[str] = None,
-    max_age_days: int = OPTIONS_MAX_AGE_DAYS,
-) -> Optional[dict]:
-    """该标的最近一期的期权聚合读数 (无期权 / 未采集 / 数据过期 → None)。
-
-    排序必须是 `stat_date DESC, source ASC`: cboe 行带 IV 与期权墙/MaxPain,
-    longbridge 行只有 PCR —— 同一天两源都在时选错就会让 IV 与墙凭空消失。
-    因此**不能**用 db.get_latest_option_daily()（它不带 source 排序）。
-
-    **新鲜度守卫**（2026-10-16 补）: 采集侧自己写着「采集失败必须显式报错, 不得用
-    旧数据充数」, 但报告侧原先只取 `max(stat_date)` 且不检查年龄 —— 采集中断时会
-    把 N 天前的 PCR/墙/MaxPain 当作当期读数, 还配着「请判断市场对未来在给什么
-    价位定价」的指令喂给模型。超过 `max_age_days` 直接当作无数据并告警。
-    """
-    conn = _connect(db_path)
-    row = None
-    out_expiry = []
-    try:
-        row = conn.execute(
-            """SELECT * FROM options_daily WHERE stock_code=?
-               ORDER BY stat_date DESC, source ASC LIMIT 1""",
-            (stock_code,),
-        ).fetchone()
-    except sqlite3.Error as e:
-        # 原先这里静默 return None: 49 只的期权段会同时消失, 而日志/报告里
-        # 看不出和「这些标的没有上市期权」的区别 (2026-10-16 补日志)。
-        logger.warning(f"期权读数读取失败 stock={stock_code}: {e}")
-        return None
-    finally:
-        if row is not None:
-            try:
-                expiry_rows = conn.execute(
-                    """SELECT * FROM options_expiry_daily
-                       WHERE stock_code=? AND stat_date=? AND source=? ORDER BY dte""",
-                    (stock_code, row["stat_date"], row["source"]),
-                ).fetchall()
-                out_expiry = [dict(item) for item in expiry_rows]
-            except sqlite3.Error as e:
-                logger.warning(f"期权到期维度读取失败 stock={stock_code}: {e}")
-                out_expiry = []
-        else:
-            out_expiry = []
-        conn.close()
-    if row is None:
-        return None
-
-    out = {k: row[k] for k in row.keys()}
-    out["expiry_metrics"] = out_expiry
-    if ref_date:
-        try:
-            ref_d = datetime.strptime(ref_date, "%Y-%m-%d").date()
-        except ValueError:
-            return out
-        age = (ref_d - datetime.fromtimestamp(row["stat_date"]).date()).days
-        if age > max_age_days:
-            logger.warning(
-                f"期权读数过期 stock={stock_code}: {age} 天前 "
-                f"(stat_date={datetime.fromtimestamp(row['stat_date']):%Y-%m-%d}, "
-                f"报告日={ref_date}, 阈值 {max_age_days} 天) → 按无数据处理"
-            )
-            return None
-    return out
 
 
 def fetch_hot_words(
@@ -638,110 +558,6 @@ def _get_llm_client():
     return OpenAI(api_key=api_key, base_url=base_url, max_retries=1, timeout=300)
 
 
-# 期权段的解读指南 —— 每只股票注入同一份。模型不天然懂期权语义：不点明它
-# 要么忽略这段素材、要么把数字复述一遍。用户 2026-10-15 明确要求：
-# 「让 LLM 感知到期权数据的价值和目标 —— 为了搞清楚企业未来一段时间的定价
-#  和走势方向」。所以这里既写"拿来干什么"，也写"每一项怎么读"。
-_OPTIONS_GUIDE = """期权数据只描述合约持仓、成交和定价，不能单独识别交易者方向，也不能区分开仓和平仓。
-PCR 是 put/call 数量比，不等于看空/看多结论；OI、成交量均不得据此声称机构买保险或新增资金流入。
-期权报价可描述指定未来期限的波动定价，与舆情中的事件和讨论互补，但不直接给出正股方向。
-
-- IV / IV 分位：描述波动定价；无历史分位时不可断言高低
-- 备兑收益率是基于当前报价的静态年化演算，不代表可重复获得；它与 IV 同源，不得当成独立的第二条证据
-- Call/Put OI 最大行权价只描述指定到期链中的持仓分布，不是支撑、阻力或价格目标
-- Max Pain 是指定到期链在静态 OI 假设下的数学最小值，不代表磁吸、支撑、阻力或方向
-- 比较期权行权价与标的价格前，必须确认标的身份、币种及 ADR 换算比例/汇率均匹配；缺少元数据时禁止比较
-- 覆盖数与过滤规则用于判断数据质量；样本不足、来源不支持、过期或冷启动时应明确说无法判断
-- IV 没有同标的、同期限历史基线时不可比，不判断贵贱
-- 不把 PCR、OI 或成交量解释成买卖方向、开平仓或资金流向"""
-
-# 各数据源的口径说明 —— 防模型把它当成实时盘口
-_OPTIONS_CALIBER = {
-    "cboe": "美股 CBOE 快照, 约 15 分钟延迟, OI 为 T-1",
-    "hkex": "港股 HKEX 当日收盘清算值, 无 IV",
-    "longbridge": "Longbridge 聚合, 仅 PCR 口径",
-}
-
-
-def _options_readings(opt: dict) -> str:
-    """期权读数 → 一行紧凑文本（prompt 段与 0 帖占位行共用）。"""
-    parts: list[str] = []
-    if opt.get("option_currency") or opt.get("underlying_currency"):
-        parts.append(f"币种 期权={opt.get('option_currency') or '未知'} / 标的={opt.get('underlying_currency') or '未知'}；币种/ADR 元数据不足时不比较价位")
-    if opt.get("contracts_seen") is not None:
-        parts.append(f"合约覆盖 {opt.get('contracts_valid') or 0}/{opt['contracts_seen']}；过滤={opt.get('quality_rule') or '未知'}")
-    expiry_metrics = opt.get("expiry_metrics") or []
-    if expiry_metrics:
-        near = min((r for r in expiry_metrics if 1 <= (r.get("dte") or 0) <= 20), key=lambda r: r["dte"], default=None)
-        monthly = min((r for r in expiry_metrics if 21 <= (r.get("dte") or 0) <= 45), key=lambda r: abs(r["dte"] - 30), default=None)
-        buckets = [("近端", near), ("月度(21–45DTE)", monthly)]
-        rendered = []
-        for label, bucket in buckets:
-            if bucket is None:
-                rendered.append(f"{label}: 不可用（无合格到期链）")
-                continue
-            info = [f"{label} {bucket['expiry']} / DTE {bucket['dte']}"]
-            if bucket.get("option_currency") or bucket.get("spot"):
-                info.append(f"现价 {bucket.get('spot') if bucket.get('spot') is not None else '未知'} {bucket.get('option_currency') or '币种未知'}")
-            info.append(f"合约覆盖 {bucket.get('valid_contracts', 0)}")
-            if bucket.get("source") == "cboe":
-                info.append(f"IV样本 {bucket.get('iv_contracts', 0)} / Delta样本 {bucket.get('delta_contracts', 0)}")
-            if bucket.get("pcr_oi") is not None:
-                info.append(f"PCR-OI {bucket['pcr_oi']:.2f}")
-            if bucket.get("pcr_volume") is not None:
-                info.append(f"PCR-量 {bucket['pcr_volume']:.2f}")
-            walls = []
-            if bucket.get("call_oi_wall") is not None:
-                walls.append(f"Call OI 集中位 {bucket['call_oi_wall']:g}")
-            if bucket.get("put_oi_wall") is not None:
-                walls.append(f"Put OI 集中位 {bucket['put_oi_wall']:g}")
-            if walls:
-                info.append(" / ".join(walls))
-            if bucket.get("top_strike_oi_share") is not None:
-                info.append(f"最大行权价 OI 占比 {bucket['top_strike_oi_share']:.0%}")
-            if bucket.get("atm_iv") is not None:
-                info.append(f"ATM IV {bucket['atm_iv']:.1f}%")
-                if bucket.get("implied_1sigma_pct") is not None and bucket.get("implied_1sigma_price") is not None:
-                    info.append(f"隐含 1σ 每股价格尺度 ±{bucket['implied_1sigma_pct']:.1f}% / ±{bucket['implied_1sigma_price']:.2f}（期限尺度，不是预测或风险金额）")
-            elif opt.get("source") == "hkex":
-                info.append("IV/Greeks 不可用（HKEX DTOP 未提供）")
-            if bucket.get("skew_25d_put_call") is not None:
-                info.append(f"25Δ skew(Put−Call) {bucket['skew_25d_put_call']:+.1f} vol-pt / RR(Call−Put) {bucket['rr_25d_call_put']:+.1f} vol-pt")
-            else:
-                info.append("25Δ skew/RR 不可用（两侧合格样本不足）")
-            rendered.append("；".join(info))
-        parts.append("期限桶（PCR/OI 集中位均按该到期；不推断方向）: " + " | ".join(rendered))
-        if near and monthly and near.get("atm_iv") is not None and monthly.get("atm_iv") is not None:
-            parts.append(f"近端−月度 ATM IV 期限差 {near['atm_iv'] - monthly['atm_iv']:+.1f} vol-pt")
-    if opt.get("premium_yield") is not None:
-        py = f"备兑收益率(静态年化) {opt['premium_yield']:.0f}%"
-        dte = opt.get("premium_yield_dte")
-        if dte:
-            per_cycle = opt["premium_yield"] * dte / 365
-            py += f"（{dte} 天期权利金 {per_cycle:.1f}%，占正股市值；不代表可重复收益，与 IV 同源）"
-        else:
-            py += "（不代表可重复收益，与 IV 同源）"
-        parts.append(py)
-    if opt.get("max_pain") is not None:
-        mp = f"Max Pain（静态 OI 数学值） {opt['max_pain']:g}"
-        if opt.get("chain_expiry"):
-            mp += f"（属 {opt['chain_expiry']} 到期链，不代表价格引力）"
-        parts.append(mp)
-    return " · ".join(parts)
-
-
-def _format_options_block(opt: dict) -> str:
-    """期权读数 → prompt 的「## 期权数据」段（目标说明 + 解读指南 + 实际读数）。"""
-    dstr = datetime.fromtimestamp(opt["stat_date"]).strftime("%Y-%m-%d")
-    caliber = _OPTIONS_CALIBER.get(opt.get("source") or "", str(opt.get("source") or ""))
-    readings = _options_readings(opt) or "（本期无有效读数）"
-    return (
-        f"## 期权数据（{dstr}，{caliber}）\n"
-        f"{_OPTIONS_GUIDE}\n\n"
-        f"{readings}"
-    )
-
-
 def _build_analysis_prompt(
     stock_name: str,
     stock_code: str,
@@ -756,7 +572,6 @@ def _build_analysis_prompt(
     news_details: Optional[dict[str, str]] = None,
     tier: str = "deep",
     max_posts: Optional[int] = None,
-    options: Optional[dict] = None,
 ) -> str:
     """Build the LLM prompt for per-stock analysis.
 
@@ -773,9 +588,6 @@ def _build_analysis_prompt(
             actual content instead of a headline.
         tier: v2 增量档位 (deep/std/flat) — 只切换输出指令模板,
             不决定是否分析 (全部股票照常调用)。
-        options: options_daily 的最近一期读数 (fetch_stock_options)。有则注入
-            「## 期权数据」段 —— 期权定价未来, 与帖子的"已发生"互补。None 时
-            整段不出现 (A 股 / 无上市期权的港股 / 未采集), 不留空段。
     """
     news_details = news_details or {}
     # Format posts (tag KOL/media authors so the LLM weights them higher)
@@ -886,8 +698,7 @@ def _build_analysis_prompt(
     else:
         hot_words_text = ", ".join(hot_words) if hot_words else "无"
 
-    options_block = f"\n{_format_options_block(options)}\n" if options else ""
-    return f"""你是股票分析师。请分析以下「{stock_name}（{stock_code}）」{scope}的雪球讨论，并结合资讯/公告与期权市场数据 —— 前者描述**已发生**的事，期权那段定价的是**未来**，两者要一起用。
+    return f"""你是股票分析师。请分析以下「{stock_name}（{stock_code}）」{scope}的雪球讨论，并结合资讯与公告 —— 前者是市场情绪，后者是官方披露，两者要一起用。
 
 ## 情感数据
 {trend_text}
@@ -897,7 +708,7 @@ def _build_analysis_prompt(
 
 ## 今日异常信号
 {alert_text}
-{options_block}
+
 ## 今日公告（官方披露，附详情页链接）
 {ann_text}
 
@@ -909,13 +720,6 @@ def _build_analysis_prompt(
 
 ---
 {_tier_instructions(tier, scope)}"""
-
-
-# 期权数据的输出要求 —— 说明数据支持的期限、波动与持仓结构信息，避免模型只复述数字。
-_OPTIONS_ASK_DEEP = """⚠️ 若素材里有「期权数据」段：在「💡 值得关注的判断」中简述数据支持的持仓、成交或波动信息，并说明口径、有效覆盖与期限。不得据 PCR/OI/成交量推断买卖方向、机构行为、开平仓或资金流，也不得把墙/Max Pain称作支撑、阻力、磁吸或方向信号。**不要只复述数字。**"""
-
-_OPTIONS_ASK_STD = """⚠️ 若素材里有「期权数据」段：在「情感读数」一行里简述期权数据所支持的持仓/成交/波动信息。
-仅描述数据能支持的持仓/成交/波动信息，不推断买卖方向、开平仓、机构行为或资金流；缺乏有效覆盖时说明无法判断。**不要只复述数字。**"""
 
 
 def _tier_instructions(tier: str, scope: str) -> str:
@@ -936,8 +740,6 @@ def _tier_instructions(tier: str, scope: str) -> str:
 ### 情感读数
 一行：结合情感数据（今日分 vs 14日基准）与帖子内容总结情绪
 
-{_OPTIONS_ASK_STD}
-
 ⚠️ 格式要求：
 - 两段标题必须用 `#### `（4 个 #）开头，严禁输出更高级别标题
 - 帖子引用格式统一用 `[编号]`"""
@@ -946,8 +748,6 @@ def _tier_instructions(tier: str, scope: str) -> str:
 
 - 若确有值得注意的新事件/新观点/新风险：用 `#### ` 标题输出简短分析（新增内容 + 情感读数，共 2-4 句）
 - 若{scope}确无增量（纯闲聊/零互动噪音）：只输出一行 `（无新增量）情感分 {scope}读数 X`，不要为了填篇幅编造内容
-
-{_OPTIONS_ASK_STD}
 
 ⚠️ 帖子引用格式统一用 `[编号]`，严禁输出 `#`/`##`/`###` 级别标题"""
     # deep (默认, 兼容旧调用)
@@ -970,8 +770,6 @@ def _tier_instructions(tier: str, scope: str) -> str:
 
 **⭐最有价值观点**（单独一行，供全场要点挑选）：
 `⭐ [股票]一句话观点（引用编号）`
-
-{_OPTIONS_ASK_DEEP}
 
 ⚠️ 素材不足时的例外：若该股当天素材确实极少（例如仅 1-2 帖且零互动、
 无公告/资讯详情），**不要为凑齐小节而编造** —— 只输出「🆕 {scope}新增」
@@ -1039,10 +837,6 @@ def analyze_stock(
     min_len = config.get("llm", {}).get("min_post_length", 30)
     content_caps = config.get("llm", {}).get("content_caps")
     day_count = fetch_day_post_count(db_path, stock_code, date_str)
-    # 期权读数与帖子/资讯/公告并列, 一起喂给逐股分析 (期权定价未来, 帖子描述
-    # 已发生)。取在早退分支之前 —— 0 帖标的不调 LLM, 那条占位小节是它唯一的
-    # 可见通道 (2026-10-15 用户要求"每个自选股都看到")。
-    options = fetch_stock_options(db_path, stock_code, ref_date=date_str)
 
     posts = fetch_stock_posts(
         db_path, stock_code, date_str, min_length=min_len,
@@ -1080,18 +874,11 @@ def analyze_stock(
         # (2026-09-19 实测: 特斯拉当日/近7日 0 帖, 标题与内容自相矛盾)
         # 补上日期与口径 —— 原先只给一串裸数字, 读者无从判断是哪天的
         # (2026-10-16 修)。
-        opt_line = ""
-        if options:
-            dstr = datetime.fromtimestamp(options["stat_date"]).strftime("%Y-%m-%d")
-            caliber = _OPTIONS_CALIBER.get(
-                options.get("source") or "", str(options.get("source") or "")
-            )
-            opt_line = f"- 期权读数（{dstr}，{caliber}）: {_options_readings(options)}\n"
         return {
             "section": (
                 f"#### {stock_name} [{stock_code}]\n\n"
                 f"{caliber}\n"
-                f"{opt_line}\n"
+                f"\n"
                 f"（无新增量）今日及近{FALLBACK_MAX_AGE_DAYS}日无帖子数据。\n"
             ),
             "tier": TIER_FLAT,
@@ -1134,7 +921,6 @@ def analyze_stock(
         max_posts=(
             config.get("llm", {}).get("max_posts_by_tier", {}).get(tier)
         ),
-        options=options,
     )
 
     logger.info(
@@ -1411,6 +1197,7 @@ def fetch_day_alerts(db_path: str, date_str: str) -> list[dict]:
             """SELECT stock_code, alert_type, priority, z_score, detail
                 FROM change_alert
                 WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
+                 AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
                 ORDER BY z_score DESC LIMIT 20""",
             (date_str,),
@@ -1611,55 +1398,6 @@ def _report_window_days(
         content_caps=llm_cfg.get("content_caps"),
     )
     return 1 if posts else FALLBACK_MAX_AGE_DAYS
-
-
-def _hk_codes_with_options(db_path: str, stocks_cfg: dict) -> set[str]:
-    """stocks_cfg 的港股里, options_daily 已有数据的那些。
-
-    供 _hk_no_option_note 区分「标的压根没上市期权」与「采集漏了」——
-    后者不该被说成前者。
-    """
-    hk = [c for c in stocks_cfg if c.upper().endswith(".HK")]
-    if not hk:
-        return set()
-    conn = _connect(db_path)
-    try:
-        placeholders = ",".join("?" * len(hk))
-        rows = conn.execute(
-            f"""SELECT DISTINCT stock_code FROM options_daily
-                WHERE stock_code IN ({placeholders})""",
-            hk,
-        ).fetchall()
-        return {r["stock_code"] for r in rows}
-    except sqlite3.Error:
-        return set()
-    finally:
-        conn.close()
-
-
-def _hk_no_option_note(db_path: str, stocks_cfg: dict, have_codes: set[str]) -> str:
-    """自选港股里「压根没上市期权」的清单。
-
-    与「有期权但当日/本轮没采到」区分开: 只有在 HKEX 官方类代码表里查无此股,
-    才断定为无期权 —— 否则会把自己的漏采说成「标的没有期权」。
-    """
-    from .options_hk import class_cache_path, load_class_cache
-
-    cache = load_class_cache(class_cache_path(db_path))
-    try:
-        known = {int(k) for k in cache["map"]}  # type: ignore[index]
-    except (KeyError, TypeError, ValueError):
-        return ""
-    missing = []
-    for code, info in stocks_cfg.items():
-        if not code.upper().endswith(".HK") or code in have_codes:
-            continue
-        head = code.split(".")[0]
-        if head.isdigit() and int(head) not in known:
-            missing.append(info.get("name", code))
-    if not missing:
-        return ""
-    return f"\n- 自选港股中 {len(missing)} 只无上市期权：{'、'.join(missing)}\n"
 
 
 def enrich_details(
@@ -1903,13 +1641,6 @@ def generate_daily_report(
         logger.error(f"主线节失败(不阻塞): {e}")
         mainlines_md = "## 四、持续主线\n\n生成失败。\n"
 
-    # ── 期权数据已并入逐股分析 (prompt 素材), 不再单列一节 (2026-10-15 用户要求)。
-    # 只留下「哪些自选港股压根没有上市期权」这一条 —— 它是区分"标的没有期权"
-    # 与"采集漏了"的唯一线索, 放进尾注, 信息不丢。
-    hk_gap_note = _hk_no_option_note(
-        db_path, stocks_cfg, _hk_codes_with_options(db_path, stocks_cfg)
-    )
-
     # ── Assemble: 深读 → 标准 → 平稳(紧凑) ──
     deep_codes = sorted(
         (c for c, r in results.items() if r["tier"] == TIER_DEEP),
@@ -1980,8 +1711,6 @@ def generate_daily_report(
     ]
     if sentiment_degradation_note:
         notes.append(sentiment_degradation_note)
-    if hk_gap_note:
-        notes.append(hk_gap_note.strip().lstrip("- ").strip())
     notes_md = "\n".join(f"- {n}" for n in notes)
 
     report = f"""# 📊 自选股舆情日报 {date_str}
