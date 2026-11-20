@@ -22,7 +22,8 @@
     "webhook_url": "",
     "mode": "auto",
     "pending_path": "/tmp/xueqiu_monitor_pending.json",
-    "lark_chat_id": "oc_5d38729181081d4ee50d2d2ad2b662f7"
+    "lark_chat_id": "oc_5d38729181081d4ee50d2d2ad2b662f7",
+    "push_alerts": false
   },
   "filter": {
     "ad_keywords": [],

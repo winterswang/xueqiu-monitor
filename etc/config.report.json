@@ -229,6 +229,12 @@
     "news_per_stock": 5,
     "news_cache_days": 30
   },
+  "x_source": {
+    "enabled": true,
+    "root": "data/x_posts",
+    "max_posts_per_stock": 30,
+    "keep_days": 7
+  },
   "tier": {
     "deep_all": true,
     "deep_engagement": 100,
@@ -244,6 +250,6 @@
     "id": "ima_kb_4VpLwCI5"
   },
   "notification": {
-    "lark_chat_id": "oc_2fe3cfa05bfe4860c71a1bd1efbe3751"
+    "lark_chat_id": "oc_5d38729181081d4ee50d2d2ad2b662f7"
   }
 }

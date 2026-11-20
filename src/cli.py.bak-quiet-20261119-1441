@@ -1,0 +1,1099 @@
+"""xueqiu-monitor: CLI entry point
+
+Main pipeline:
+  1. Load config + watchlist
+  2. Init DB
+  3. Decay stale weights
+  4. For each stock: crawl → store → detect → filter → notify
+  5. Generate daily report if any alerts
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+from .config import Config
+from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
+from . import db
+from . import crawler
+from . import detector
+from . import filter as rule_filter
+from . import notifier
+from .trading_days import filter_trading_day_stats, market_of
+from .models import (
+    CrawlSnapshot, SentimentStat, ChangeAlert,
+    HotWordEvent, PushHistory, Comment, Announcement,
+)
+
+
+# ════════════════════════════════════════════════════════
+# Logging setup
+# ════════════════════════════════════════════════════════
+
+def setup_logging(verbose: bool = False) -> None:
+    """Setup logging with structured format for machine parsing.
+
+    Set LOG_JSON=1 env var for JSON-structured log output (log aggregation).
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    if os.environ.get("LOG_JSON"):
+        class JsonFormatter(logging.Formatter):
+            def format(self, record):
+                return json.dumps({
+                    "time": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
+                    "level": record.levelname,
+                    "module": record.name,
+                    "msg": record.getMessage(),
+                }, ensure_ascii=False)
+        handler = logging.StreamHandler()
+        handler.setFormatter(JsonFormatter())
+        logging.basicConfig(level=level, handlers=[handler])
+    else:
+        fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        logging.basicConfig(level=level, format=fmt, datefmt="%Y-%m-%d %H:%M:%S")
+
+
+# ════════════════════════════════════════════════════════
+# Pipeline
+# ════════════════════════════════════════════════════════
+
+_PHASE_TIMERS: dict[str, float] = {}
+
+
+def _phase(name: str, start: bool = True) -> float | None:
+    """Phase timer: call with start=True to begin, start=False to end and log.
+
+    Returns elapsed seconds on end, None on start.
+    """
+    log = logging.getLogger(__name__)
+    if start:
+        _PHASE_TIMERS[name] = time.time()
+        log.info(f"[PHASE] {name} start")
+        return None
+    else:
+        elapsed = time.time() - _PHASE_TIMERS.pop(name, time.time())
+        log.info(f"[PHASE] {name} end elapsed={elapsed:.1f}s")
+        return elapsed
+
+
+
+
+def _select_reply_candidates(
+    posts: list[dict], existing: set[str], per_stock: int, min_comments: int
+) -> list[str]:
+    """Select reply URLs once, excluding DB history and feed duplicates."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    candidates = sorted(
+        (
+            post for post in posts
+            if (post.get("type") or "discussion") == "discussion"
+            and (post.get("link") or post.get("post_id") or "").startswith("https://xueqiu.com/")
+            and int(post.get("comment_count") or 0) >= min_comments
+        ),
+        key=lambda post: -int(post.get("comment_count") or 0),
+    )
+    for post in candidates:
+        url = post.get("link") or post.get("post_id")
+        if not url or url in existing or url in seen:
+            continue
+        seen.add(url)
+        selected.append(url)
+        if len(selected) >= per_stock:
+            break
+    return selected
+
+
+def _prewarm_details(db_path: str, cfg: Config) -> dict[str, int]:
+    """Fetch report details incrementally after each configured pipeline."""
+    if not cfg.detail.get("prewarm", False):
+        return {"enabled": False, "news": 0, "announcements": 0}
+    from . import report_generator
+
+    date_str = time.strftime("%Y-%m-%d")
+    try:
+        _, n_news, n_announcements = report_generator.enrich_details(
+            db_path, date_str, cfg.__dict__
+        )
+    except Exception as exc:
+        logger.warning(f"详情预热失败(不影响 pipeline): {exc}")
+        return {"enabled": True, "news": 0, "announcements": 0, "error": str(exc)}
+    return {
+        "enabled": True,
+        "news": n_news,
+        "announcements": n_announcements,
+    }
+
+
+def _source_integrity_section(since_ts: float) -> str:
+    # 汇总本次运行的源级抓取失败，产出日报末尾的「数据完整性」段落。
+    # 数据来自 fetcher_opencli 落盘的 logs/source_failures.jsonl。
+    import datetime as _dt
+    fail_log = Path(__file__).resolve().parent.parent / "logs" / "source_failures.jsonl"
+    since_iso = _dt.datetime.fromtimestamp(max(0.0, since_ts - 5)).isoformat(timespec="seconds")
+    rows = []
+    if fail_log.exists():
+        for line in fail_log.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            # 重试恢复记录不是失败（record_source_recovery, 2026-10-26）。
+            if rec.get("event") == "recovered":
+                continue
+            if str(rec.get("ts", "")) >= since_iso:
+                rows.append(rec)
+    out = ["", "---", "", "## 数据完整性", ""]
+    if not rows:
+        out.append("✅ 本次运行所有信息源均正常（讨论 / 资讯 / 公告）")
+    else:
+        agg = {}
+        for r in rows:
+            key = (r.get("source") or "?", r.get("reason") or "其他")
+            agg[key] = agg.get(key, 0) + 1
+        out.append("⚠️ 本次运行有 **%d** 次源级抓取失败，下列数据可能不完整：" % len(rows))
+        out.append("")
+        out.append("| 信息源 | 次数 | 原因 |")
+        out.append("| --- | --- | --- |")
+        for (src_name, why), cnt in sorted(agg.items(), key=lambda kv: -kv[1]):
+            out.append("| %s | %d | %s |" % (src_name, cnt, why))
+        targets = sorted({str(r.get("target")) for r in rows if r.get("target")})
+        if targets:
+            out.append("")
+            out.append("涉及标的：%s%s" % ("、".join(targets[:20]), " 等" if len(targets) > 20 else ""))
+    out.append("")
+    return chr(10).join(out)
+
+def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
+    """Execute the full monitoring pipeline.
+
+    Returns summary dict with stats.
+    """
+    os.environ["XUEQIU_CALL_SOURCE"] = f"xueqiu-monitor:pipeline:{Path(config_path).stem}"
+    cfg = Config.from_file(config_path)
+    db_path = cfg.db_path
+    os.makedirs(Path(db_path).parent, exist_ok=True)
+
+    # Init DB
+    db.init_db(db_path)
+    logger = logging.getLogger(__name__)
+
+    pipeline_start = time.time()
+    errors: list[str] = []
+
+    # Load watchlist (pass crawler config for morning_brief_db override)
+    watchlist_cfg = {"watchlist_path": cfg.watchlist_path, **cfg.crawler}
+    stocks = crawler.load_watchlist(watchlist_cfg)
+    if not stocks:
+        logger.error("自选股列表为空，终止")
+        return {"error": "empty_watchlist", "crawled": 0, "alerts": 0}
+
+    # Whitelist filter
+    whitelist = cfg.crawler.get("whitelist", [])
+    if whitelist:
+        before = len(stocks)
+        stocks = [s for s in stocks if s["stock_code"] in whitelist]
+        skipped = set(whitelist) - {s["stock_code"] for s in stocks}
+        logger.info(f"白名单模式: {len(stocks)}/{before} 只 (配置 {len(whitelist)} 只)")
+        if skipped:
+            logger.warning(f"白名单中以下股票不在 watchlist: {skipped}")
+        if not stocks:
+            logger.error("白名单过滤后为空，终止")
+            return {"error": "empty_whitelist", "crawled": 0, "alerts": 0}
+
+    # ── 熔断冷却预检（2026-11-13）──
+    # 插件熔断后，冷却期内**每一条**请求都会以 BROWSER_CONNECT/exitCode 69 硬失败，
+    # 而每次要白等约 45 秒（daemon 去连一个不存在的哨兵 profile）。
+    # 11-13 的 g4 就是这么废掉的：15:00:36 起跑，整批落在 14:30–15:30 的冷却窗内，
+    # 9 只标的 18 条请求全部空转，白白烧掉 27 分钟，还往失败台账塞了 18 条噪音。
+    # 这里提前判断（读状态文件，实测 0.4 ms）：冷却中就直接收工，**不写 [SUMMARY]**，
+    # 让 40 14-18 的「批次失败自动补跑」按它自己的判据（无 SUMMARY + 无进程）接手。
+    try:
+        from xueqiu_analyzer.opencli_cooldown import cooldown_remaining_seconds
+
+        _remain = cooldown_remaining_seconds()
+    except Exception:  # noqa: BLE001 —— 装不上就按原行为跑，不因为它改变抓取
+        _remain = 0
+    if _remain and _remain > 0:
+        logger.critical(
+            "xueqiu 处于插件层熔断冷却，剩余 %d 秒 —— 本轮不发起任何请求"
+            "（冷却期内的调用只会以 rc=69 空转，单条约 45 秒）。"
+            " 不写 [SUMMARY]，交给自动补跑接手。", int(_remain),
+        )
+        return {"error": "cooldown_active", "cooldown_remaining_seconds": int(_remain),
+                "crawled": 0, "failed": 0, "alerts": 0}
+
+    # Crawl all stocks (parallel if concurrency > 1)
+    concurrency = cfg.crawler.get("concurrency", 1)
+    max_retries = cfg.crawler.get("max_retries", 0)
+    logger.info(f"开始爬取 {len(stocks)} 只自选股 (concurrency={concurrency}, max_retries={max_retries}) ...")
+    start_time = time.time()
+    # 显式判 None：`.get(key, DEFAULT)` 只在键**缺失**时给默认值，配置里写成 `null`
+    # 会原样传下来，而 OpencliBudget(None) 表示「不限」—— 那就与「回退到旧行为」相反了。
+    opencli_budget_seconds = cfg.crawler.get("opencli_budget_seconds")
+    if opencli_budget_seconds is None:
+        opencli_budget_seconds = DEFAULT_OPENCLI_BUDGET_SECONDS
+    crawl_results = crawler.crawl_watchlist(
+        stocks, cfg.crawler["timeout_seconds"], cfg.db_path,
+        concurrency=concurrency, max_retries=max_retries,
+        opencli_budget_seconds=opencli_budget_seconds,
+    )
+    crawl_elapsed = int(time.time() - start_time)
+    logger.info(f"爬取完成: {crawl_elapsed}s")
+
+    # Process each crawl result
+    total_alerts = 0
+    all_alerts: list[ChangeAlert] = []
+    stock_extra: dict[str, dict] = {}  # supplemental data for push_immediate key_data
+    detect_errors = 0
+
+    _phase("pipeline.detect")
+    for cr in crawl_results:
+        stock_code = cr.get("stock_code", "?")
+        # `partial` 也必须处理：它表示**部分成功**（如 opencli 只取到公告、讨论为空，
+        # 或 Playwright 超时但 opencli 有数据）。按 failed 跳过会让已经拿到的公告
+        # **整批不入库、不告警**。健康判定那边仍会把 partial 记为 degraded。
+        # 见 xueqiu-monitor issue #76。
+        if cr["status"] not in ("success", "partial"):
+            # INFO 而非 debug: health_check 的 crawl_failures 检查靠这行统计
+            # 当日 skip 数, debug 级在 `python3 -u -m src.cli`(INFO) 下永不落盘
+            # → total_skip 恒为 0, 大面积抓取失败被静默放行 (2026-10-16 修)。
+            logger.info(f"[SKIP] stock={stock_code} status={cr['status']} error={cr.get('error', '')}")
+            continue
+
+        try:
+            stock_code = cr["stock_code"]
+            stock_start = time.time()
+            now = int(time.time())
+
+            # ── 资讯并入 (2026-09-18): 快路径此前只有讨论+公告, 资讯被架空 ──
+            # 浏览器路径的 news 合并代码(crawler.py)一直存在, 只是快路径永远喂空数组。
+            # 这里在快照落盘前补上: opencli news 适配器直连 stock_timeline.json。
+            # 2026-09-20 修: news 不再硬编码 sentiment_score=0.0 —— 用 sentiment
+            # 的关键词打分(与管内 news 同一逻辑), 并入后重算 sentiment_avg,
+            # 否则这批 news 永远是 0 分并稀释温度计加权情感。
+            if cfg.crawler.get("fetch_news", True):
+                # 资讯状态独立记录：posts_count 是聚合计数（讨论+公告+资讯），
+                # 资讯整源失败会被讨论量稀释，健康判定看不见 —— 所以单独留痕。
+                cr["news_status"] = "pending"
+                cr["news_count"] = 0
+                try:
+                    from .sentiment import score_news_post
+                    sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
+                    from xueqiu_analyzer.fetcher_opencli import fetch_news_with_status
+                    _news, _news_error = fetch_news_with_status(stock_code)
+                    if _news_error:
+                        # fetch_news() 的历史契约是失败也返回空列表；健康判定不能
+                        # 从空列表推断状态，必须走带状态的 API。
+                        cr["news_status"] = "error"
+                        cr["news_error"] = _news_error[:200]
+                        logger.warning(f"  {stock_code}: 资讯获取失败: {_news_error}")
+                    else:
+                        if _news:
+                            for _n in _news:
+                                cr["posts_data"].append({
+                                    "type": "news",
+                                    "post_id": _n.get("link") or _n.get("id") or _n.get("title"),
+                                    "title": _n.get("title", ""),
+                                    "content": _n.get("text", ""),
+                                    "link": _n.get("link", ""),
+                                    "author": _n.get("source", ""),
+                                    "time": _n.get("created_at") or "",
+                                    "sentiment_score": score_news_post(
+                                        _n.get("title", ""), _n.get("text", "")
+                                    ),
+                                })
+                            cr["posts_count"] = len(cr["posts_data"])
+                            cr["sentiment_avg"] = crawler._compute_sentiment_avg(cr["posts_data"])
+                            cr["news_status"] = "ok"
+                            cr["news_count"] = len(_news)
+                            logger.debug(f"  {stock_code}: +{len(_news)} 条资讯(opencli)")
+                        else:
+                            # 带状态 API 已确认这是成功返回空，而不是取数失败。
+                            cr["news_status"] = "empty"
+                except Exception as _e:
+                    cr["news_status"] = "error"
+                    cr["news_error"] = str(_e)[:200]
+                    logger.warning(f"  {stock_code}: 资讯获取异常: {_e}")
+
+            # ── Store snapshot ──
+            snap = CrawlSnapshot(
+                stock_code=stock_code,
+                crawl_time=cr["crawl_time"],
+                posts_count=cr["posts_count"],
+                posts_data=cr["posts_data"],
+                sentiment_avg=cr["sentiment_avg"],
+                status="success",
+            )
+            snapshot_id = db.insert_snapshot(db_path, snap)
+            logger.debug(f"  {stock_code}: snapshot_id={snapshot_id}")
+            # 快照入库 = 这只股票本轮确实被抓到。水位更新(update_last_crawl_time)
+            # 只在「有新帖」时发生，安静股票的 last_crawl_time 会冻结，health_check
+            # 的 crawl_freshness 把每天正常抓取的股票误报成 >48h 未抓（2026-10-26
+            # APP.US: 快照 10-24/25/26 成功, meta 停在 10-23）。只推 last_crawl_time，
+            # 增量水位 last_post_time 不动。
+            db.touch_last_crawl_time(db_path, stock_code)
+    
+            # ── Store comments ──
+            comments_list: list[Comment] = []
+            for post in cr["posts_data"]:
+                comments_list.append(Comment(
+                    snapshot_id=snapshot_id,
+                    post_id=post.get("post_id", ""),
+                    comment_count=post.get("comment_count", 0),
+                    forward_count=post.get("forward_count", 0),
+                    like_count=post.get("like_count", 0),
+                ))
+            if comments_list:
+                n_comments = db.insert_comments(db_path, comments_list)
+                logger.debug(f"  {stock_code}: 写入 {n_comments} 条评论")
+
+            # ── 回复正文 (2026-09-18): 评论数 top-N 帖, opencli replies 适配器 ──
+            # comments 表只有计数; 正文此前从未落盘(crawler 主动过滤回复)。
+            if cfg.crawler.get("fetch_replies", True):
+                try:
+                    per = int(cfg.crawler.get("replies_per_stock", 5))
+                    min_c = int(cfg.crawler.get("replies_min_comments", 5))
+                    rlimit = int(cfg.crawler.get("replies_limit", 20))
+                    if per > 0:
+                        # 回复正文阶段受预算约束：最多 per 次调用、单次最坏 87s，
+                        # 不设上界时一只股票就能吃掉 10 分钟（见 src/opencli_budget.py）。
+                        rbudget = OpencliBudget(opencli_budget_seconds)
+                        sys.path.insert(0, crawler._ensure_xueqiu_analyzer_path())
+                        from xueqiu_analyzer.fetcher_opencli import fetch_replies
+                        have = db.existing_reply_post_ids(db_path)
+                        cands = _select_reply_candidates(
+                            cr["posts_data"], have, per, min_c
+                        )
+                        n_posts = n_replies = 0
+                        now_r = int(time.time())
+                        for idx, url in enumerate(cands):
+                            if url in have:
+                                continue  # 幂等: 已抓过
+                            if rbudget.expired():
+                                # 用下标算，别用 n_posts —— 它只数「有回复」的帖，会少报。
+                                # （cands 已由 _select_reply_candidates 排除了 have，这里
+                                #   不需要再去重。）
+                                skipped = len(cands) - idx
+                                logger.warning(
+                                    f"  {stock_code}: 回复预算 {rbudget.seconds:.0f}s 已用尽"
+                                    f"（已花 {rbudget.spent():.0f}s），本轮跳过剩余 "
+                                    f"{skipped} 帖"
+                                )
+                                break
+                            rows = fetch_replies(url, rlimit)
+                            if rows:
+                                db.insert_post_replies(db_path, [{
+                                    "post_id": url, "reply_id": str(r.get("id") or ""),
+                                    "stock_code": stock_code, "author": str(r.get("author") or ""),
+                                    "likes": int(r.get("likes") or 0), "text": str(r.get("text") or ""),
+                                    "created_at": str(r.get("created_at") or ""),
+                                    "reply_to": str(r.get("reply_to") or ""),
+                                    "fetched_at": now_r,
+                                } for r in rows])
+                                n_posts += 1
+                                n_replies += len(rows)
+                                time.sleep(1.2)  # 对站点友好
+                        if n_posts:
+                            logger.debug(f"  {stock_code}: 回复正文 +{n_posts}帖/{n_replies}条")
+                except Exception as _e:
+                    logger.debug(f"  {stock_code}: 回复获取失败(不影响其余数据): {_e}")
+    
+            # ── Store announcements ──
+            # ann_date 必须用**公告自身的发布时间**, 不是抓取时刻(2026-09-14 修)。
+            # 原来写 time.time(), 于是"这条公告是哪天发的"这个信息彻底丢失:
+            # 下游按日期筛"今日新公告"时, 只能拿到"今天第一次见到的标题",
+            # 而重复公告又因唯一索引永远进不来 —— 公告信号实际是断的。
+            anns_list: list[Announcement] = []
+            for ann in cr.get("announcements", []):
+                real_ts = crawler._parse_post_time(ann.get("time") or "", time.time())
+                anns_list.append(Announcement(
+                    snapshot_id=snapshot_id,
+                    stock_code=stock_code,
+                    ann_title=ann.get("title", ""),
+                    ann_date=int(real_ts) if real_ts else int(time.time()),
+                    ann_type=ann.get("notice_type", ""),
+                    ann_link=ann.get("link", ""),
+                    is_new=0,
+                ))
+            if anns_list:
+                n_anns = db.insert_announcements(db_path, anns_list)
+                logger.debug(f"  {stock_code}: 写入 {n_anns} 条公告")
+    
+            # ── Announcement detection ──
+            prev_snap_anns = []
+            if snapshot_id > 1:
+                prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+                if prev_snap and prev_snap.id is not None:
+                    prev_snap_anns = db.get_announcements_by_snapshot(db_path, prev_snap.id)
+            curr_anns = cr.get("announcements", [])
+            ann_alerts = detector.detect_new_announcement(
+                stock_code, curr_anns, prev_snap_anns, db_path
+            )
+            for a in ann_alerts:
+                a.alert_time = now
+    
+            # ── Detection ──
+            # Get historical stats
+            hist_stats = db.get_historical_stats(db_path, stock_code, cfg.detector["z_score_window_days"])
+            # P1(20261009) 休市日感知: 基线按交易日采样 — 假期 0 样本日稀释
+            # 基线、节后补涨被误判为突变。宽取一倍日历窗再按市场交易日过滤,
+            # 日历源不可用 → None → 回退日历日旧行为。
+            sampled = filter_trading_day_stats(
+                db.get_historical_stats(
+                    db_path, stock_code, cfg.detector["z_score_window_days"] * 2 + 10
+                ),
+                market_of(stock_code),
+                cfg.detector["z_score_window_days"],
+            )
+            if sampled is not None:
+                hist_stats = sampled
+            all_hist = db.get_all_historical_stats(db_path, stock_code)
+    
+            # Cold start check
+            cold = detector.is_cold_start(all_hist, cfg.cold_start["days"])
+
+            # ── 0 帖守卫 (2026-10-16): 「没抓到」≠「今天没帖、情绪转中性」 ──
+            # 风控页 / 登录失效 / 超时 / 水位过滤 都产出**空结果**而非异常, 而
+            # crawler 把空结果无条件写成 status="success"、sentiment_avg=0.0。
+            # 0.0 一旦进检测器, 就是拿「抓不到」去比历史(约 +0.3) → 直接推出假的
+            # 情感突变。库里有 74 条「0 帖却记 success」的快照, 其中 9 例确实触发了
+            # sentiment_shift (实测全是 P2 —— 噪声过滤器压住了等级, 但假告警本身仍错)。
+            # 两者都不产出: 0 帖也没有「讨论量激增」可言。
+            if not detector.has_activity_signal(cr["posts_count"]):
+                logger.info(
+                    f"  {stock_code}: 0 帖 — 跳过 post_spike / sentiment_shift "
+                    f"(抓空不应被当成情绪信号)"
+                )
+                spike_alert = sent_alert = None
+            else:
+                # Detect post spikes
+                spike_alert = detector.detect_post_spike(
+                    cr["posts_count"], hist_stats, cfg.detector["z_score_window_days"]
+                )
+                # Detect sentiment shift (with two-period direct threshold)
+                prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
+                prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
+                sent_alert = detector.detect_sentiment_shift(
+                    cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
+                    prev_snapshot_sentiment=prev_snap_sentiment,
+                )
+            if spike_alert:
+                spike_alert.stock_code = stock_code
+                spike_alert.alert_time = now
+            if sent_alert:
+                sent_alert.stock_code = stock_code
+                sent_alert.alert_time = now
+    
+            alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
+    
+            # Compute sample std from historical sentiment means
+            sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
+            if len(sentiment_values) >= 2:
+                n = len(sentiment_values)
+                mean_s = sum(sentiment_values) / n
+                variance_s = sum((x - mean_s) ** 2 for x in sentiment_values) / (n - 1)
+                computed_std = variance_s ** 0.5
+            else:
+                computed_std = 0.0
+    
+            # ── Store sentiment stat for next run ──
+            # Use max z_score from non-announcement alerts only
+            signal_alerts = [a for a in alerts if a.alert_type != "new_announcement"]
+            max_z = max((a.z_score for a in signal_alerts), default=0.0)
+            # 日键用**本地自然日**（与日报的昨日区间、`get_today_alerts` 一致）。
+            # 原先这里是 `now // 86400 * 86400`（UTC 桶），在本地 00:00–08:00 会与
+            # 读取端算出的本地日错开一格 —— 写进去的 stat_date 落在读取窗口之外。
+            # 见 xueqiu-monitor issue #77。
+            today_start = db.local_day_start(now)
+            cr_degraded = (cr.get("status") != "success") or (
+                (cr.get("diagnostic") or {}).get("sentiment_status") == "degraded"
+            )
+            if not cr.get("posts_count") or cr_degraded:
+                # P0-4(20261009): 空抓/降级打 quarantine——不落 stat,防污染 14 天 Z 基线
+                logger.info(
+                    f"[quarantine] {stock_code} 空抓或降级"
+                    f"(status={cr.get('status')}, posts={cr.get('posts_count')}, "
+                    f"sentiment={(cr.get('diagnostic') or {}).get('sentiment_status')}) "
+                    "→ 跳过 sentiment_stats 落库"
+                )
+            else:
+                stat = SentimentStat(
+                    stock_code=stock_code,
+                    stat_date=today_start,
+                    posts_count=cr["posts_count"],
+                    sentiment_mean=cr["sentiment_avg"],
+                    sentiment_std=computed_std,
+                    z_score=max_z,
+                    z_alert=1 if signal_alerts else 0,
+                )
+                db.insert_sentiment_stat(db_path, stat)
+    
+            # ── TF-IDF hot words ──
+            # 2026-09-20 修: 热词输入排除 news —— 资讯标题是"信源语言"
+            # (融资余额播报/专利公告日/新浪港股好仓), 不是雪球用户的讨论语言,
+            # 混入后污染 hot_word_event → 日报主线表一半是资讯噪音词
+            # (2026-09-19 主线表实测: 12 条中 6 条为 news 标题词)。
+            # news 的增量价值由 detail_fetcher 过滤闸 + 日报深读路径承载。
+            posts_texts = [
+                p.get("content", "") or p.get("title", "")
+                for p in cr["posts_data"]
+                if (p.get("type") or "discussion") != "news"
+            ]
+            curr_tfidf = {}
+            if posts_texts:
+                hist_events = db.get_recent_hot_word_events(db_path, stock_code, cfg.detector["z_score_window_days"])
+                hw_alerts = detector.detect_hot_word_emergence(
+                    stock_code, posts_texts, hist_events,
+                    cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"],
+                )
+                alerts.extend(hw_alerts)
+    
+                # Store hot word events + update hot_word_dict
+                curr_tfidf = dict(detector.compute_tfidf(posts_texts, cfg.detector["tfidf_min_df"], cfg.detector["tfidf_max_df"]))
+                # v0.7 F4: apply the same noise filters as the alert path so the
+                # storage layer (hot_word_event/hot_word_dict) carries only words
+                # with signal — previously it stored every TF-IDF token, polluting
+                # the table with generic words (ai/市场/这个/就是).
+                signal_words = detector.filter_noise_words(list(curr_tfidf.keys()), posts_texts)
+                curr_tfidf = {w: s for w, s in curr_tfidf.items() if w in signal_words}
+                # Build historical TF-IDF per word for z_score computation
+                hist_tfidfs: dict[str, list[float]] = {}
+                for he in hist_events:
+                    hist_tfidfs.setdefault(he.word, []).append(he.tfidf_score)
+                for word, score in curr_tfidf.items():
+                    hist = hist_tfidfs.get(word, [])
+                    # 同 detector.detect_hot_word_emergence: 门按「不同自然日」,
+                    # 比较同精度 (历史存的是 round(x,4))。
+                    z = (
+                        detector.compute_z_score(round(score, 4), hist)
+                        if len({datetime.date.fromtimestamp(e.event_time).isoformat()
+                                for e in hist_events if e.word == word}) >= 3
+                        else 0.0
+                    )
+                    db.insert_hot_word_event(db_path, HotWordEvent(
+                        stock_code=stock_code,
+                        word=word,
+                        tfidf_score=round(score, 4),
+                        event_time=now,
+                        z_score=round(z, 2) if z else 0.0,
+                    ))
+                    db.upsert_hot_word(db_path, word, now)
+    
+            # ── Collect supplemental data for push key_data (§2.5)
+            prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
+            prev_posts = hist_stats[0].posts_count if hist_stats else 0
+            hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
+            post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
+    
+            stock_extra[stock_code] = {
+                "stock_name": _get_stock_name(stocks, stock_code),
+                "sentiment_avg": cr["sentiment_avg"],
+                "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
+                "posts_count": cr["posts_count"],
+                "posts_count_delta": cr["posts_count"] - prev_posts,
+                "hot_words": [w for w, _ in hot_words_top],
+                "post_titles": post_titles_top,
+                "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+            }
+    
+            # ── Filter ──
+            alerts = rule_filter.filter_alerts(alerts, cr["posts_data"], cold, cfg.filter)
+    
+            # ── Store alerts (batch insert for performance) ──
+            alert_ids = db.insert_alerts_batch(db_path, alerts)
+            for alert, aid in zip(alerts, alert_ids):
+                if not aid:
+                    # INSERT OR IGNORE dedup-hit: alert already recorded (and pushed)
+                    # by an earlier run. Keep it out of all_alerts, otherwise
+                    # insert_push(alert_id=0) violates the FK on push_history.alert_id.
+                    continue
+                alert.id = aid
+                total_alerts += 1
+                all_alerts.append(alert)
+        except Exception as e:
+            detect_errors += 1
+            logger.warning(f"[ERROR] stock={stock_code} processing failed: {e}", exc_info=True)
+            continue
+
+
+    # ── Notification ──
+    pending_path = cfg.notification.get("pending_path", "/tmp/xueqiu_monitor_pending.json")
+    p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
+    p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
+    p2_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P2"]
+
+    pending_messages: list[str] = []
+    pending_cards: list[dict] = []
+
+    if not dry_run:
+        def _key_data_for(alert):
+            extra = stock_extra.get(alert.stock_code, {})
+            return {
+                "stock_code": alert.stock_code,
+                "stock_name": extra.get("stock_name", ""),
+                "alert_type": alert.alert_type,
+                "z_score": alert.z_score,
+                "sentiment_avg": extra.get("sentiment_avg", 0.0),
+                "sentiment_shift": extra.get("sentiment_shift", 0.0),
+                "posts_count": extra.get("posts_count", 0),
+                "posts_count_delta": extra.get("posts_count_delta", 0),
+                "hot_words": extra.get("hot_words", []),
+                "post_titles": extra.get("post_titles", []),
+                "magnitude": alert.magnitude,
+                "priority": alert.priority,
+                "trigger_time": extra.get("trigger_time", ""),
+            }
+
+
+        # P2: write push_history for tracking (no message push for P2 volume)
+        for alert in p2_alerts:
+            db.insert_push(db_path, PushHistory(
+                stock_code=alert.stock_code,
+                alert_id=alert.id or 0,
+                priority="P2",
+                content=f"{alert.alert_type} Z={alert.z_score:.2f}",
+                status="logged",
+            ))
+
+        # P0: format immediate alert messages (one per alert)
+        # 台账在 dispatch 后按实际通道回写(P0-3, 20261009: 此前先记 sent 再投递,失败也显示已发)
+        p0_msgs: list[tuple[object, str]] = []
+        for alert in p0_alerts:
+            key_data = _key_data_for(alert)
+            p0_msgs.append((alert, notifier.format_immediate_alert_message(alert, key_data)))
+            pending_cards.append(notifier.format_immediate_alert_card(alert, key_data))
+        pending_messages.extend(msg for _, msg in p0_msgs)
+
+        # P1: format digest message
+        p1_digest = notifier.format_digest_message(p1_alerts) if p1_alerts else None
+        if p1_digest:
+            pending_messages.append(p1_digest)
+            pending_cards.append(notifier.format_digest_card(p1_alerts))
+        # Dispatch via lark-cli or file fallback; 台账按实际通道回写(lark→sent, file→fallback)
+        if pending_messages:
+            channels = notifier.dispatch_messages_tracked(
+                pending_messages, pending_path,
+                mode=cfg.notification.get("mode", "auto"),
+                lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+                push_timeout=cfg.notification.get("push_timeout", 30),
+                max_retries=cfg.notification.get("max_retries", 0),
+                cards=pending_cards,
+            )
+            for i, (alert, _msg) in enumerate(p0_msgs):
+                db.insert_push(db_path, PushHistory(
+                    stock_code=alert.stock_code,
+                    alert_id=alert.id or 0,
+                    priority="P0",
+                    content=f"Z={alert.z_score:.2f} {alert.alert_type}",
+                    status="sent" if channels[i] == "lark" else "fallback",
+                ))
+            if p1_digest:
+                digest_status = "sent" if channels[len(p0_msgs)] == "lark" else "fallback"
+                for alert in p1_alerts:
+                    db.insert_push(db_path, PushHistory(
+                        stock_code=alert.stock_code,
+                        alert_id=alert.id or 0,
+                        priority="P1",
+                        content="digest",
+                        status=digest_status,
+                    ))
+
+    # ── Daily report ──
+    # Build posts_data_map for report
+    posts_data_map = {}
+    for cr in crawl_results:
+        if cr["status"] == "success" and cr.get("posts_data"):
+            posts_data_map[cr["stock_code"]] = cr["posts_data"]
+
+    report = notifier.generate_daily_report(all_alerts, posts_data_map)
+    report += _source_integrity_section(start_time)
+    report_path = Path(db_path).parent / "daily_reports" / f"{time.strftime('%Y-%m-%d')}-alerts.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report)
+    logger.info(f"日报已保存: {report_path}")
+
+    detail_prewarm = (
+        _prewarm_details(db_path, cfg) if not dry_run
+        else {"enabled": False, "news": 0, "announcements": 0}
+    )
+
+    summary = {
+        "crawled": sum(1 for r in crawl_results if r["status"] == "success"),
+        "failed": sum(1 for r in crawl_results if r["status"] != "success"),
+        "total_stocks": len(stocks),
+        "alerts": len(all_alerts),
+        "p0": sum(1 for a in all_alerts if a.priority == "P0"),
+        "p1": sum(1 for a in all_alerts if a.priority == "P1"),
+        "p2": sum(1 for a in all_alerts if a.priority == "P2"),
+        "filtered": sum(1 for a in all_alerts if a.filtered),
+        "elapsed_seconds": crawl_elapsed,
+        "report": str(report_path),
+        "detail_prewarm": detail_prewarm,
+    }
+    # ── Crawl Health Report ──
+    crawl_health = _log_crawl_health(crawl_results, summary, logger)
+    summary["crawl_health"] = crawl_health
+    if crawl_health.get("status") == "degraded":
+        summary["error"] = "crawl_health_degraded"
+    if crawl_health.get("sentiment_degraded"):
+        _record_sentiment_degradation(db_path, crawl_health)
+
+    logger.info(f"Pipeline完成: {json.dumps(summary, ensure_ascii=False)}")
+
+    # ── Health alert: success rate < 98% or posts coverage degraded (§2.1) ──
+    total_stocks = len(crawl_results)
+    if not dry_run and total_stocks > 0:
+        success_count = summary["crawled"]
+        success_rate = success_count / total_stocks
+        failed_count = total_stocks - success_count
+        health_status = summary.get("crawl_health", {}).get("status", "healthy")
+        if success_rate < 0.98 or health_status in {"warn", "degraded"}:
+            health = summary.get("crawl_health", {})
+            coverage = health.get("posts_coverage", 0)
+            zero_count = health.get("empty_success", 0)
+            level = "🚨" if health_status == "degraded" else "⚠️"
+            health_msg = (
+                f"{level} **爬取健康告警**\n\n"
+                f"成功率 {success_rate:.0%}（{failed_count}/{total_stocks} 失败）\n"
+                f"有帖覆盖率 {coverage:.0%}（{health.get('success_with_posts', 0)}/{total_stocks} 有帖）\n"
+                f"成功但零帖 {zero_count} 只，超时 {health.get('timeout', 0)} 只。\n\n"
+                f"请检查 opencli / xueqiu-analyzer / 雪球页面结构与登录状态。"
+            )
+            notifier.dispatch_messages(
+                [health_msg], pending_path,
+                mode=cfg.notification.get("mode", "auto"),
+                lark_chat_id=cfg.notification.get("lark_chat_id") or None,
+                push_timeout=cfg.notification.get("push_timeout", 30),
+                max_retries=cfg.notification.get("max_retries", 0),
+                cards=[notifier.format_health_card(health_msg)],
+            )
+            logger.warning(
+                f"爬取健康异常 status={health_status} success_rate={success_rate:.0%} posts_coverage={coverage:.0%} → 已写入待发送消息"
+            )
+
+    # ── Log structured summary ──
+    elapsed = int(time.time() - pipeline_start)
+    summary["elapsed_seconds"] = elapsed
+    summary["errors"] = errors
+    logger.info(
+        "[SUMMARY] "
+        f"stocks={summary['crawled'] + summary['failed']}/{summary['total_stocks']} "
+        f"success={summary['crawled']} "
+        f"failed={summary['failed']} "
+        f"alerts={summary['alerts']} "
+        f"p0={summary['p0']} "
+        f"p1={summary['p1']} "
+        f"p2={summary['p2']} "
+        f"filtered={summary['filtered']} "
+        f"elapsed={elapsed}s"
+    )
+
+    return summary
+
+
+def _build_summary(
+    errors: list[str],
+    crawl_results: list[dict],
+    stocks: list[dict],
+    alerts: list[ChangeAlert],
+    elapsed: int,
+) -> dict:
+    """Build a consistent summary dict for early-abort paths."""
+    crawled = sum(1 for r in crawl_results if r["status"] == "success") if crawl_results else 0
+    return {
+        "error": errors[-1] if errors else None,
+        "errors": errors,
+        "crawled": crawled,
+        "failed": len(crawl_results) - crawled if crawl_results else 0,
+        "total_stocks": len(stocks),
+        "alerts": len(alerts),
+        "p0": sum(1 for a in alerts if a.priority == "P0"),
+        "p1": sum(1 for a in alerts if a.priority == "P1"),
+        "p2": sum(1 for a in alerts if a.priority == "P2"),
+        "filtered": sum(1 for a in alerts if a.filtered),
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _get_stock_name(stocks: list[dict], code: str) -> str:
+    for s in stocks:
+        if s["stock_code"] == code:
+            return s.get("stock_name", "")
+    return ""
+
+
+def _evaluate_crawl_health(crawl_results: list[dict]) -> dict:
+    """Classify crawl health using posts coverage **and** news status.
+
+    posts coverage thresholds:
+      - healthy: posts coverage >= 50%
+      - warn:    20% <= posts coverage < 50%
+      - degraded: posts coverage < 20%
+
+    news status thresholds (independent dimension):
+      - news error rate > 50%  → degraded
+      - news error rate > 20%  → 至少 warn
+
+    为什么需要第二个维度：posts_count = 讨论 + 公告 + 资讯，是**聚合计数**。
+    资讯整源失败时它仍 > 0（被讨论量稀释），所以只看聚合值会让资讯的失效
+    完全不可见 —— 2026-10-01 的事故就是这种形态。资讯状态由 run_pipeline
+    在并入资讯时写进 cr["news_status"]，这里按「该品牌内部错误率」判定。
+    """
+    total = len(crawl_results)
+    if total == 0:
+        return {
+            "status": "degraded",
+            "total": 0,
+            "success_with_posts": 0,
+            "empty_success": 0,
+            "failed": 0,
+            "timeout": 0,
+            "posts_coverage": 0.0,
+            "news_tracked": 0,
+            "news_ok": 0,
+            "news_errors": 0,
+            "news_coverage": 1.0,
+            "news_error_rate": 0.0,
+            "news_error_codes": [],
+            "sentiment_degraded": 0,
+            "sentiment_degraded_codes": [],
+            "sentiment_degraded_reasons": [],
+        }
+
+    success_with_posts = [
+        r for r in crawl_results
+        if r.get("status") == "success" and r.get("posts_count", 0) > 0
+    ]
+    empty_success = [
+        r for r in crawl_results
+        if r.get("status") == "success" and r.get("posts_count", 0) == 0
+    ]
+    timeout = [r for r in crawl_results if r.get("status") == "timeout"]
+    failed = [r for r in crawl_results if r.get("status") not in {"success", "timeout"}]
+    coverage = len(success_with_posts) / total
+
+    if coverage < 0.20:
+        status = "degraded"
+    elif coverage < 0.50:
+        status = "warn"
+    else:
+        status = "healthy"
+
+    # ── 资讯维度（独立判定，避免被聚合的 posts_count 稀释）──
+    news_tracked = [
+        r for r in crawl_results
+        if r.get("news_status") in ("ok", "empty", "error")
+    ]
+    news_errors = [r for r in news_tracked if r.get("news_status") == "error"]
+    news_ok = [r for r in news_tracked if r.get("news_status") == "ok"]
+    news_error_rate = len(news_errors) / len(news_tracked) if news_tracked else 0.0
+    news_coverage = len(news_ok) / len(news_tracked) if news_tracked else 1.0
+
+    if news_tracked:
+        if news_error_rate > 0.50 and status != "degraded":
+            status = "degraded"
+        elif news_error_rate > 0.20 and status == "healthy":
+            status = "warn"
+
+    sentiment_degraded = [
+        r for r in crawl_results
+        if r.get("diagnostic", {}).get("sentiment_status") == "degraded"
+    ]
+    if sentiment_degraded and status == "healthy":
+        status = "warn"
+
+    return {
+        "status": status,
+        "total": total,
+        "success_with_posts": len(success_with_posts),
+        "empty_success": len(empty_success),
+        "failed": len(failed),
+        "timeout": len(timeout),
+        "posts_coverage": coverage,
+        "empty_success_codes": [r.get("stock_code", "?") for r in empty_success],
+        "failed_codes": [r.get("stock_code", "?") for r in failed],
+        "timeout_codes": [r.get("stock_code", "?") for r in timeout],
+        "news_tracked": len(news_tracked),
+        "news_ok": len(news_ok),
+        "news_errors": len(news_errors),
+        "news_coverage": news_coverage,
+        "news_error_rate": news_error_rate,
+        "news_error_codes": [r.get("stock_code", "?") for r in news_errors],
+        "sentiment_degraded": len(sentiment_degraded),
+        "sentiment_degraded_codes": [
+            r.get("stock_code", "?") for r in sentiment_degraded
+        ],
+        "sentiment_degraded_reasons": sorted({
+            reason
+            for r in sentiment_degraded
+            if (reason := r.get("diagnostic", {}).get("sentiment_reason"))
+        }),
+    }
+
+
+def _record_sentiment_degradation(db_path: str, health: dict) -> None:
+    """Persist same-day sentiment degradation for the 19:00 report."""
+    date_str = time.strftime("%Y-%m-%d")
+    key = f"sentiment_degraded:{date_str}"
+    existing: dict = {}
+    raw = db.get_meta(db_path, key)
+    if raw:
+        try:
+            existing = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            existing = {}
+    merged = {
+        "date": date_str,
+        "runs": int(existing.get("runs", 0)) + 1,
+        "codes": sorted(set(existing.get("codes", [])) | set(
+            health.get("sentiment_degraded_codes", [])
+        )),
+        "reasons": sorted(set(existing.get("reasons", [])) | set(
+            health.get("sentiment_degraded_reasons", [])
+        )),
+    }
+    db.set_meta(db_path, key, json.dumps(merged, ensure_ascii=False))
+
+
+def _log_crawl_health(
+    crawl_results: list[dict], summary: dict, logger: logging.Logger
+) -> dict:
+    """Log and return a crawl health report.
+
+    Helps distinguish "stock genuinely has no content" from "crawler is broken".
+    """
+    health = _evaluate_crawl_health(crawl_results)
+    total = health["total"]
+    if total == 0:
+        logger.warning("⚠ 没有任何爬取结果 —— 爬虫健康状态 degraded")
+        return health
+
+    posts_ratio = health["posts_coverage"] * 100
+    stocks_timeout = health["timeout"]
+
+    logger.info("═" * 50)
+    logger.info("爬取健康报告")
+    logger.info("═" * 50)
+    logger.info(
+        f"有帖股票数: {health['success_with_posts']}/{total} ({posts_ratio:.0f}%) | "
+        f"health={health['status']}"
+    )
+    logger.info(
+        f"成功但零帖: {health['empty_success']} | "
+        f"超时: {health['timeout']} | "
+        f"失败: {health['failed']}"
+    )
+    # 资讯是独立维度：聚合的 posts_count 会掩盖它的失效，所以单独打印
+    if health.get("news_tracked"):
+        logger.info(
+            f"资讯: {health['news_ok']}/{health['news_tracked']} 成功 | "
+            f"异常: {health['news_errors']} | "
+            f"news_healthy={health['news_error_rate'] <= 0.20}"
+        )
+    if health.get("news_error_codes"):
+        logger.warning(f"⚠ 资讯抓取异常的标的: {health['news_error_codes']}")
+    if health.get("sentiment_degraded"):
+        logger.warning(
+            f"⚠ 情绪模型降级: {health['sentiment_degraded']} 只标的返回中性值；"
+            f"原因: {'；'.join(health.get('sentiment_degraded_reasons') or ['未知'])}"
+        )
+
+    # ── 2. Coverage gate ──
+    if health["status"] == "degraded":
+        logger.error(
+            f"🚨 有帖覆盖率 {posts_ratio:.0f}%（<20%）—— 爬虫结果 degraded，"
+            "status=success 但零帖不能视为健康成功"
+        )
+    elif health["status"] == "warn":
+        logger.warning(
+            f"⚠ 有帖覆盖率 {posts_ratio:.0f}%（<50%）—— 爬虫可能部分失效"
+        )
+
+    # ── 3. WARNING: >50% timeout ──
+    timeout_ratio = stocks_timeout / total * 100
+    if timeout_ratio > 50:
+        logger.warning(
+            f"⚠ 超时率 {timeout_ratio:.0f}%（>{50}%）—— "
+            f"建议增大 crawler.timeout_seconds（当前 {summary.get('elapsed_seconds', 0)//max(total,1)}s/股）"
+        )
+
+    # ── 4. List suspicious zero-post stocks (success but no content) ──
+    zero_codes = health.get("empty_success_codes", [])
+    if zero_codes:
+        logger.warning(
+            f"⚠ 以下股票爬取成功但帖数为0（可能爬虫对该股票失效）: "
+            f"{', '.join(zero_codes[:20])}"
+            + (f" ...及其他 {len(zero_codes) - 20} 只" if len(zero_codes) > 20 else "")
+        )
+
+    # ── 5. Per-stock diagnostic drill-down (DEBUG level) ──
+    for r in crawl_results:
+        diag = r.get("diagnostic", {})
+        if diag:
+            logger.debug(
+                f"  {r['stock_code']}: diag="
+                f"timed_out={diag.get('timed_out')}, "
+                f"err={diag.get('error_type')}, "
+                f"dur={diag.get('crawl_duration_ms')}ms, "
+                f"d={diag.get('discussions_count')}/"
+                f"n={diag.get('news_count')}/"
+                f"a={diag.get('articles_count')}/"
+                f"nt={diag.get('notices_count')}"
+            )
+
+    logger.info("═" * 50)
+    return health
+
+
+# ════════════════════════════════════════════════════════
+# CLI
+# ════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(description="xueqiu-monitor — 雪球舆情监控系统")
+    parser.add_argument("-c", "--config", default="etc/config.json",
+                        help="配置文件路径 (default: etc/config.json)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只爬取不推送")
+    parser.add_argument("--init-db", action="store_true",
+                        help="仅初始化数据库")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="详细日志")
+    parser.add_argument("--report", action="store_true",
+                        help="仅生成日报（从已有数据）")
+    args = parser.parse_args()
+
+    setup_logging(args.verbose)
+
+    if args.init_db:
+        cfg = Config.from_file(args.config)
+        db.init_db(cfg.db_path)
+        print(f"数据库初始化完成: {cfg.db_path}")
+        return
+
+    if args.report:
+        cfg = Config.from_file(args.config)
+        alerts = db.get_today_alerts(cfg.db_path)
+        report = notifier.generate_daily_report(alerts)
+        print(report)
+        return
+
+    summary = run_pipeline(args.config, dry_run=args.dry_run)
+    if summary.get("error"):
+        sys.exit(1)
+    sys.exit(0 if summary.get("crawled", 0) > 0 else 1)
+
+
+if __name__ == "__main__":
+    main()

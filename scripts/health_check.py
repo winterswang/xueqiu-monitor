@@ -35,6 +35,14 @@ UNDELIVERED_ALERT_WINDOW_DAYS = 7
 # 分支的注释)。
 RUNNING_FRESH_SECONDS = 900
 
+# 2026-11-14 (gate失败修复#3): cli 的熔断冷却预检 (src/cli.py, cooldown_active)
+# 会打一条 [CRITICAL] 然后「战略性放弃」—— 这是已知态, 不是检测器失败。原口径
+# 把它数进 detect_errors, 同一事件在 pipeline_completed(无 SUMMARY) 与
+# detect_errors(CRITICAL) 双报 (2026-11-14 14:25 告警卡即此形态)。
+# 这里单独识别为 cooldown_skip 展示项(status=ok 不计错), detect_errors 只数
+# 剩下的。契约: cli 预检文案含「熔断冷却」, tests/test_health_check.py 钉住两侧。
+COOLDOWN_SKIP_RE = re.compile(r"\[CRITICAL\].*熔断冷却")
+
 # 当日舆情日报产物。2026-10-15: 按 skills 文档的口径, 这份日报在
 # **xueqiu-crawler** 项目里 (不是本仓库) —— cron-ops.md:96 明确写了这一点,
 # 并记录了「占位/最小日报 = 无真实交付」的判据。跨仓路径允许用环境变量覆盖,
@@ -176,6 +184,29 @@ def _read_source_records_in_window(
     return rows
 
 
+def _format_skipped(codes: list[str], limit: int = 160) -> str:
+    """把被跳过的标的排成一行：`TSLA.US, AMZN.US×2, …`。
+
+    2026-11-13：原来只说「8 stocks skipped」，不说是哪 8 只 —— 和失败台账
+    只写「其他」是同一类毛病：报了故障，却没给能动手的线索。
+    同一只跨批次失败多次时标 `×N`，其余按出现次数降序、同次数按名排序。
+    超长时在逗号处截断，不切一半代码。
+    """
+    counts: dict[str, int] = {}
+    for c in codes or []:
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    parts = [c if n == 1 else f"{c}×{n}"
+             for c, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    out = ", ".join(parts)
+    if len(out) <= limit:
+        return out or "-"
+    cut = out[:limit]
+    if ", " in cut:
+        cut = cut.rsplit(", ", 1)[0]
+    return cut + ", …"
+
+
 def _read_source_failures_in_window(
     fail_log: Path,
     window: tuple[datetime.datetime | None, datetime.datetime | None],
@@ -233,9 +264,13 @@ def check(require_daily_report: bool = False) -> None:
     if logs:
         pipeline_active = _is_pipeline_running()
         now_ts = datetime.datetime.now().timestamp()
+        today_str = datetime.date.today().isoformat()
         with_summary, without_summary = [], []
         unfinished: list[str] = []
-        total_skip = total_err = 0
+        total_skip = total_err = cooldown_skips = 0
+        # 2026-11-13：光报「8 stocks skipped」说不清是哪 8 只，等于让人自己去
+        # grep 八份日志。这里把代码一起收上来，写进 detail。
+        skip_stocks: list[str] = []
         for idx, lg in enumerate(logs):
             text = lg.read_text(encoding="utf-8", errors="replace")
             if idx == len(logs) - 1:
@@ -245,9 +280,20 @@ def check(require_daily_report: bool = False) -> None:
             # (2026-10-16 修: 实测 6/8 成功的组, 其 skip/err 一条都数不到),
             # crawl_failures / high_failure_rate / detect_errors 于是只在
             # 「批次根本没跑完」时才可能生效 —— 而那已经是另一个检查的职责了。
-            total_skip += len(re.findall(r"\[SKIP\] stock=.+ status=(timeout|failed)", text))
-            total_err += len(re.findall(r"\[ERROR\] stock=|CRITICAL", text))
-            summary_match = re.search(r"\[SUMMARY\] (.+)", text)
+            # 2026-11-14 (gate失败修复#1 配套): 批次命令的 tee 全部改为 tee -a,
+            # 日志跨天累积 —— 「当日累计」必须按日期前缀过滤, 否则昨天的事故行
+            # 会被每天重数; 旧天的 [SUMMARY] 会掩护今天没跑完的批次。
+            # (source_window 仍看全文: _latest_pipeline_window 本就取最新一轮,
+            #  追加日志下语义不变。)
+            scoped = "\n".join(
+                ln for ln in text.splitlines() if ln.startswith(today_str))
+            _skips = re.findall(r"\[SKIP\] stock=(\S+).*? status=(?:timeout|failed)", scoped)
+            total_skip += len(_skips)
+            skip_stocks.extend(_skips)
+            total_err += len(re.findall(r"\[ERROR\] stock=|CRITICAL", scoped)) \
+                - len(COOLDOWN_SKIP_RE.findall(scoped))
+            cooldown_skips += len(COOLDOWN_SKIP_RE.findall(scoped))
+            summary_match = re.search(r"\[SUMMARY\] (.+)", scoped)
             if summary_match:
                 with_summary.append(f"{lg.name}:{summary_match.group(1)[:36]}")
                 continue
@@ -284,13 +330,21 @@ def check(require_daily_report: bool = False) -> None:
             })
         if total_skip > 0:
             results.append({"check": "crawl_failures", "status": WARN,
-                            "detail": f"{total_skip} stocks skipped(当日累计)"})
+                            "detail": "%d stocks skipped(当日累计): %s"
+                                      % (total_skip, _format_skipped(skip_stocks))})
             if total_skip > 5:
                 errors.append("high_failure_rate")
         if total_err > 0:
             results.append({"check": "detect_errors", "status": WARN,
                             "detail": f"{total_err} errors(当日累计)"})
             errors.append("detect_errors")
+        if cooldown_skips > 0:
+            # 已知态单独展示: 上卡片但不算错, 详见 COOLDOWN_SKIP_RE 的注释。
+            results.append({
+                "check": "cooldown_skip", "status": OK,
+                "detail": (f"{cooldown_skips} 个批次命中熔断冷却预检空跑"
+                           "(已知态,自动补跑接手,不计错)"),
+            })
     else:
         results.append({"check": "log_exists", "status": WARN, "detail": "No run log found"})
 
@@ -412,15 +466,24 @@ def check(require_daily_report: bool = False) -> None:
             # 瞬时失败且已重试恢复的不告警（2026-10-26: comments 01138 首拉超时、
             # crawler 30s 重试成功，旧口径照样红卡）。恢复记录按 source+target
             # 与失败配对，只剩「失败且未恢复」才计入。
-            rec_keys = {(r.get("source"), r.get("target")) for r in recoveries}
-            rows = [
-                r for r in all_failures
-                if (r.get("source"), r.get("target")) not in rec_keys
-            ]
-            resolved = [
-                r for r in all_failures
-                if (r.get("source"), r.get("target")) in rec_keys
-            ]
+            #
+            # 2026-11-13 修：配对从「键级」改成「事件级」。
+            # 原口径是 `(source,target)` 出现在任一条 recovery 里，就把该键**所有**
+            # 失败移出计数 —— 包括恢复**之后**才发生的失败。那会让后来的真故障
+            # 被前面的恢复记录抵消掉（同键当天第二次挂掉就不会报）。
+            # 新口径：只有「失败之后」存在同键恢复，才算这条失败已解决。
+            _rec_ts: dict = {}
+            for r in recoveries:
+                _rec_ts.setdefault((r.get("source"), r.get("target")), []).append(
+                    str(r.get("ts") or ""))
+
+            def _is_resolved(fail) -> bool:
+                key = (fail.get("source"), fail.get("target"))
+                ft = str(fail.get("ts") or "")
+                return any(rt >= ft for rt in _rec_ts.get(key, ()))
+
+            rows = [r for r in all_failures if not _is_resolved(r)]
+            resolved = [r for r in all_failures if _is_resolved(r)]
             if rows:
                 agg = {}
                 for rec in rows:
@@ -430,8 +493,15 @@ def check(require_daily_report: bool = False) -> None:
                     "%s: %d 次（%s）" % (src_name, cnt, why)
                     for (src_name, why), cnt in sorted(agg.items(), key=lambda kv: -kv[1])
                 )
+                # 2026-11-15 事故防再发: stock-notices 持续 HTTP 400 = 雪球登录态被
+                # 服务端静默作废 (auth status 只查 cookie 存在, 显示"已登录"), 排障
+                # 花了一下午才定位。告警直接给处置动作, 不让下一次再盲查。
+                hint = ""
+                if any((r.get("source") or "") == "stock-notices" for r in rows):
+                    hint = ("；stock-notices 持续失败多为雪球登录态失效（auth status 仍显示已登录），"
+                            "处置: opencli auth refresh 后复测, 或跑 scripts/auth_refresh_probe.sh")
                 results.append({"check": "source_failures", "status": WARN,
-                                "detail": "%d 次失败 → %s" % (len(rows), detail),
+                                "detail": "%d 次失败 → %s%s" % (len(rows), detail, hint),
                                 "data": sf_data})
                 errors.append("source_failures")
             elif resolved:

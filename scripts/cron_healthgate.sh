@@ -23,7 +23,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LARK="${LARK_CLI:-$HOME/.npm-global/bin/lark-cli}"
-CHAT="oc_2fe3cfa05bfe4860c71a1bd1efbe3751"
+CHAT="oc_5d38729181081d4ee50d2d2ad2b662f7"
 STATE="$ROOT/logs/.healthgate_last_alert"
 # notify_card.py 内部按名字调 lark-cli,调度环境 PATH 可能很窄,显式补上
 export PATH="$HOME/.npm-global/bin:$PATH"

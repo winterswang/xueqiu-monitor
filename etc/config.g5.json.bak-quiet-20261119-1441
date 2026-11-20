@@ -1,0 +1,46 @@
+{
+  "db_path": "data/monitor.db",
+  "watchlist_path": "data/watchlist.json",
+  "crawler": {
+    "timeout_seconds": 600,
+    "max_retries": 2,
+    "concurrency": 1,
+    "whitelist": [
+      "UBER.US",
+      "SKHY.US",
+      "2076.HK",
+      "2423.HK",
+      "001232.SZ",
+      "300866.SZ",
+      "600519.SH",
+      "TEM.US",
+      "BEKE.US"
+    ]
+  },
+  "detector": {
+    "z_score_window_days": 14
+  },
+  "notification": {
+    "webhook_url": "",
+    "mode": "auto",
+    "pending_path": "/tmp/xueqiu_monitor_pending.json",
+    "lark_chat_id": "oc_5d38729181081d4ee50d2d2ad2b662f7"
+  },
+  "filter": {
+    "ad_keywords": [],
+    "duplicate_similarity_threshold": 0.85,
+    "short_post_threshold": 20,
+    "p0_z_threshold": 5.0,
+    "p1_z_threshold": 3.0
+  },
+  "cold_start": {
+    "enabled": true,
+    "days": 7,
+    "min_data_points": 7
+  },
+  "detail": {
+    "prewarm": true,
+    "concurrency": 1,
+    "news_per_stock": 5
+  }
+}

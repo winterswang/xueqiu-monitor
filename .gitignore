@@ -18,3 +18,8 @@ etc/config.local.json
 data/watchlist.json
 data/hk_option_classes.json
 DAILY_LOG.md
+
+# X 舆情采集数据（每日落盘，7 天保留，不入库）
+data/x_posts/
+# 试点报告输出
+reports/x-pilot/

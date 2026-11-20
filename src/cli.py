@@ -211,6 +211,28 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             logger.error("白名单过滤后为空，终止")
             return {"error": "empty_whitelist", "crawled": 0, "alerts": 0}
 
+    # ── 熔断冷却预检（2026-11-13）──
+    # 插件熔断后，冷却期内**每一条**请求都会以 BROWSER_CONNECT/exitCode 69 硬失败，
+    # 而每次要白等约 45 秒（daemon 去连一个不存在的哨兵 profile）。
+    # 11-13 的 g4 就是这么废掉的：15:00:36 起跑，整批落在 14:30–15:30 的冷却窗内，
+    # 9 只标的 18 条请求全部空转，白白烧掉 27 分钟，还往失败台账塞了 18 条噪音。
+    # 这里提前判断（读状态文件，实测 0.4 ms）：冷却中就直接收工，**不写 [SUMMARY]**，
+    # 让 40 14-18 的「批次失败自动补跑」按它自己的判据（无 SUMMARY + 无进程）接手。
+    try:
+        from xueqiu_analyzer.opencli_cooldown import cooldown_remaining_seconds
+
+        _remain = cooldown_remaining_seconds()
+    except Exception:  # noqa: BLE001 —— 装不上就按原行为跑，不因为它改变抓取
+        _remain = 0
+    if _remain and _remain > 0:
+        logger.critical(
+            "xueqiu 处于插件层熔断冷却，剩余 %d 秒 —— 本轮不发起任何请求"
+            "（冷却期内的调用只会以 rc=69 空转，单条约 45 秒）。"
+            " 不写 [SUMMARY]，交给自动补跑接手。", int(_remain),
+        )
+        return {"error": "cooldown_active", "cooldown_remaining_seconds": int(_remain),
+                "crawled": 0, "failed": 0, "alerts": 0}
+
     # Crawl all stocks (parallel if concurrency > 1)
     concurrency = cfg.crawler.get("concurrency", 1)
     max_retries = cfg.crawler.get("max_retries", 0)
@@ -610,6 +632,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     p0_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P0"]
     p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
     p2_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P2"]
+
+    # 舆情告警推送开关（notification.push_alerts，默认 True）。
+    # 关掉后 P0/P1 只落 push_history，不推飞书；P2 台账照旧。
+    # 爬取健康告警（成功率<98% / degraded）不受此开关影响——那是执行异常通道。
+    if not cfg.notification.get("push_alerts", True):
+        p0_alerts, p1_alerts = [], []
 
     pending_messages: list[str] = []
     pending_cards: list[dict] = []
