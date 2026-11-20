@@ -466,36 +466,26 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # ── 0 帖守卫 (2026-10-16): 「没抓到」≠「今天没帖、情绪转中性」 ──
             # 风控页 / 登录失效 / 超时 / 水位过滤 都产出**空结果**而非异常, 而
             # crawler 把空结果无条件写成 status="success"、sentiment_avg=0.0。
-            # 0.0 一旦进检测器, 就是拿「抓不到」去比历史(约 +0.3) → 直接推出假的
-            # 情感突变。库里有 74 条「0 帖却记 success」的快照, 其中 9 例确实触发了
-            # sentiment_shift (实测全是 P2 —— 噪声过滤器压住了等级, 但假告警本身仍错)。
-            # 两者都不产出: 0 帖也没有「讨论量激增」可言。
+            # 0.0 一旦进检测器, 就是拿「抓不到」去比历史(约 +0.3) → 凭空推出假的
+            # 情感突变(库里有 74 条「0 帖却记 success」的快照, 其中 9 例触发了
+            # 已下线的 sentiment_shift, 该检测 2026-11-20 移除)。0 帖同样没有
+            # 「讨论量激增」可言, 不产出 post_spike。
             if not detector.has_activity_signal(cr["posts_count"]):
                 logger.info(
-                    f"  {stock_code}: 0 帖 — 跳过 post_spike / sentiment_shift "
+                    f"  {stock_code}: 0 帖 — 跳过 post_spike "
                     f"(抓空不应被当成情绪信号)"
                 )
-                spike_alert = sent_alert = None
+                spike_alert = None
             else:
                 # Detect post spikes
                 spike_alert = detector.detect_post_spike(
                     cr["posts_count"], hist_stats, cfg.detector["z_score_window_days"]
                 )
-                # Detect sentiment shift (with two-period direct threshold)
-                prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
-                prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
-                sent_alert = detector.detect_sentiment_shift(
-                    cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
-                    prev_snapshot_sentiment=prev_snap_sentiment,
-                )
             if spike_alert:
                 spike_alert.stock_code = stock_code
                 spike_alert.alert_time = now
-            if sent_alert:
-                sent_alert.stock_code = stock_code
-                sent_alert.alert_time = now
-    
-            alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
+
+            alerts = ([spike_alert] if spike_alert else []) + ann_alerts
     
             # Compute sample std from historical sentiment means
             sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
