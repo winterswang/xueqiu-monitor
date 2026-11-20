@@ -280,7 +280,6 @@ def fetch_stock_alerts(
 _ALERT_LABELS = {
     "post_spike": "讨论量激增",
     "hot_word_surge": "热词飙升",
-    "sentiment_shift": "情感突变",
     "new_announcement": "新公告",
 }
 
@@ -308,11 +307,6 @@ def _alert_summary(alert: dict) -> str:
         return (
             f"讨论量激增 ({d.get('curr_count')} 帖 vs 历史均值 "
             f"{num(d.get('historical_mean'), '{:.1f}')})"
-        )
-    if t == "sentiment_shift":
-        return (
-            f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
-            f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
         )
     # signal 是检测器写进 detail 的人读文案; 有就用它, 比标签更具体
     return d.get("title") or d.get("signal") or _ALERT_LABELS.get(t, t)

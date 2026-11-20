@@ -26,7 +26,7 @@ from src.db import (init_db, insert_snapshot, insert_alert,
                     get_historical_stats, get_today_alerts,
                     count_sentiment_days)
 from src.models import CrawlSnapshot
-from src.detector import is_cold_start, detect_post_spike, detect_sentiment_shift
+from src.detector import is_cold_start, detect_post_spike
 from src.filter import filter_alerts, assign_priority
 from src.notifier import generate_daily_report
 
@@ -66,8 +66,7 @@ if cold:
     print(f"⏸️  冷启动期，仅记录不分析")
 else:
     spike = detect_post_spike(len(posts), hist)
-    sent = detect_sentiment_shift(0.0, hist)
-    alerts = [a for a in [spike, sent] if a is not None]
+    alerts = [a for a in [spike] if a is not None]
     print(f"📡 检测: {len(alerts)} alerts")
     for a in alerts:
         a.priority = assign_priority(a)

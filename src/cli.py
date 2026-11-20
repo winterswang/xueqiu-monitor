@@ -581,7 +581,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     db.upsert_hot_word(db_path, word, now)
     
             # ── Collect supplemental data for push key_data (§2.5)
-            prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
             prev_posts = hist_stats[0].posts_count if hist_stats else 0
             hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
             post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
@@ -589,7 +588,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             stock_extra[stock_code] = {
                 "stock_name": _get_stock_name(stocks, stock_code),
                 "sentiment_avg": cr["sentiment_avg"],
-                "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
                 "posts_count": cr["posts_count"],
                 "posts_count_delta": cr["posts_count"] - prev_posts,
                 "hot_words": [w for w, _ in hot_words_top],
@@ -641,7 +639,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "alert_type": alert.alert_type,
                 "z_score": alert.z_score,
                 "sentiment_avg": extra.get("sentiment_avg", 0.0),
-                "sentiment_shift": extra.get("sentiment_shift", 0.0),
                 "posts_count": extra.get("posts_count", 0),
                 "posts_count_delta": extra.get("posts_count_delta", 0),
                 "hot_words": extra.get("hot_words", []),

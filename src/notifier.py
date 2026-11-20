@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # ── Shared constants ──────────────────────────────────────────
 _PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
 _TYPE_LABELS = {
-    "sentiment_shift": "情感偏移",
     "post_spike": "帖子激增",
     "hot_word_surge": "热词涌现",
     "new_announcement": "新公告",
@@ -62,7 +61,6 @@ def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
     content = [
         f"Z-score: {alert.z_score:.2f}",
         f"情感均值: {key_data.get('sentiment_avg', 0):.2f}",
-        f"情感偏移: {key_data.get('sentiment_shift', 0):.2f}",
         f"幅度: {alert.magnitude:.2f}",
         f"新帖数: {key_data.get('posts_count', 0)} (变化: {key_data.get('posts_count_delta', 0):+d})",
     ]
@@ -177,7 +175,7 @@ def format_immediate_alert_message(alert: ChangeAlert, key_data: dict) -> str:
 
     Args:
         alert: ChangeAlert to format.
-        key_data: dict with stock_name, sentiment_avg, sentiment_shift,
+        key_data: dict with stock_name, sentiment_avg,
                   posts_count, posts_count_delta, hot_words, post_titles,
                   magnitude, priority, trigger_time.
 
@@ -196,7 +194,6 @@ def format_immediate_alert_message(alert: ChangeAlert, key_data: dict) -> str:
         "",
         f"Z-score: {alert.z_score:.2f}",
         f"情感均值: {key_data.get('sentiment_avg', 0):.2f}",
-        f"情感偏移: {key_data.get('sentiment_shift', 0):.2f}",
         f"幅度: {alert.magnitude:.2f}",
         f"新帖数: {key_data.get('posts_count', 0)} (变化: {key_data.get('posts_count_delta', 0):+d})",
     ]
@@ -506,7 +503,6 @@ def generate_daily_report(
     lines.append("|------|------|---------|------|")
 
     type_labels = {
-        "sentiment_shift": "情感偏移",
         "post_spike": "帖子激增",
         "hot_word_surge": "热词涌现",
         "new_announcement": "新公告",
