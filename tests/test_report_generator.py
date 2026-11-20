@@ -764,13 +764,6 @@ class TestAlertSummary:
         })
         assert "31" in out and "4.9" in out
 
-    def test_sentiment_shift_carries_both_sides(self):
-        out = rg._alert_summary({
-            "type": "sentiment_shift",
-            "detail": {"curr_sentiment": -0.35, "prev_snapshot_sentiment": 0.4},
-        })
-        assert "-0.35" in out and "+0.40" in out
-
     def test_announcement_uses_title(self):
         out = rg._alert_summary({
             "type": "new_announcement", "detail": {"title": "完成配售新H股"},

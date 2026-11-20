@@ -116,7 +116,7 @@ class ChangeAlert:
     """Detected change alert."""
     stock_code: str
     alert_time: int = field(default_factory=_now)
-    alert_type: str = "sentiment_shift"   # sentiment_shift|hot_word_surge|post_spike|new_announcement
+    alert_type: str = ""   # post_spike|hot_word_surge|new_announcement
     z_score: float = 0.0
     magnitude: float = 0.0
     detail: dict = field(default_factory=dict)
@@ -136,7 +136,7 @@ class ChangeAlert:
             id=d.get("id"),
             stock_code=d["stock_code"],
             alert_time=d.get("alert_time", _now()),
-            alert_type=d.get("alert_type", "sentiment_shift"),
+            alert_type=d.get("alert_type", ""),
             z_score=d.get("z_score", 0.0),
             magnitude=d.get("magnitude", 0.0),
             detail=_parse_json(d.get("detail", "{}"), {}),

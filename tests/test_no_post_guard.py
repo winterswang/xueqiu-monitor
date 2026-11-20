@@ -32,7 +32,7 @@ class TestProductionPathUsesTheGuard:
         )
         assert "has_activity_signal(cr[" in src, \
             "cli.py 的裸计数守卫被移除了 —— 0 帖又会进检测器"
-        # 两个检测都必须落在守卫的 else 分支里
+        # 检测必须落在守卫的 else 分支里（sentiment_shift 2026-11-20 下线后仅剩 post_spike）
         guard = src.index("has_activity_signal(cr[")
         seg = src[guard:guard + 1600]
-        assert "detect_post_spike" in seg and "detect_sentiment_shift" in seg
+        assert "detect_post_spike" in seg

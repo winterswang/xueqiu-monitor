@@ -435,28 +435,6 @@ class TestPipelineE2E:
         assert no_spike is None, f"post_spike should NOT fire for 55 vs μ≈50"
         print(f"✅ post_spike (no spike): correctly none")
 
-        # ── Two-period sentiment shift (Trigger 1) ──
-        # Use stats with varying sentiment_mean so Z-score doesn't false-fire
-        var_stats = [
-            SentimentStat(stock_code="SH600519", stat_date=now - (14 - i) * 86400,
-                          posts_count=50, sentiment_mean=rng.uniform(-0.1, 0.1))
-            for i in range(14)
-        ]
-        shift = detector.detect_sentiment_shift(
-            0.7, var_stats, window_days=14, prev_snapshot_sentiment=0.1
-        )
-        assert shift is not None
-        assert shift.detail["trigger"] == "two_period"
-        print(f"✅ sentiment shift Trigger 1: shift={shift.detail['shift']}")
-
-        # Small change should not trigger (Trigger 1 shift 0.05 <= 0.2, Z-score small)
-        no_shift = detector.detect_sentiment_shift(
-            sum(s.sentiment_mean for s in var_stats) / len(var_stats) + 0.01,
-            var_stats, window_days=14, prev_snapshot_sentiment=0.1
-        )
-        assert no_shift is None, f"small shift should NOT trigger, got Z={no_shift.z_score if no_shift else 'None'}"
-        print(f"✅ sentiment shift Trigger 1 (small shift): correctly none")
-
         # ── Cold start check ──
         assert detector.is_cold_start([], 28) is True, "empty stats = cold start"
         assert detector.is_cold_start(stats, 28) is True, "14 days < 28 = cold start"
