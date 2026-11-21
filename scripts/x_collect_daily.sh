@@ -90,12 +90,13 @@ if [ "$rc" -ne 0 ]; then
   exit 12
 fi
 
-# ── 第 2 步：契约校验 ──
-if ! "$PYBIN" scripts/validate_x_posts.py --date "$D" --tickers "$TICKERS" >/dev/null 2>&1; then
+# ── 第 2 步：契约校验（FAIL 时错误摘要进 stderr + 飞书告警——与其他失败路径对齐）──
+val_out=$("$PYBIN" scripts/validate_x_posts.py --date "$D" --tickers "$TICKERS" 2>&1) || {
+  printf '%s\n' "$val_out" >&2   # 校验输出（含 errors 原文）留运行记录
   frame_err "契约校验 FAIL（errors 原文见本轮运行日志 stderr）。X 段降级纯雪球。"
-  notify_red "X采集0630：契约校验 FAIL，详见 xueqiu-monitor 今日运行日志。X 段降级纯雪球。"
+  notify_red "X采集0630：契约校验 FAIL。X 段降级纯雪球。"
   exit 13
-fi
+}
 
 # ── 第 3 步：保留期清理 ──
 "$PYBIN" scripts/x_ingest.py --prune --keep-days 7 >/dev/null 2>&1 || true
