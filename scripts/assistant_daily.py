@@ -344,6 +344,24 @@ def sort_key(entry, tiers, code):
     return (-len(it.get("nums") or []), rank, -len(it.get("fact") or ""))
 
 
+def cache_is_valid(cached: dict, xp: list[dict]) -> tuple[bool, str]:
+    """这次读到的 X 数据，还对不对得上缓存里那份分析结果。
+
+    facts 里的 X 编号是 ``X_ID_BASE + 位置``，LLM 回来时按编号引用。
+    所以**只比条数不够**：条数相同、内容或顺序变了，同一编号就指向另一条帖，
+    缓存里的事实会静默错配到无关的帖上（2026-11-25 P2）。
+
+    返回 (是否有效, 失效原因)。旧缓存没有 ``x_fingerprint`` 字段 → 一律失效，
+    这也让「X 输入口径变化（如改成只喂当日帖）」自动作废旧分析。
+    """
+    cached = cached or {}
+    if cached.get("x_count", 0) != len(xp):
+        return False, f"x 条数变化 {cached.get('x_count', 0)}→{len(xp)}"
+    if cached.get("x_fingerprint") != x_sources.fingerprint(xp):
+        return False, "x 内容/顺序变化"
+    return True, ""
+
+
 def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cache: bool, only: str | None = None):
     cfg = load_config()
     stocks_cfg = cfg.get("stocks", {})
@@ -359,7 +377,10 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     cache_dir = PROJECT_DIR / "data" / "cache" / date_str
     cache_dir.mkdir(parents=True, exist_ok=True)
     x_cfg = cfg.get("x_source", {}) or {}
-    x_root = PROJECT_DIR / (x_cfg.get("root") or "data/x_posts")
+    # 相对路径的解析基准统一交给 x_sources.resolve_root()，这里不再自己拼
+    # PROJECT_DIR —— 曾经 assistant_daily 按仓库根、report_generator 按 cwd，
+    # 同一份配置落到两个目录（2026-11-25 P5）。
+    x_root = x_cfg.get("root") or "data/x_posts"
     narr_dir = PROJECT_DIR / "data" / "narrative"
     narr_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,11 +411,15 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         if not kept and not xp:
             return code, len(raw), kept, dict(EMPTY), "empty", xp
         cp = cache_dir / f"{code}.json"
+        # 缓存有效性按**内容**判定，见 cache_is_valid()。
+        x_fp = x_sources.fingerprint(xp)
         if use_cache and cp.exists():
             try:
                 cached = json.loads(cp.read_text(encoding="utf-8"))
-                if cached.get("x_count", 0) != len(xp):
-                    raise ValueError("x 数据变化，重算")
+                ok, why = cache_is_valid(cached, xp)
+                if not ok:
+                    logger.info(f"{code}: 缓存作废（{why}），重算")
+                    raise ValueError(why)
                 cached["items"] = {int(k): v for k, v in (cached.get("items") or {}).items()}
                 for k in ("change", "trend", "thread"):
                     cached.setdefault(k, "")
@@ -406,6 +431,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         res = analyze_stock(_get_llm_client(), model, stocks_cfg[code]["name"],
                             code, kept, date_str, prior_of(code), xp)
         res["x_count"] = len(xp)
+        res["x_fingerprint"] = x_fp
         try:
             cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         except OSError as e:

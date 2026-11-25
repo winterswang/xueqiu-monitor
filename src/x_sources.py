@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -37,6 +38,10 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
+
+# 仓库根（本文件在 <root>/src/ 下）。用于把配置里的相对 root 固定到仓库上，
+# 而不是跟随调用方的 cwd —— 见 resolve_root()。
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # 诈骗/引流特征（大小写不敏感）。命中任一即丢弃整条。
 SCAM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -85,8 +90,26 @@ def is_us(stock_code: str) -> bool:
     return (stock_code or "").upper().endswith(".US")
 
 
+def resolve_root(root: Optional[str | Path]) -> Optional[Path]:
+    """把配置里的 X 数据根目录解析成绝对路径。
+
+    配置写的是相对路径 ``data/x_posts``。历史上有两个调用方各自解析：
+    ``assistant_daily`` 用 ``PROJECT_DIR / root``（仓库内），``report_generator``
+    直接把相对路径交给 ``Path()``（= **相对进程 cwd**）。同一份配置因此能指向
+    两个不同目录：从仓库根跑测试时，"测试用的 root" 会被悄悄解析到生产
+    ``data/x_posts``，测试读到真实数据（2026-11-25 P5）。
+
+    统一到「相对路径一律相对仓库根」，调用方不再各自拼基准。
+    绝对路径原样返回，便于测试用 tmp_path 完全隔离。
+    """
+    if not root:
+        return None
+    p = Path(root)
+    return p if p.is_absolute() else _PROJECT_ROOT / p
+
+
 def posts_path(root: str | Path, date_str: str, stock_code: str) -> Path:
-    return Path(root) / date_str / f"{ticker_of(stock_code)}.json"
+    return resolve_root(root) / date_str / f"{ticker_of(stock_code)}.json"
 
 
 def load_x_posts(
@@ -343,3 +366,22 @@ def to_post_dict(p: dict[str, Any]) -> dict[str, Any]:
 def as_prompt_posts(posts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """批量转换，供 report_generator 使用。"""
     return [to_post_dict(p) for p in posts]
+
+
+def fingerprint(posts: Iterable[dict[str, Any]]) -> str:
+    """这一批 X 帖的**内容和顺序**指纹（取前 16 位十六进制）。
+
+    为什么不能只比条数：``assistant_daily`` 把 X 帖按位置编号
+    （``X_ID_BASE + i``）注入 prompt，LLM 回来的事实也按编号引用。
+    缓存命中时若只有条数相同、内容或顺序变了，同一编号会指向另一条帖，
+    **事实会静默错配到无关的帖上**——读者看不出来，比"帖数不对"严重得多。
+
+    所以缓存有效性必须按内容判定，不能按条数判定。
+    """
+    h = hashlib.sha256()
+    for p in posts:
+        h.update(str(p.get("link") or p.get("url") or "").encode("utf-8"))
+        h.update(b"\x00")
+        h.update(str(p.get("content") or p.get("text") or "").encode("utf-8"))
+        h.update(b"\x00\x01")
+    return h.hexdigest()[:16]
