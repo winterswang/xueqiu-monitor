@@ -359,14 +359,29 @@ def analyze_stock(client, model, name, code, posts, date_str, prior: dict | None
         for p in posts
     ]
     x_ids = []
+    x_fresh_n = 0
     for i, xp in enumerate(x_posts or []):
         xid = X_ID_BASE + i
         x_ids.append(xid)
+        # 2026-11-25 H9：历史帖必须带日期前缀。没有前缀时，一条 2021 年的帖
+        # 和今天的帖在 prompt 里长得一模一样，模型会把旧闻写成「今日新增」。
+        # 这里不删历史（老文今天被重新传播，传播行为本身是今日信号），只标日期。
+        is_fresh = xp.get("is_fresh", True)
+        if is_fresh:
+            x_fresh_n += 1
+        tag = ""
+        if not is_fresh:
+            d = x_sources.post_date_str(xp, date_str)
+            tag = f"[{d}] " if d else "[历史] "
         lines.append(
             f"#{xid} | [X] {xp.get('author','')} | 赞{xp.get('like_count',0)} 评{xp.get('comment_count',0)} | "
-            f"{(xp.get('content') or '').strip()}"
+            f"{tag}{(xp.get('content') or '').strip()}"
         )
     body = "\n".join(lines)
+    if x_posts and not x_fresh_n:
+        # 近期一条都没有：必须说死，否则模型只能拿历史帖编今天的叙事。
+        body = ("⚠️ 今日无新增 X 帖。以下均带发布日期，属于历史背景，"
+                "不得当作今日事件或「今日新增」引用。\n" + body)
     prompt = EXTRACT_PROMPT.format(name=name, code=code, date=date_str,
                                    narrative=narrative_text(prior), posts=body)
     sent = {p["id"] for p in posts} | set(x_ids)
@@ -514,12 +529,14 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         # report_generator 一直遵守，**这条路径此前完全没执行**——49~58 条全部
         # 塞进 prompt（2026-11-25 发现）。不是策略选择，是配置没落实。
         # 截断用 cap_for_prompt（近期优先），与 report_generator 共用同一实现。
-        xp = x_sources.cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
+        # 2026-11-25 H9：近期全留、历史限量（min(5,近期数)），历史在 prompt 里
+        # 带日期前缀。此前是 49 条不分层全塞进去，最老的到 2021 年。
+        xp = x_sources.layer_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
         if len(xp) < len(xp_all):
             _fresh = sum(1 for p in xp if p.get("is_fresh", True))
             logger.info(
-                f"  {code}: X 源 {len(xp_all)} 条按配额截断到 {len(xp)} 条"
-                f"（fresh≤1.5d: {_fresh} / 其余: {len(xp) - _fresh}）"
+                f"  {code}: X 源 {len(xp_all)} 条分层限量到 {len(xp)} 条"
+                f"（fresh≤1.5d: {_fresh} / 历史: {len(xp) - _fresh}）"
             )
         # 报文要报「源里有多少」，不是「送了多少」——这是两个不同的问题。
         # 分析用 xp（截断后），展示用 xp_all 统计。

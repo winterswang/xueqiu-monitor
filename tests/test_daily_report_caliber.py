@@ -293,7 +293,7 @@ def test_fingerprint_reflects_capped_list_not_full_list():
 def test_assistant_daily_actually_applies_the_cap():
     """静态护栏：这条路径必须真的读配置里的配额（此前完全没读）。"""
     src = _SCRIPT.read_text(encoding="utf-8")
-    assert 'cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))' in src
+    assert 'layer_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))' in src
     # 分析用截断后的 xp，展示用 xp_all 的统计——两者不能混
     assert "x_stats" in src and '"x_n": xst["total"]' in src
 
@@ -405,3 +405,55 @@ def test_work_tuple_arity_is_consistent():
             if (isinstance(node.value.value, ast.Name) and node.value.value.id == "by_code"
                     and isinstance(node.targets[0], ast.Tuple)):
                 assert len(node.targets[0].elts) == 7, "by_code[code] 解包长度不对"
+
+
+# ── H9：X 历史帖分层（2026-11-25 评审）──────────────────────────────
+
+
+def test_layer_keeps_all_fresh_and_limits_history():
+    """近期全留；历史限量 min(5, 近期数)。实测 APP 18+5=23、PDD 9+5=14。"""
+    from src import x_sources
+    posts = _xp(17, 32)
+    out = x_sources.layer_for_prompt(posts, 30)
+    assert sum(1 for p in out if p["is_fresh"]) == 17
+    assert sum(1 for p in out if not p["is_fresh"]) == 5, "历史最多 5 条"
+    assert len(out) == 22
+
+
+def test_layer_history_scales_with_fresh():
+    """近期少的时候历史也少——避免"今日无大事"却塞一堆旧闻。"""
+    from src import x_sources
+    out = x_sources.layer_for_prompt(_xp(2, 40), 30)
+    assert sum(1 for p in out if not p["is_fresh"]) == 2
+
+
+def test_layer_without_fresh_keeps_up_to_five():
+    """近期为 0 时仍留 ≤5 条历史当背景，不能给空 prompt。"""
+    from src import x_sources
+    out = x_sources.layer_for_prompt(_xp(0, 40), 30)
+    assert len(out) == 5
+    assert all(not p["is_fresh"] for p in out)
+
+
+def test_layer_respects_cap():
+    from src import x_sources
+    out = x_sources.layer_for_prompt(_xp(40, 20), 30)
+    assert len(out) <= 30
+
+
+def test_post_date_str_marks_when_the_post_was_published():
+    """历史帖的日期前缀：一条 2021 年的帖不能被当成今天的。"""
+    from src import x_sources
+    # days_ago=1866 → 2021-10-15 附近（报表日 2026-11-24）
+    p = {"days_ago": 1866.0}
+    d = x_sources.post_date_str(p, "2026-11-24")
+    assert d.startswith("2021-"), d
+    assert x_sources.post_date_str({"days_ago": None}, "2026-11-24") == ""
+
+
+def test_prompt_marks_history_with_date_and_hard_constraint():
+    """渲染层：历史帖带 [日期]，且「全无近期帖」时要加一句硬约束。"""
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "post_date_str(xp, date_str)" in src
+    assert "今日无新增 X 帖" in src, "全部是历史时必须说死，否则模型会编今日叙事"
+    assert "不得当作今日事件" in src

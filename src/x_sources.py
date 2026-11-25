@@ -368,6 +368,62 @@ def as_prompt_posts(posts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [to_post_dict(p) for p in posts]
 
 
+def post_date_str(p: dict[str, Any], date_str: str) -> str:
+    """这条帖按 CST 日历日算出的发布日（`YYYY-MM-DD`）；时间未知返回空串。
+
+    供 prompt 里给历史帖打日期前缀——模型看到 `[2025-03-02]` 就不会把它
+    当成今天发生的事。没有这个前缀时，一条 2021 年的帖和今天的帖在文本里
+    长得一模一样（2026-11-25 H9）。
+    """
+    days_ago = p.get("days_ago")
+    end_ts = _day_end_ts(date_str)
+    if days_ago is None or not end_ts:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(end_ts, CST) - timedelta(days=float(days_ago))
+        return dt.strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+# prompt 里历史帖最多留几条（相对于 fresh 条数）。
+HIST_KEEP_MAX = 5
+
+
+def layer_for_prompt(
+    posts: list[dict[str, Any]],
+    cap: Any = None,
+    hist_max: int = HIST_KEEP_MAX,
+) -> list[dict[str, Any]]:
+    """把 X 帖分成「近期」与「历史」，历史限量后拼成最终喂给模型的那个列表。
+
+    规则（2026-11-25 评审定）：
+    - 近期（``is_fresh``）**全留**，最多到 ``cap``；
+    - 历史最多留 ``min(hist_max, len(近期))``——近期越少，历史越少；
+      近期为 0 时留 ``≤ hist_max`` 条，让它至少有背景可讲；
+    - 历史必须配日期前缀（渲染侧用 ``post_date_str``），否则模型会把
+      几年前的帖当成今日事件；
+    - 近期为 0 时渲染侧还要给一句硬约束（见 assistant_daily）。
+
+    为什么不是"删掉历史"：一条老文今天被重新传播，**传播行为本身是今日信号**，
+    删掉会丢真信号；但它内容老，必须标日期。所以是「降权 + 落日期」，不是删除。
+
+    ⚠️ 返回的列表就是喂给模型的列表，缓存指纹必须用它（位置编号 X_ID_BASE+i
+       绑定的是这个列表的下标）。
+    """
+    if not posts:
+        return posts
+    fresh = [p for p in posts if p.get("is_fresh", True)]
+    hist = [p for p in posts if not p.get("is_fresh", True)]
+    limited_cap = cap if isinstance(cap, int) and cap > 0 else None
+    if limited_cap:
+        fresh = fresh[:limited_cap]
+    keep_hist = min(hist_max, len(fresh)) if fresh else hist_max
+    if limited_cap:
+        keep_hist = min(keep_hist, max(0, limited_cap - len(fresh)))
+    return fresh + hist[:max(0, keep_hist)]
+
+
 def cap_for_prompt(
     posts: list[dict[str, Any]], cap: Any
 ) -> list[dict[str, Any]]:
