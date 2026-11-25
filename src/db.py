@@ -10,7 +10,7 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import (
@@ -21,12 +21,15 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# 日桶的时区基准。整系统的「日」都是 CST（见 README 口径定义）。
+CST = timezone(timedelta(hours=8))
+
 
 def local_day_start(now: float | None = None) -> int:
     """本地自然日的起点（本地午夜的 Unix 秒）。
 
     统计口径统一用**本地日**：日报的昨日区间（`report_generator`）与
-    `date(x,'unixepoch','localtime')` 这类查询都是本地日。而原先有三处用
+    `date(x,'unixepoch', '+8 hours')` 这类查询都是本地日。而原先有三处用
     UTC 桶（`int(time.time()) // 86400 * 86400`）—— 本模块的 `get_today_alerts`
     与 `get_historical_new_announcement_counts`，以及 `cli.py` 给
     `SentimentStat.stat_date` 算日键那一处 —— 在本地 00:00–08:00（北京时区）
@@ -34,7 +37,9 @@ def local_day_start(now: float | None = None) -> int:
 
     三处统一调用本函数，不要再各自写 `// 86400 * 86400`。
     """
-    dt = datetime.fromtimestamp(time.time() if now is None else now)
+    # 显式 CST：SQL 侧的日桶已经统一成 date(...,'+8 hours')，这里若继续跟随
+    # 宿主时区，换机器后 Python 日桶与 SQL 日桶会错开一格。
+    dt = datetime.fromtimestamp(time.time() if now is None else now, CST)
     return int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 
@@ -464,7 +469,7 @@ def fetch_day_posts_union(
     """
     q = (
         "SELECT stock_code, posts_data FROM crawl_snapshots "
-        "WHERE date(crawl_time,'unixepoch','localtime')=? "
+        "WHERE date(crawl_time,'unixepoch', '+8 hours')=? "
     )
     params: list = [date_str]
     if stock_code:
@@ -943,7 +948,7 @@ def get_historical_new_announcement_counts(
     Returns list of daily counts (one value per day with alerts) for
     computing Z-score on new announcement volume.
 
-    **按本地自然日分桶**（`date(...,'unixepoch','localtime')`，与本模块 :450 的
+    **按本地自然日分桶**（`date(...,'unixepoch', '+8 hours')`，与本模块 :450 的
     惯例一致）。原先按 UTC 桶 `alert_time / 86400` 分组，日界与本地日错开 8 小时，
     每天一个的计数会被劈成两天。见 issue #77。
     """
@@ -953,7 +958,7 @@ def get_historical_new_announcement_counts(
             """SELECT COUNT(*) as cnt FROM change_alert
                WHERE stock_code=? AND alert_type='new_announcement'
                AND alert_time >= ?
-               GROUP BY date(alert_time,'unixepoch','localtime')""",
+               GROUP BY date(alert_time,'unixepoch', '+8 hours')""",
             (stock_code, cutoff)
         ).fetchall()
         return [float(r["cnt"]) for r in rows]

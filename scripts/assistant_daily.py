@@ -47,7 +47,7 @@ X_ID_BASE = 900000
 # 全系统的「日」都是 CST（与 x_sources._day_end_ts、日报日期口径一致）。
 # 涉及**展示**的时间换算（帖子多远、当天是哪天）显式用它，不要依赖宿主时区：
 # 机器换到 UTC 时，`datetime.fromtimestamp()` 会让「最早 N 个月前」整体偏一天。
-# ⚠️ 已知遗留：DB 侧的 `date(crawl_time,'unixepoch','localtime')` 仍依赖本机时区，
+# ⚠️ 已知遗留：DB 侧的 `date(crawl_time,'unixepoch', '+8 hours')` 仍依赖本机时区，
 #    真正统一需要单独审计，不是这一行能解决的。
 CST = timezone(timedelta(hours=8))
 
@@ -132,7 +132,7 @@ def fetch_day_posts(db_path: str, date_str: str) -> dict[str, list[dict]]:
            FROM posts p
            WHERE p.snapshot_id IN (
                SELECT id FROM crawl_snapshots
-               WHERE date(crawl_time,'unixepoch','localtime')=?)
+               WHERE date(crawl_time,'unixepoch', '+8 hours')=?)
            ORDER BY p.snapshot_id DESC""",
         (date_str,),
     ).fetchall()
@@ -172,7 +172,7 @@ def snapshot_visible_stats(
     try:
         rows = conn.execute(
             """SELECT posts_data FROM crawl_snapshots
-               WHERE stock_code=? AND date(crawl_time,'unixepoch','localtime')=?""",
+               WHERE stock_code=? AND date(crawl_time,'unixepoch', '+8 hours')=?""",
             (stock_code, date_str),
         ).fetchall()
         seen: set[str] = set()
@@ -290,8 +290,8 @@ def author_tiers(db_path: str) -> dict[tuple[str, str], dict]:
     rows = conn.execute(
         """SELECT stock_code, author, COUNT(*) n, ROUND(AVG(length(content))) avg_len,
                   SUM(like_count) likes, SUM(comment_count) comments,
-                  MIN(date(post_ts,'unixepoch','localtime')) d0,
-                  MAX(date(post_ts,'unixepoch','localtime')) d1
+                  MIN(date(post_ts,'unixepoch', '+8 hours')) d0,
+                  MAX(date(post_ts,'unixepoch', '+8 hours')) d1
            FROM posts WHERE author != '' GROUP BY stock_code, author"""
     ).fetchall()
     conn.close()

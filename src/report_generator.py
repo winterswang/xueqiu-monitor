@@ -282,7 +282,7 @@ def fetch_stock_alerts(
         rows = conn.execute(
             """SELECT alert_type, priority, z_score, detail
                 FROM change_alert
-                WHERE stock_code=? AND date(alert_time,'unixepoch','localtime')=?
+                WHERE stock_code=? AND date(alert_time,'unixepoch', '+8 hours')=?
                 AND alert_type != 'new_announcement'
                  AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
@@ -353,7 +353,7 @@ def fetch_stock_announcements(
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
                WHERE a.stock_code=?
-                 AND date(s.crawl_time,'unixepoch','localtime')=?
+                 AND date(s.crawl_time,'unixepoch', '+8 hours')=?
                ORDER BY s.crawl_time DESC LIMIT ?""",
             (stock_code, date_str, limit),
         ).fetchall()
@@ -381,7 +381,7 @@ def fetch_hot_words(
         rows = conn.execute(
             """SELECT word, printf('%.2f', tfidf_score) score
                FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 10""",
             (stock_code, date_str),
         ).fetchall()
@@ -412,7 +412,7 @@ def fetch_hot_word_streaks(
         # Today's hot words
         today_rows = conn.execute(
             """SELECT word, tfidf_score FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 15""",
             (stock_code, date_str),
         ).fetchall()
@@ -421,7 +421,7 @@ def fetch_hot_word_streaks(
 
         # History: which words appeared on which days
         hist_rows = conn.execute(
-            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') as day
+            """SELECT DISTINCT word, date(event_time,'unixepoch', '+8 hours') as day
                FROM hot_word_event
                WHERE stock_code=? AND event_time >= ? AND event_time < ?""",
             (stock_code, start_ts, end_ts),
@@ -472,7 +472,7 @@ def fetch_yesterday_summary(
         # Yesterday hot words (top 5)
         yest_hw = conn.execute(
             """SELECT word FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 5""",
             (stock_code, yesterday_str),
         ).fetchall()
@@ -1331,7 +1331,7 @@ def fetch_day_alerts(db_path: str, date_str: str) -> list[dict]:
         rows = conn.execute(
             """SELECT stock_code, alert_type, priority, z_score, detail
                 FROM change_alert
-                WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
+                WHERE date(alert_time,'unixepoch', '+8 hours')=? AND priority IN ('P0','P1')
                  AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
                 ORDER BY z_score DESC LIMIT 20""",
@@ -1377,7 +1377,7 @@ def _build_highlights_section(
         ann_rows = conn.execute(
             """SELECT a.stock_code, a.ann_title FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
-               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+               WHERE date(s.crawl_time,'unixepoch', '+8 hours')=?""",
             (date_str,),
         ).fetchall()
     finally:
@@ -1442,12 +1442,12 @@ def _build_mainlines_section(
         today_rows = conn.execute(
             """SELECT word, stock_code, MAX(tfidf_score) tf
                FROM hot_word_event
-               WHERE date(event_time,'unixepoch','localtime')=?
+               WHERE date(event_time,'unixepoch', '+8 hours')=?
                GROUP BY word, stock_code ORDER BY tf DESC LIMIT 400""",
             (date_str,),
         ).fetchall()
         hist_rows = conn.execute(
-            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') day
+            """SELECT DISTINCT word, date(event_time,'unixepoch', '+8 hours') day
                FROM hot_word_event WHERE event_time >= ? AND event_time < ?""",
             (start_ts, end_ts),
         ).fetchall()
@@ -1589,7 +1589,7 @@ def enrich_details(
             """SELECT a.id, a.ann_title, a.ann_link, a.ann_detail, a.stock_code
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
-               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+               WHERE date(s.crawl_time,'unixepoch', '+8 hours')=?""",
             (date_str,),
         ).fetchall()
     finally:

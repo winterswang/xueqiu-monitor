@@ -162,7 +162,7 @@ def fetch_all_posts(
     try:
         rows = conn.execute(
             """SELECT stock_code, posts_data FROM crawl_snapshots
-               WHERE date(crawl_time,'unixepoch','localtime')=?
+               WHERE date(crawl_time,'unixepoch', '+8 hours')=?
                ORDER BY stock_code, crawl_time DESC, id DESC""",
             (date_str,),
         ).fetchall()
@@ -232,7 +232,7 @@ def fetch_announcements(db_path: str, stocks_cfg: dict, date_str: str) -> list[d
             """SELECT a.stock_code, a.ann_title, a.ann_date, a.ann_type
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
-               WHERE date(s.crawl_time,'unixepoch','localtime')=?
+               WHERE date(s.crawl_time,'unixepoch', '+8 hours')=?
                ORDER BY a.stock_code""",
             (date_str,),
         ).fetchall()
