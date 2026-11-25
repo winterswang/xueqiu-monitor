@@ -89,3 +89,42 @@ def test_render_index_includes_x_virtual_ids():
     assert "by_id.setdefault(X_ID_BASE" in src, (
         "渲染层必须把 X 帖按 X_ID_BASE+i 补进 by_id —— 只修读取、不修渲染等于没修"
     )
+
+
+def test_render_md_distinguishes_no_new_from_broken(tmp_path):
+    """2026-11-25 (FA)：`0 帖，无新内容` 让读者分不清「真没新帖」与「采集挂了」。
+
+    低换手标的当天没新帖是事实（APP/UBER/2076/6078 实测），不是故障。
+    渲染要补一句快照可见数，让两种状态可分。
+    """
+    out = tmp_path / "c.md"
+    totals = {"posts": 0, "info": 0, "none": 0, "stocks": 0, "changed": 0}
+    s = {
+        "code": "2076.HK", "name": "BOSS直聘", "raw": 0,
+        "groups": {}, "change": "", "trend": "", "thread": "",
+        "anchors": [], "open_questions": [],
+        "info": 0, "none": 0, "x_n": 0, "visible_n": 11,
+    }
+    ad.render_md([("消费", [s])], totals, "2026-11-24", {}, out)
+    md = out.read_text(encoding="utf-8")
+    assert "今日无新增帖" in md
+    assert "当日快照可见 11 条历史帖" in md
+    assert "无新内容" not in md, "旧文案会让读者误以为采集坏了"
+
+
+def test_snapshot_visible_count_does_not_change_post_count(tmp_path):
+    """反向验证的代码级护栏：可见数只用于文案，不得影响 fetch 的帖数口径。
+
+    FA 实测：APP.US 11-24 快照 11 条，发布时间 2026-07-10~11-22，
+    11-24 发布的 0 条 —— 若拿可见数当帖数，就是把 4 个月前的帖当新闻。
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    # snapshot_visible_count 不得出现在 fetch_day_posts 内部或其调用链上
+    i_fn = src.index("def snapshot_visible_count(")
+    i_next = src.index("def ", i_fn + 10)
+    body = src[i_fn:i_next]
+    assert "SELECT stock_code" not in body, "该函数不该返回帖数据，只返回条数"
+    assert "fetch_day_posts(" not in body, "不得调用 fetch_day_posts（那会改变帖数口径）"
+    # 它只能被渲染侧用（visible_n），不能进 analyze
+    assert "snapshot_visible_count(" in src[i_fn + len(body):], "应被调用"
+    assert "p['id']" not in body

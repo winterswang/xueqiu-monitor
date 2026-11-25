@@ -23,3 +23,6 @@ DAILY_LOG.md
 data/x_posts/
 # 试点报告输出
 reports/x-pilot/
+
+# 2026-11-25: LLM 分析缓存/叙事档案，派生数据不入库（M3）
+data/cache/

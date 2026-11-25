@@ -141,6 +141,47 @@ def fetch_day_posts(db_path: str, date_str: str) -> dict[str, list[dict]]:
     return out
 
 
+def snapshot_visible_count(db_path: str, date_str: str, stock_code: str) -> int:
+    """当日快照里「可见」的帖数（含历史帖）——只读，**仅用于渲染说明**。
+
+    2026-11-25 (FA 反向验证)：`fetch_day_posts` 按 `snapshot_id IN (当日快照)` 取数，
+    它的语义是「**今天首次被采到**的帖」= 当日新增。APP/UBER 这类低换手标的当天
+    没新帖时就是 0 帖——这是**事实**，不是采集故障。
+
+    但日报只写「0 帖，无新内容」，读者无法区分「真的没新帖」与「采集挂了」。
+    本函数取当日快照 `posts_data` 的条数（含历史重复），专供渲染时补一句
+    「（当日快照可见 N 条历史帖）」——**绝不参与取数与统计**。
+
+    ⚠️ 不许用它替代 `fetch_day_posts`：那会把 4 个月前的帖当成今日新闻。
+       实测 APP.US 11-24 快照的 11 条，发布时间 2026-07-10~11-22，**11-24 的 0 条**。
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            """SELECT posts_data FROM crawl_snapshots
+               WHERE stock_code=? AND date(crawl_time,'unixepoch','localtime')=?""",
+            (stock_code, date_str),
+        ).fetchall()
+        seen: set[str] = set()
+        for (raw,) in rows:
+            if not raw:
+                continue
+            try:
+                posts = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            for p in posts if isinstance(posts, list) else []:
+                key = str(p.get("post_id") or p.get("link") or "").strip()
+                if key:
+                    seen.add(key)
+        return len(seen)
+    except sqlite3.Error as e:
+        logger.warning(f"{stock_code} snapshot_visible_count 失败（不阻断渲染）: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
 def author_tiers(db_path: str) -> dict[tuple[str, str], dict]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -335,7 +376,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         raw = day.get(code, [])
         kept = prefilter(raw)
         # 2026-11-25 (X 合并失效): 先把 X 读出来再判空 —— 原来「雪球空 → 直接 return
-        # empty」，而美股在雪球中文社区当天 0 帖很常见（11-24 有 22 只如此），
+        # empty」，而美股在雪球中文社区当天 0 新增并不罕见（低换手标的常见），
         # 于是 X 那 54~58 条英文帖一条都没进过日报。X 与雪球是并列信息源，
         # 任一有内容就该进分析。
         xp = []
@@ -451,7 +492,11 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                         "info": info_n, "none": none_n,
                         # 2026-11-25：X 条数随行走。美股常有「雪球 0 帖、X 数十帖」，
                         # 不显示出来读者无法判断这一段的信息是否含英文源。
-                        "x_n": len(xp)})
+                        "x_n": len(xp),
+                        # 2026-11-25 (FA)：只在「今天真的没新帖」时才算一次，
+                        # 供渲染补一句「当日快照可见 N 条历史帖」，让读者能区分
+                        # 「没新帖」与「采集挂了」。有内容的票不算，省查询。
+                        "visible_n": (0 if info_n else snapshot_visible_count(db_path, date_str, code))})
         data.append((sector, sec))
 
     render_md(data, totals, date_str, tiers, out_md)
@@ -472,7 +517,11 @@ def render_md(data, totals, date_str, tiers, out: Path):
         for s in sec:
             xpart = f" · X {s['x_n']} 条" if s.get("x_n") else ""
             if not s["info"] and not s["change"]:
-                L.append(f"- **{s['code']} {s['name']}**：{s['raw']} 帖{xpart}，无新内容\n")
+                # 2026-11-25：原来只写「0 帖，无新内容」——读者分不清是「真没新帖」
+                # 还是「采集挂了」。补一句快照可见数（含历史帖），两者都有了。
+                vis = s.get("visible_n") or 0
+                hint = f"（当日快照可见 {vis} 条历史帖）" if vis else ""
+                L.append(f"- **{s['code']} {s['name']}**：今日无新增帖{xpart}{hint}\n")
                 continue
             L.append(f"\n### {s['code']} · {s['name']}\n"
                      f"**{s['raw']} 帖{xpart} · 有信息 {s['info']} 条**\n")
