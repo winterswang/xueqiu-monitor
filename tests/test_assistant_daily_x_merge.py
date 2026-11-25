@@ -124,7 +124,7 @@ def test_render_md_distinguishes_no_new_from_broken(tmp_path):
     }
     ad.render_md([("消费", [s])], totals, "2026-11-24", {}, out)
     md = out.read_text(encoding="utf-8")
-    assert "0 帖（当日）" in md
+    assert "0 帖（新增）" in md
     assert "近7日 1 帖" in md
     assert "无新内容" not in md, "旧文案会让读者误以为采集坏了"
     assert "今日无新增帖" not in md, "已改为口径行，不再用这句话"
@@ -146,7 +146,7 @@ def test_render_md_falls_back_to_snapshot_count_only_when_week7_is_zero(tmp_path
     ad.render_md([("消费", [dict(base, week7=0)])], totals, "2026-11-24", {}, out)
     txt = out.read_text(encoding="utf-8")
     assert "近7日 0 帖" in txt
-    assert "快照可见 11 条历史帖" in txt
+    assert "快照可见 11 条" in txt
 
 
 def test_snapshot_visible_count_does_not_change_post_count(tmp_path):
@@ -157,11 +157,47 @@ def test_snapshot_visible_count_does_not_change_post_count(tmp_path):
     """
     src = _SCRIPT.read_text(encoding="utf-8")
     # snapshot_visible_count 不得出现在 fetch_day_posts 内部或其调用链上
-    i_fn = src.index("def snapshot_visible_count(")
+    i_fn = src.index("def snapshot_visible_stats(")
     i_next = src.index("def ", i_fn + 10)
     body = src[i_fn:i_next]
     assert "SELECT stock_code" not in body, "该函数不该返回帖数据，只返回条数"
     assert "fetch_day_posts(" not in body, "不得调用 fetch_day_posts（那会改变帖数口径）"
     # 它只能被渲染侧用（visible_n），不能进 analyze
-    assert "snapshot_visible_count(" in src[i_fn + len(body):], "应被调用"
+    assert "snapshot_visible_stats(" in src[i_fn + len(body):], "应被调用"
     assert "p['id']" not in body
+
+
+def test_count_label_distinguishes_new_from_published_today():
+    """「自上次采集新增」与「当日发布」是两个口径，实测差 21%。
+
+    11-24 首见 2104 条里 447 条是 11-23 发布的；PDD 首见 62 条只有 20 条是
+    当日发布。报文只写「62 帖」会让读者把前一天晚上的帖当成今天的新闻。
+    """
+    assert ad.count_label(62, 20) == "62 帖（新增）· 当日发布 20"
+    # 两者一致时不必并列写两遍
+    assert ad.count_label(20, 20) == "20 帖（新增）"
+    assert ad.count_label(0, 0) == "0 帖（新增）"
+
+
+def test_age_label_reads_as_human_time():
+    """可见数要带年龄，否则「可见 11 条」会被读成「11 条值得看的帖」。"""
+    import time as _t
+    from datetime import datetime as _dt
+    ts = _dt(2026, 7, 10, 12, 0).timestamp()
+    assert ad.age_label(int(ts), "2026-11-24") == "4 个月前"
+    ts2 = _dt(2026, 11, 14, 12, 0).timestamp()
+    assert ad.age_label(int(ts2), "2026-11-24") == "10 天前"
+    assert ad.age_label(0, "2026-11-24") == ""      # 没时间就不瞎说
+    ts3 = _dt(2026, 11, 24, 9, 0).timestamp()
+    assert ad.age_label(int(ts3), "2026-11-24") == ""
+
+
+def test_published_today_count_by_post_ts():
+    """按 post_ts 判当日发布，不按「第几次被采到」。"""
+    from datetime import datetime as _dt
+    d = "2026-11-24"
+    today = int(_dt(2026, 11, 24, 10, 0).timestamp())
+    yday = int(_dt(2026, 11, 23, 22, 0).timestamp())
+    posts = [{"post_ts": today}, {"post_ts": today}, {"post_ts": yday}, {"post_ts": 0}]
+    assert ad.published_today_count(posts, d) == 2
+    assert ad.published_today_count([], d) == 0

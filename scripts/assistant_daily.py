@@ -21,7 +21,7 @@ import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -121,7 +121,7 @@ def fetch_day_posts(db_path: str, date_str: str) -> dict[str, list[dict]]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT p.id, p.stock_code, p.post_id, p.author, p.content,
-                  p.like_count, p.comment_count, p.link, p.snapshot_id
+                  p.like_count, p.comment_count, p.link, p.snapshot_id, p.post_ts
            FROM posts p
            WHERE p.snapshot_id IN (
                SELECT id FROM crawl_snapshots
@@ -141,19 +141,25 @@ def fetch_day_posts(db_path: str, date_str: str) -> dict[str, list[dict]]:
     return out
 
 
-def snapshot_visible_count(db_path: str, date_str: str, stock_code: str) -> int:
-    """当日快照里「可见」的帖数（含历史帖）——只读，**仅用于渲染说明**。
+def snapshot_visible_stats(
+    db_path: str, date_str: str, stock_code: str
+) -> tuple[int, int]:
+    """当日快照里「页面上可见」的帖数 + 其中最早一条的 post_ts。
 
-    2026-11-25 (FA 反向验证)：`fetch_day_posts` 按 `snapshot_id IN (当日快照)` 取数，
-    它的语义是「**今天首次被采到**的帖」= 当日新增。APP/UBER 这类低换手标的当天
-    没新帖时就是 0 帖——这是**事实**，不是采集故障。
+    **只读，只喂渲染的说明性括号，绝不参与取数与统计。**
 
-    但日报只写「0 帖，无新内容」，读者无法区分「真的没新帖」与「采集挂了」。
-    本函数取当日快照 `posts_data` 的条数（含历史重复），专供渲染时补一句
-    「（当日快照可见 N 条历史帖）」——**绝不参与取数与统计**。
+    两个口径要分清（2026-11-25 实测，这是"说不清"的真正根源）：
+    - `fetch_day_posts`（本文件）按 `snapshot_id IN 当日快照`：
+      语义是「**自上次采集以来**的新增」（≈24h 滚动窗口，截止到爬取时刻）。
+      11-24 首见 2104 条里，447 条（21%）其实是 11-23 发布的。
+    - `report_generator.fetch_stock_posts(max_age_days=1)` 按 `post_ts`：
+      语义是「**当日发布**」。同一批 PDD 首见 62 条里只有 20 条是当日发布。
 
-    ⚠️ 不许用它替代 `fetch_day_posts`：那会把 4 个月前的帖当成今日新闻。
-       实测 APP.US 11-24 快照的 11 条，发布时间 2026-07-10~11-22，**11-24 的 0 条**。
+    两者都不错，但数字不同，报文里必须说清是哪个。
+
+    返回的可见数含历史旧帖（页面会把旧的热帖一起展示），所以只用来解释
+    「采集没坏，只是没新帖」。实测 APP.US 11-24 快照的 11 条发布时间是
+    2026-07-10~11-22 —— 拿它当帖数就是把 4 个月前的帖当新闻。
     """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
@@ -174,12 +180,54 @@ def snapshot_visible_count(db_path: str, date_str: str, stock_code: str) -> int:
                 key = str(p.get("post_id") or p.get("link") or "").strip()
                 if key:
                     seen.add(key)
-        return len(seen)
     except sqlite3.Error as e:
-        logger.warning(f"{stock_code} snapshot_visible_count 失败（不阻断渲染）: {e}")
-        return 0
+        logger.warning(f"{stock_code} snapshot_visible_stats 失败（不阻断渲染）: {e}")
+        return 0, 0
     finally:
         conn.close()
+    if not seen:
+        return 0, 0
+    # posts_data 里只有相对时间串，绝对时间取 posts.post_ts（不漂）。
+    try:
+        from src import db as dbmod
+        m = dbmod.fetch_post_ts_map(db_path, stock_code, sorted(seen))
+        oldest = min((v for v in m.values() if v), default=0)
+    except Exception:  # 兜底：算不出时间就不显示年龄，不影响条数
+        oldest = 0
+    return len(seen), oldest
+
+
+def age_label(post_ts: int, date_str: str) -> str:
+    """把「最早那条有多老」说成人话：12 天前 / 4 个月前 / 1 年前。"""
+    if not post_ts:
+        return ""
+    try:
+        ref = datetime.strptime(date_str, "%Y-%m-%d").date()
+        days = (ref - datetime.fromtimestamp(post_ts).date()).days
+    except (ValueError, OSError, OverflowError):
+        return ""
+    if days <= 0:
+        return ""
+    if days < 30:
+        return f"{days} 天前"
+    if days < 365:
+        return f"{days // 30} 个月前"
+    return f"{days // 365} 年前"
+
+
+def published_today_count(posts: list[dict], date_str: str) -> int:
+    """这批「新采到的帖」里，真正**当天发布**的有多少条（按 posts.post_ts）。
+
+    与 `len(posts)`（自上次采集以来的新增）是两个口径，报文里都要给，
+    否则读者会把 21% 的前一天帖子当今天的新闻。
+    """
+    try:
+        d0 = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return 0
+    lo = int(d0.timestamp())
+    hi = int((d0 + timedelta(days=1)).timestamp())
+    return sum(1 for p in posts if p.get("post_ts") and lo <= p["post_ts"] < hi)
 
 
 def week7_count(db_path: str, date_str: str, stock_code: str) -> int:
@@ -198,6 +246,18 @@ def week7_count(db_path: str, date_str: str, stock_code: str) -> int:
     except Exception as e:  # 兜底：口径标注失败不阻断渲染
         logger.warning(f"{stock_code} week7_count 失败（不阻断渲染）: {type(e).__name__}: {e}")
         return 0
+
+
+def count_label(raw: int, pub: int) -> str:
+    """帖子数量的口径标签。
+
+    ``raw`` 是「自上次采集以来的新增」，``pub`` 是「当日发布」。两者不是一回事：
+    一天只爬一轮，那一轮会拖到前一天晚上发出的帖 —— 实测 11-24 首见 2104 条里
+    447 条（21%）其实是 11-23 发布的。所以只在同步时才省略后者，不同步就并列写出。
+    """
+    if pub and pub != raw:
+        return f"{raw} 帖（新增）· 当日发布 {pub}"
+    return f"{raw} 帖（新增）"
 
 
 def x_caliber(x_n: int, x_today: int) -> str:
@@ -544,7 +604,11 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                 totals["stocks"] += 1
             if res.get("change") and "无实质推进" not in res.get("change", ""):
                 totals["changed"] += 1
+            # 「新采到」与「当日发布」是两个口径：前者含前一天晚上发的帖
+            # （实测 11-24 首见 2104 条里 447 条是 11-23 发布的）。报文里都要给。
+            vis_n, vis_oldest = (0, 0) if info_n else snapshot_visible_stats(db_path, date_str, code)
             sec.append({"code": code, "name": stocks_cfg[code]["name"], "raw": n_raw,
+                        "pub_today": published_today_count(raw, date_str),
                         "groups": groups, "change": res.get("change", ""),
                         "trend": res.get("trend", ""),
                         "thread": res.get("thread", ""), "anchors": res.get("anchors", []),
@@ -558,7 +622,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                                        if p.get("days_ago") is not None and p["days_ago"] < 1.0),
                         # 只在「今天真的没新帖」时才算，供渲染标口径。有内容的票不算，省查询。
                         "week7": (0 if info_n else week7_count(db_path, date_str, code)),
-                        "visible_n": (0 if info_n else snapshot_visible_count(db_path, date_str, code))})
+                        "visible_n": vis_n, "visible_oldest": vis_oldest})
         data.append((sector, sec))
 
     render_md(data, totals, date_str, tiers, out_md)
@@ -578,19 +642,22 @@ def render_md(data, totals, date_str, tiers, out: Path):
         L.append(f"\n## {sector}\n")
         for s in sec:
             xpart = x_caliber(s.get("x_n") or 0, s.get("x_today") or 0)
+            cnt = count_label(s.get("raw") or 0, s.get("pub_today") or 0)
             if not s["info"] and not s["change"]:
                 # 2026-11-25：原来只写「0 帖，无新内容」——读者分不清是「真没新帖」
                 # 还是「采集挂了」，也看不到「这周到底有没有动静」。
-                # 报文行按评审定的口径写全：N 帖（当日）· 近7日 M 帖 · X A 条（今日）。
                 w7 = s.get("week7") or 0
                 vis = s.get("visible_n") or 0
                 # 近7日也是 0 时才补快照可见数——那正是「采集是否正常」最需要交代的时候。
-                hint = f" · 快照可见 {vis} 条历史帖" if (not w7 and vis) else ""
-                L.append(f"- **{s['code']} {s['name']}**：{s['raw']} 帖（当日）"
+                # 只用来说明页面能看见多少，**不参与统计**；标上年龄以免被当成"值得看的帖"。
+                age = age_label(s.get("visible_oldest") or 0, date_str)
+                hint = (f" · 快照可见 {vis} 条" + (f"（最早 {age}）" if age else "")
+                        if (not w7 and vis) else "")
+                L.append(f"- **{s['code']} {s['name']}**：{cnt}"
                          f" · 近7日 {w7} 帖{xpart}{hint}\n")
                 continue
             L.append(f"\n### {s['code']} · {s['name']}\n"
-                     f"**{s['raw']} 帖{xpart} · 有信息 {s['info']} 条**\n")
+                     f"**{cnt}{xpart} · 有信息 {s['info']} 条**\n")
             nar = []
             if s["thread"]:
                 nar.append(f"**主线**　{s['thread']}")
@@ -666,14 +733,17 @@ def render_html(data, totals, date_str, tiers, out: Path):
             continue
         P.append(f"<h2>{H.escape(sector)}</h2>")
         for s in sec:
-            head = (f"{H.escape(s['name'])} <span class='cnt'>{s['code']} · {s['raw']} 帖"
+            head = (f"{H.escape(s['name'])} <span class='cnt'>"
+                    + H.escape(f"{s['code']} · " + count_label(s.get("raw") or 0,
+                                                             s.get("pub_today") or 0))
                     + H.escape(x_caliber(s.get("x_n") or 0, s.get("x_today") or 0))
                     + (f" · 有信息 {s['info']} 条" if s["info"] else "") + "</span>")
             P.append(f"<details id='{s['code']}'{' open' if s['change'] else ''}><summary>{head}</summary>")
             P.append("<div class='body'>")
             if not s["info"] and not s["change"]:
                 w7 = s.get("week7") or 0
-                P.append(f"<p class='who'>{s['raw']} 帖（当日）· 近7日 {w7} 帖</p></div></details>")
+                P.append(f"<p class='who'>{H.escape(count_label(s.get('raw') or 0, s.get('pub_today') or 0))}"
+                         f" · 近7日 {w7} 帖</p></div></details>")
                 continue
             nar = []
             if s["thread"]:
