@@ -375,3 +375,33 @@ def test_collector_fallback_fails_loudly():
     # 降级分支必须发 ok:false 帧（frame_err），不能只 echo
     tail = src[src.index('if [ "$TICKER_SRC" = "fallback" ]'):]
     assert "frame_err" in tail.split("fi")[0], "降级必须发失败帧，宿主才会告警"
+
+
+def test_work_tuple_arity_is_consistent():
+    """`build()` 内部 `work()` 的返回元组必须处处同长。
+
+    2026-11-25 给它加了一个元素（x_stats）——这类改动 `build()` 本身没有被
+    单元测试覆盖，漏一个解包点就是运行期 ValueError，而且只在 19:00 那轮炸。
+    这里用 AST 把"所有 return 同长 + 所有解包同长"钉住。
+    """
+    import ast
+
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    lengths = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+                and node.value.elts
+                and isinstance(node.value.elts[0], ast.Name)
+                and node.value.elts[0].id == "code"):
+            lengths.add(len(node.value.elts))
+    assert lengths == {7}, f"work() 的 return 元组应当全是 7 元：{lengths}"
+
+    # 解包点：for ... in done 与 by_code[code] 的赋值
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Tuple):
+            if isinstance(node.iter, ast.Name) and node.iter.id == "done":
+                assert len(node.target.elts) == 7, "for ... in done 解包长度不对"
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript):
+            if (isinstance(node.value.value, ast.Name) and node.value.value.id == "by_code"
+                    and isinstance(node.targets[0], ast.Tuple)):
+                assert len(node.targets[0].elts) == 7, "by_code[code] 解包长度不对"
