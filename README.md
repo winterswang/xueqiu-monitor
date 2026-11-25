@@ -137,6 +137,71 @@ python scripts/publish_ima.py --report data/daily_reports/$(date +%F)-sentiment.
 python -c "from src.crawler import crawl_single_stock; r = crawl_single_stock('600519.SH', timeout=1200); print(r['posts_count'])"
 ```
 
+## 口径定义（v1，2026-11-25）
+
+本项目里「帖数」有五个互不相同的意思。**写报文、写测试、引用数字时必须写明是哪一个**，
+否则会出现「同一只票昨天 62 帖今天 20 帖」这类看着像 bug、其实是口径混用的争论。
+
+### 时间
+
+- **报表日 D**：日报文件名里的日期，CST 日历日。
+- **快照日**：`date(crawl_time,'unixepoch','localtime') == D`。
+- **帖子发布时间**：`posts.post_ts`。在**采集时刻**由 `time_text` 解析后落库，此后不重算。
+
+### 五个「帖数」
+
+| 名称 | 定义 | 数据源 |
+|---|---|---|
+| 当日新增帖 | 首次被采到落在 D（`snapshot_id IN 当日快照`） | `posts` |
+| 当日发布帖 | `date(post_ts) == D` | `posts.post_ts` |
+| 近7日发布帖 | `post_ts ∈ [D-6, D]`（含 D，共 7 个日历日） | `posts.post_ts` |
+| 快照可见帖 | 当日快照 `posts_data` 的条数（含历史热帖） | `crawl_snapshots` |
+| 抓取量 | `posts_count` | `crawl_snapshots` |
+
+关系：**当日新增 ≥ 当日发布**——一天只爬一轮，那一轮会带上「前一晚发布、上次又没拓到」的帖。
+快照可见与其余四者没有固定大小关系。
+
+实测 2026-11-24：当日新增 2104 条，其中当日发布 1657、前一日发布 447（21%）。
+PDD.US 当日新增 62 条，其中当日发布 20 条。
+
+### X 源
+
+- **X 今日**：`days_ago < 1.0`（等价 CST 日历日 D）
+- **X 历史**：`days_ago >= 1.0`
+- **入 prompt**：`clean_posts` 之后的**全部**条数（当前不按时间过滤）
+- `days_ago` 不落盘，每次现算；`keep_days=7` 只清**目录**，不清文件内的旧帖
+
+### 已知陷阱
+
+1. **相对时间重解析漂移**：`report_generator` 的 union 路径会重解析 `time_text`，
+   且拿**解析时刻**当 now —— 旧日报重跑时「昨天」会漂到后一天。一律以 `posts.post_ts` 为准。
+   （`src/cli.py` 采集入口用的就是爬取时刻，那里不漂。）
+2. **dedup 不是丢数据**：`INSERT OR IGNORE` + 唯一索引，一条帖只在**首见快照**存一行。
+   「快照里可见 11 条、posts 当日 0 行」是正常语义，不是故障。
+3. **两条路径不同源**：`assistant_daily` 读 `posts` 表；`report_generator` 读
+   `crawl_snapshots.posts_data` 的并集。同一个「当日」可能给出不同数字，
+   引用时必须说明是哪条路径。
+
+### 验收基准（2026-11-24，四只安静股）
+
+| 标的 | 当日新增 | 当日发布 | 近7日 | 快照可见 | X 今日/历史 |
+|---|---|---|---|---|---|
+| APP.US | 0 | 0 | 2 | 11 | 17 / 32 |
+| UBER.US | 0 | 0 | 4 | 11 | 21 / 24 |
+| 2076.HK | 0 | 0 | 1 | 11 | — |
+| 6078.HK | 0 | 0 | 1 | 11 | — |
+
+对应报文行：
+
+```
+0 帖（新增）· 近7日 2 帖 · X 17 条（今日）/ 另 32 条历史
+```
+
+### 硬规则
+
+- 声称「数据丢了」之前，先打印 `post_ts` 分布（当日 / 更早 / 距今多少天）。
+- 报文里出现的每个帖数，都必须能对上上表里**唯一**的名字与数据源。
+
 ## 测试
 
 ```bash
