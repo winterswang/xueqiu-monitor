@@ -149,7 +149,6 @@ def fetch_stock_posts(
     # 只对着相对时间串（"昨天 10:20"）按 now 重解析会漂：11-24 抓的帖子
     # 在 11-25 跑日报时会算成 11-24 发布，凭空多出一条"当日帖"
     # （2026-11-25 实测 UBER.US 当日 0 帖 → 被算成 1 帖）。
-    # 拿不到（新帖尚未双写/解析失败=0）才退回文本解析。
     def _key(p: dict) -> str:
         return (p.get("post_id") or "").strip() or (p.get("link") or "").strip()
 
@@ -178,8 +177,7 @@ def fetch_stock_posts(
             post_ts = auth_ts
         else:
             # 拿不到权威时间才退回文本解析 —— 这条路仍可能随解析时刻漂移。
-            # 别让它静默发生：实测全库 post_ts=0 有 501 行（0.24%），但
-            # 2026-11-24 当日窗口内是 0 行，说明今天没被这条兜底咬到。
+            # 别让它静默发生：全库 post_ts=0 有 501 行（0.24%）。
             post_ts = _parse_post_time(post_time_str, now)
             ts_missing += 1
         if post_ts > 0 and not (window_start <= post_ts < day_end):
@@ -204,8 +202,7 @@ def fetch_stock_posts(
     # (v0.7.5, note lever 2 - the "dan bin" miss was caused by reading
     # posts in pure time order). Unknown-time posts (ts=0) sink to the end.
     if ts_missing:
-        # 可观测性：兜底走了多少条。0.24% 的量级不算大，但不能默默发生——
-        # 这些帖的时间是按**当前时刻**重解析的，跨天重跑会漂。
+        # 可观测性：兜底走了多少条 —— 这些帖的时间是按**当前时刻**重解析的
         logger.info(
             f"  {stock_code}: {ts_missing}/{len(posts)} 条帖无权威 post_ts，"
             f"退回文本解析（时间可能受解析时刻影响）"
@@ -305,6 +302,7 @@ def fetch_stock_alerts(
 _ALERT_LABELS = {
     "post_spike": "讨论量激增",
     "hot_word_surge": "热词飙升",
+    "sentiment_shift": "情感突变",
     "new_announcement": "新公告",
 }
 
@@ -332,6 +330,11 @@ def _alert_summary(alert: dict) -> str:
         return (
             f"讨论量激增 ({d.get('curr_count')} 帖 vs 历史均值 "
             f"{num(d.get('historical_mean'), '{:.1f}')})"
+        )
+    if t == "sentiment_shift":
+        return (
+            f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
+            f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
         )
     # signal 是检测器写进 detail 的人读文案; 有就用它, 比标签更具体
     return d.get("title") or d.get("signal") or _ALERT_LABELS.get(t, t)
