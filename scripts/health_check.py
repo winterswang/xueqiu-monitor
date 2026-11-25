@@ -229,6 +229,19 @@ def _read_source_recoveries_in_window(
     ]
 
 
+def git_integrity_bad(fsck_output: str) -> list[str]:
+    """从 `git fsck --no-dangling` 的输出里挑出「真实的损坏行」。
+
+    只认 missing / broken / error: 三类。**不认 dangling** —— 历史里的悬空
+    对象（被 amend / rebase 丢下的）是正常现象，拦它会天天误报，把人训成
+    「告警可以直接忽略」，那比没有告警更糟。
+
+    抽成独立函数是为了可测：真造一次缺失对象代价高，直接喂输出更稳。
+    """
+    return [ln for ln in (fsck_output or "").splitlines()
+            if ln.startswith(("missing ", "broken ", "error: "))]
+
+
 def check(require_daily_report: bool = False) -> None:
     """跑全部检查, 打 JSON 到 stdout, 并按 status 决定退出码。
 
@@ -238,6 +251,33 @@ def check(require_daily_report: bool = False) -> None:
     """
     results = []
     errors = []
+
+    # ── 0. 仓库完整性（2026-11-25）──
+    # 背景：这天之内索引里四次出现「指向从未写出的 blob」的条目，表现为
+    # `git commit` 报 invalid object，而 HEAD 完好、fsck 一查才知道。
+    # 归因未闭合（详见 docs/review-2026-11-25-四方合并.md 第八节），但失败
+    # 模式完全可以被检测：每小时跑一次 fsck，缺对象就告警，不再静默。
+    # 用 --no-dangling：历史里的悬空对象是正常现象，拦它会天天误报。
+    try:
+        fsck = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "fsck", "--no-progress", "--no-dangling"],
+            capture_output=True, text=True, timeout=120,
+        )
+        bad = git_integrity_bad(fsck.stdout + fsck.stderr)
+        if bad:
+            results.append({
+                "check": "git_integrity",
+                "status": FAIL,
+                "detail": f"{len(bad)} 处对象缺失/损坏（索引可能指向未写出的对象）：{bad[0][:120]}",
+            })
+            errors.append("git_object_missing")
+        else:
+            results.append({"check": "git_integrity", "status": OK,
+                            "detail": "fsck 无 missing/broken"})
+    except (OSError, subprocess.SubprocessError) as e:
+        # git 不在 PATH 或仓库不存在：降级告警，不误判为损坏
+        results.append({"check": "git_integrity", "status": WARN,
+                        "detail": f"无法执行 git fsck: {type(e).__name__}"})
 
     # ── 1. Check DB exists and has data ──
     db_path = PROJECT_ROOT / "data" / "monitor.db"
@@ -691,6 +731,7 @@ def check(require_daily_report: bool = False) -> None:
     status = FAIL if any(e in ["db_missing", "watchlist_missing", "daily_report_missing",
                                "daily_report_invalid", "daily_report_placeholder",
                                "stale_last_crawl_time",
+                               "git_object_missing",
                                "high_time_parse_failure"] for e in errors) else \
              WARN if errors else OK
 
