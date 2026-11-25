@@ -19,6 +19,9 @@ import sys
 import time
 from pathlib import Path
 
+# 输出给人看的时间统一用 CST，不跟随宿主时区（2026-11-25 D2）。
+CST = datetime.timezone(datetime.timedelta(hours=8))
+
 from .config import Config
 from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import db
@@ -592,7 +595,7 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "posts_count_delta": cr["posts_count"] - prev_posts,
                 "hot_words": [w for w, _ in hot_words_top],
                 "post_titles": post_titles_top,
-                "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+                "trigger_time": datetime.datetime.fromtimestamp(now, CST).strftime("%Y-%m-%dT%H:%M:%S"),
             }
     
             # ── Filter ──

@@ -23,6 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 WATCHLIST_PATH = PROJECT_ROOT / "data" / "watchlist.json"
 
+CST = datetime.timezone(datetime.timedelta(hours=8))
+
 OK = "ok"
 WARN = "warn"
 FAIL = "fail"
@@ -637,14 +639,14 @@ def check(require_daily_report: bool = False) -> None:
                 if not fresh or len(stale) > len(rows) / 2:
                     results.append({
                         "check": "crawl_freshness", "status": FAIL,
-                        "detail": f"{len(stale)}/{len(rows)} stocks not crawled in 48h (freshest: {_time.strftime('%m-%d %H:%M', _time.localtime(max(fresh or [0])))})",
+                        "detail": f"{len(stale)}/{len(rows)} stocks not crawled in 48h (freshest: {datetime.datetime.fromtimestamp(max(fresh or [0]), CST).strftime('%m-%d %H:%M')})",
                     })
                     errors.append("stale_last_crawl_time")
                 elif stale:
                     worst = max(stale, key=lambda x: x[1])
                     results.append({
                         "check": "crawl_freshness", "status": WARN,
-                        "detail": f"{len(stale)}/{len(rows)} whitelist stocks not crawled in 48h (stalest: {worst[0]}, last={_time.strftime('%m-%d %H:%M', _time.localtime(worst[1]))})",
+                        "detail": f"{len(stale)}/{len(rows)} whitelist stocks not crawled in 48h (stalest: {worst[0]}, last={datetime.datetime.fromtimestamp(worst[1], CST).strftime('%m-%d %H:%M')})",
                     })
                 else:
                     results.append({

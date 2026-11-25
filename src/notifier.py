@@ -23,11 +23,15 @@ import os
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import ChangeAlert, PushHistory
 
 logger = logging.getLogger(__name__)
+
+# 卡片里给人看的时间统一用 CST，不跟随宿主时区（2026-11-25 D2）。
+CST = timezone(timedelta(hours=8))
 
 # ── Shared constants ──────────────────────────────────────────
 _PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
@@ -88,7 +92,7 @@ def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
                 {
                     "tag": "note",
                     "elements": [
-                        {"tag": "plain_text", "content": f"触发时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(alert.alert_time))}"}
+                        {"tag": "plain_text", "content": f"触发时间: {datetime.fromtimestamp(alert.alert_time, CST).strftime('%Y-%m-%d %H:%M:%S')}"}
                     ],
                 },
             ],

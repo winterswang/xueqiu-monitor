@@ -65,3 +65,24 @@ def test_sql_and_python_day_bucket_agree():
     ts = int(datetime(2026, 11, 24, 0, 30, tzinfo=cst).timestamp())
     py_day = datetime.fromtimestamp(db.local_day_start(ts), cst).strftime("%Y-%m-%d")
     assert py_day == "2026-11-24"
+
+
+def test_no_python_localtime_left_in_live_code():
+    """展示类时间也不许再用 time.localtime()（会跟随宿主时区）。"""
+    bad = []
+    for rel in LIVE_FILES:
+        text = (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+        for m in re.finditer(r"time\.localtime\(", text):
+            line = text[: m.start()].count("\n") + 1
+            bad.append(f"{rel}:{line}")
+    assert not bad, "仍在使用隐式本地时区：" + ", ".join(bad)
+
+
+def test_display_timestamp_uses_cst():
+    """告警/卡片里的时间：CST 凌晨 00:30 必须显示 00:30，不是前一天 16:30。"""
+    from datetime import datetime, timezone, timedelta
+
+    cst = timezone(timedelta(hours=8))
+    ts = int(datetime(2026, 11, 24, 0, 30, tzinfo=cst).timestamp())
+    shown = datetime.fromtimestamp(ts, cst).strftime("%Y-%m-%d %H:%M:%S")
+    assert shown == "2026-11-24 00:30:00"
