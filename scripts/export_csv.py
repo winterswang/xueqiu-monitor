@@ -63,6 +63,8 @@ CSV_HEADERS = [
     "forward_count",
     "sentiment_score",
     "link",
+    # 2026-11-25：区分数据来源。此前只有雪球，X 舆情进了日报却进不了知识库。
+    "source",
 ]
 
 # IMA API
@@ -216,11 +218,60 @@ def fetch_all_posts(
                         "forward_count": p.get("forward_count", 0),
                         "sentiment_score": p.get("sentiment_score", 0.0),
                         "link": p.get("link", ""),
+                        "source": "雪球",
                     }
                 )
     finally:
         conn.close()
     return rows_data
+
+
+def fetch_x_posts(stocks_cfg: dict, date_str: str, x_cfg: dict) -> list[dict]:
+    """X (Twitter) 舆情 → CSV 行，source="X"。
+
+    2026-11-25：此前 CSV 只导雪球，而 X 舆情早就进了日报——同一个知识库，
+    两条信息源只有一条进去，事后按 CSV 复盘会漏掉英文侧的线索。
+
+    **导出集合与分析口径一致**：clean_posts 清洗后经 layer_for_prompt 分层限量
+    （近期全留 + 历史 ≤5 条）。不导全量的理由：知识库不该被 2021 年的帖淹没，
+    而且与分析口径不一致时，事后对不上账。
+
+    与雪球行一样受 CONTENT_MAX_CHARS 截断；时间列写发布日期（YYYY-MM-DD），
+    因为 X 的原始时间是 UTC 时间戳，直接写进 CSV 会与北京日期错位。
+    """
+    from src import x_sources
+
+    out: list[dict] = []
+    if not x_cfg.get("enabled", True):
+        return out
+    root = x_cfg.get("root") or "data/x_posts"
+    cap = x_cfg.get("max_posts_per_stock")
+    for code, meta in stocks_cfg.items():
+        if not x_sources.is_us(code):
+            continue
+        try:
+            posts = x_sources.as_prompt_posts(x_sources.load_x_posts(root, date_str, code))
+        except Exception as e:  # noqa: BLE001 — 单只票读失败不该中断整轮导出
+            logger.warning(f"  {code}: X 源读取失败，跳过: {type(e).__name__}: {e}")
+            continue
+        for p in x_sources.layer_for_prompt(posts, cap):
+            out.append({
+                "date": date_str,
+                "stock_code": code,
+                "stock_name": meta.get("name", code),
+                "post_type": "x",
+                "title": "",
+                "content": (p.get("content") or "")[:CONTENT_MAX_CHARS],
+                "author": p.get("author", ""),
+                "time": x_sources.post_date_str(p, date_str),
+                "like_count": p.get("like_count", 0),
+                "comment_count": p.get("comment_count", 0),
+                "forward_count": p.get("forward_count", 0),
+                "sentiment_score": 0.0,
+                "link": p.get("link", ""),
+                "source": "X",
+            })
+    return out
 
 
 def fetch_announcements(db_path: str, stocks_cfg: dict, date_str: str) -> list[dict]:
@@ -261,6 +312,7 @@ def fetch_announcements(db_path: str, stocks_cfg: dict, date_str: str) -> list[d
                     "forward_count": 0,
                     "sentiment_score": 0.0,
                     "link": "",
+                    "source": "公告",
                 }
             )
     finally:
@@ -509,8 +561,11 @@ def export_and_upload(
     logger.info(f"[1/3] 拉取数据 (min_length={min_len})...")
     posts = fetch_all_posts(db_path, stocks_cfg, date_str, min_length=min_len)
     announcements = fetch_announcements(db_path, stocks_cfg, date_str)
-    all_rows = posts + announcements
-    logger.info(f"  帖子: {len(posts)}, 公告: {len(announcements)}, 合计: {len(all_rows)}")
+    x_posts = fetch_x_posts(stocks_cfg, date_str, cfg.get("x_source") or {})
+    all_rows = posts + announcements + x_posts
+    logger.info(
+        f"  雪球: {len(posts)}, 公告: {len(announcements)}, X: {len(x_posts)}, "
+        f"合计: {len(all_rows)}")
 
     if not all_rows:
         logger.warning("  ⚠️ 今日无数据，跳过上传")
