@@ -507,6 +507,12 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         # 塞进 prompt（2026-11-25 发现）。不是策略选择，是配置没落实。
         # 截断用 cap_for_prompt（近期优先），与 report_generator 共用同一实现。
         xp = x_sources.cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
+        if len(xp) < len(xp_all):
+            _fresh = sum(1 for p in xp if p.get("is_fresh", True))
+            logger.info(
+                f"  {code}: X 源 {len(xp_all)} 条按配额截断到 {len(xp)} 条"
+                f"（fresh≤1.5d: {_fresh} / 其余: {len(xp) - _fresh}）"
+            )
         # 报文要报「源里有多少」，不是「送了多少」——这是两个不同的问题。
         # 分析用 xp（截断后），展示用 xp_all 统计。
         x_stats = {
@@ -669,7 +675,7 @@ def render_md(data, totals, date_str, tiers, out: Path):
                 hint = (f" · 快照可见 {vis} 条" + (f"（最早 {age}）" if age else "")
                         if (not w7 and vis) else "")
                 L.append(f"- **{s['code']} {s['name']}**：{cnt}"
-                         f" · 近7日 {w7} 帖{xpart}{hint}\n")
+                         f" · 近7日可见 {w7} 帖{xpart}{hint}\n")
                 continue
             L.append(f"\n### {s['code']} · {s['name']}\n"
                      f"**{cnt}{xpart} · 有信息 {s['info']} 条**\n")
@@ -758,7 +764,7 @@ def render_html(data, totals, date_str, tiers, out: Path):
             if not s["info"] and not s["change"]:
                 w7 = s.get("week7") or 0
                 P.append(f"<p class='who'>{H.escape(count_label(s.get('raw') or 0, s.get('pub_today') or 0))}"
-                         f" · 近7日 {w7} 帖</p></div></details>")
+                         f" · 近7日可见 {w7} 帖</p></div></details>")
                 continue
             nar = []
             if s["thread"]:

@@ -156,6 +156,7 @@ def fetch_stock_posts(
     ts_map = db.fetch_post_ts_map(db_path, stock_code, [_key(p) for p in posts])
 
     filtered = []
+    ts_missing = 0
     for p in posts:
         title = (p.get("title") or "")[:200]
         content = p.get("content") or ""
@@ -172,7 +173,15 @@ def fetch_stock_posts(
         # Fail-open: unparseable time (ts == 0) is kept, so missing
         # time data never blanks out a stock's entire feed.
         post_time_str = p.get("time", "")
-        post_ts = ts_map.get(_key(p)) or _parse_post_time(post_time_str, now)
+        auth_ts = ts_map.get(_key(p))
+        if auth_ts:
+            post_ts = auth_ts
+        else:
+            # 拿不到权威时间才退回文本解析 —— 这条路仍可能随解析时刻漂移。
+            # 别让它静默发生：实测全库 post_ts=0 有 501 行（0.24%），但
+            # 2026-11-24 当日窗口内是 0 行，说明今天没被这条兜底咬到。
+            post_ts = _parse_post_time(post_time_str, now)
+            ts_missing += 1
         if post_ts > 0 and not (window_start <= post_ts < day_end):
             continue
         filtered.append(
@@ -194,6 +203,13 @@ def fetch_stock_posts(
     # instead of burying them behind a wall of zero-engagement posts
     # (v0.7.5, note lever 2 - the "dan bin" miss was caused by reading
     # posts in pure time order). Unknown-time posts (ts=0) sink to the end.
+    if ts_missing:
+        # 可观测性：兜底走了多少条。0.24% 的量级不算大，但不能默默发生——
+        # 这些帖的时间是按**当前时刻**重解析的，跨天重跑会漂。
+        logger.info(
+            f"  {stock_code}: {ts_missing}/{len(posts)} 条帖无权威 post_ts，"
+            f"退回文本解析（时间可能受解析时刻影响）"
+        )
     filtered.sort(key=lambda p: p["_ts"], reverse=True)
     filtered.sort(
         key=lambda p: p["like_count"]
@@ -947,9 +963,11 @@ def analyze_stock(
         before = len(x_posts)
         x_posts = x_sources.cap_for_prompt(x_posts, cap)
         kept_fresh = sum(1 for p in x_posts if p.get("is_fresh", True))
+        # 日志用 fresh≤1.5d 的说法，不要写成「今日」——报文里的「今日」是 <1.0，
+        # 两个阈值职责不同（见 README「两个阈值不要合并」）。
         logger.info(
             f"  {stock_code}: X 源 {before} 条按配额截断到 {len(x_posts)} 条"
-            f"（近期 {kept_fresh} / 较早 {len(x_posts) - kept_fresh}）"
+            f"（fresh≤1.5d: {kept_fresh} / 其余: {len(x_posts) - kept_fresh}）"
         )
 
     scope = "今日"

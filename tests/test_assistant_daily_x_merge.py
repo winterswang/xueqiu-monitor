@@ -125,7 +125,7 @@ def test_render_md_distinguishes_no_new_from_broken(tmp_path):
     ad.render_md([("消费", [s])], totals, "2026-11-24", {}, out)
     md = out.read_text(encoding="utf-8")
     assert "0 帖（新增）" in md
-    assert "近7日 1 帖" in md
+    assert "近7日可见 1 帖" in md
     assert "无新内容" not in md, "旧文案会让读者误以为采集坏了"
     assert "今日无新增帖" not in md, "已改为口径行，不再用这句话"
 
@@ -145,7 +145,7 @@ def test_render_md_falls_back_to_snapshot_count_only_when_week7_is_zero(tmp_path
 
     ad.render_md([("消费", [dict(base, week7=0)])], totals, "2026-11-24", {}, out)
     txt = out.read_text(encoding="utf-8")
-    assert "近7日 0 帖" in txt
+    assert "近7日可见 0 帖" in txt
     assert "快照可见 11 条" in txt
 
 

@@ -210,12 +210,12 @@ def test_acceptance_baseline_renders_expected_lines():
                                        "stocks": 0, "changed": 0}, D, {}, out)
         md = out.read_text(encoding="utf-8")
 
-        assert ("- **APP.US APP.US**：0 帖（新增） · 近7日 2 帖"
+        assert ("- **APP.US APP.US**：0 帖（新增） · 近7日可见 2 帖"
                 " · X 17 条（今日） / 另 32 条历史") in md, md
-        assert ("- **UBER.US UBER.US**：0 帖（新增） · 近7日 4 帖"
+        assert ("- **UBER.US UBER.US**：0 帖（新增） · 近7日可见 4 帖"
                 " · X 21 条（今日） / 另 24 条历史") in md
-        assert "- **2076.HK 2076.HK**：0 帖（新增） · 近7日 1 帖" in md
-        assert "- **6078.HK 6078.HK**：0 帖（新增） · 近7日 1 帖" in md
+        assert "- **2076.HK 2076.HK**：0 帖（新增） · 近7日可见 1 帖" in md
+        assert "- **6078.HK 6078.HK**：0 帖（新增） · 近7日可见 1 帖" in md
 
 
 def test_visible_count_never_becomes_post_count():
