@@ -20,7 +20,23 @@ MONITOR_DIR="/Users/wangguangchao/code/claude_code/xueqiu-monitor"
 PYBIN="/Users/wangguangchao/.pyenv/versions/3.11.12/bin/python3"
 LARK="$HOME/.npm-global/bin/lark-cli"
 CHAT_ID="oc_5d38729181081d4ee50d2d2ad2b662f7"
-TICKERS="PDD,NVDA,TSM,BABA,GOOGL,TSLA,UBER,SKHY,META,CRWV,CBRS,ASML,TCOM,APP,NVO,DIS,TEM,AMD,BRK.B,AAPL,AMZN,BEKE"
+# 采集名单从配置派生，不再手写。手写版曾漏掉 SPCX.US：配置里加了这只票，
+# 采集侧没跟着改，于是它每天都没有 X 数据，而日报那边只会显示「X 0 条」——
+# 静默的盲区（2026-11-25 全量核对发现）。派生失败才退回旧名单，避免配置
+# 解析问题导致整轮不采。
+TICKERS=$("$PYBIN" -c '
+import json, sys
+try:
+    stocks = json.load(open(sys.argv[1]))["stocks"]
+except Exception:
+    sys.exit(1)
+us = [c[:-3] for c in stocks if c.upper().endswith(".US")]
+print(",".join(us))
+' "$MONITOR_DIR/etc/config.report.json" 2>/dev/null)
+if [ -z "$TICKERS" ]; then
+  TICKERS="PDD,NVDA,TSM,BABA,GOOGL,TSLA,UBER,SKHY,META,CRWV,CBRS,ASML,TCOM,APP,NVO,DIS,TEM,AMD,BRK.B,AAPL,AMZN,BEKE"
+  echo "[warn] 无法从 config.report.json 派生 TICKERS，退回内置名单（可能漏采）"
+fi
 
 # ── stdout 协议层：原 stdout 存 fd3，人读输出全部转 stderr ──
 exec 3>&1 1>&2

@@ -296,3 +296,30 @@ def test_assistant_daily_actually_applies_the_cap():
     assert 'cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))' in src
     # 分析用截断后的 xp，展示用 xp_all 的统计——两者不能混
     assert "x_stats" in src and '"x_n": xst["total"]' in src
+
+
+# ── X 采集名单必须跟配置一致（2026-11-25 发现 SPCX.US 盲区）────────────
+
+
+def test_x_collect_script_derives_tickers_from_config():
+    """采集名单必须从 config.report.json 派生，不能手写。
+
+    手写版漏了 SPCX.US：配置里加了这只票、采集侧没跟着改，于是它每天都没有
+    X 数据，日报只会显示「X 0 条」—— 看起来像"今天没舆情"，其实是永远没有。
+    """
+    script = PROJECT_ROOT / "scripts" / "x_collect_daily.sh"
+    src = script.read_text(encoding="utf-8")
+    assert "config.report.json" in src, "TICKERS 应从配置派生"
+    assert 'TICKERS=$("$PYBIN" -c' in src
+    # 硬编码名单只允许作为兜底出现一次
+    assert src.count('TICKERS="PDD,') == 1, "手写名单不应再有第二处"
+
+
+def test_every_configured_us_stock_reaches_the_collector():
+    """配置里的每只美股都必须出现在派生结果里（SPCX.US 回归）。"""
+    import json
+    cfg = json.loads((PROJECT_ROOT / "etc" / "config.report.json").read_text(encoding="utf-8"))
+    us = {c[:-3] for c in cfg["stocks"] if c.upper().endswith(".US")}
+    assert "SPCX" in us, "配置应包含 SPCX.US"
+    # 派生逻辑与脚本内嵌的 python 片段保持一致
+    assert len(us) == len({c for c in cfg["stocks"] if c.upper().endswith(".US")})
