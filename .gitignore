@@ -24,5 +24,8 @@ data/x_posts/
 # 试点报告输出
 reports/x-pilot/
 
-# 2026-11-25: LLM 分析缓存/叙事档案，派生数据不入库（M3）
+# 2026-11-25: LLM 分析缓存 / 叙事档案，派生数据不入库（M3）
+# narrative 是 assistant_daily 每跑一次就重写的运行产物（下一轮的 prior 上下文），
+# 不是源码；入 git 只会每天 churn 51 个 diff。原先注释写了"叙事档案"却漏掉了这条规则。
 data/cache/
+data/narrative/
