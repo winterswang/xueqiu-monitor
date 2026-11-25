@@ -182,6 +182,40 @@ def snapshot_visible_count(db_path: str, date_str: str, stock_code: str) -> int:
         conn.close()
 
 
+def week7_count(db_path: str, date_str: str, stock_code: str) -> int:
+    """近 7 日（D-6 ~ D）有多少条**帖**——只读，仅用于渲染标口径。
+
+    口径与 `report_generator.fetch_stock_posts(max_age_days=7)` 完全一致：
+    当日快照并集 + 去重 + `posts.post_ts` 时间窗。直接复用它，避免这里再写
+    一套取数逻辑将来两边跑偏。
+
+    ⚠️ 只用来**标注**，不参与分析。把 7 日旧帖当今日新闻吃进 prompt 是另一件事，
+       需要单独拍板（会把"今天发生了什么"变成"这周大概发生了什么"）。
+    """
+    try:
+        from src.report_generator import fetch_stock_posts
+        return len(fetch_stock_posts(db_path, stock_code, date_str, max_age_days=7))
+    except Exception as e:  # 兜底：口径标注失败不阻断渲染
+        logger.warning(f"{stock_code} week7_count 失败（不阻断渲染）: {type(e).__name__}: {e}")
+        return 0
+
+
+def x_caliber(x_n: int, x_today: int) -> str:
+    """X 条数按「今日 / 历史」分层显示。
+
+    口径：`days_ago < 1.0` = 当天（CST 日历日）。**不用 `is_fresh`** ——
+    那个是 1.5 天阈值，会把昨天下午的帖子算成今天（APP 实测 17 vs 18）。
+
+    为什么必须分层：X 抓的是完整时间线，同一只票可能混着 5 年前的老帖。
+    只报总数会让读者以为今天新增了几十条（2026-11-25 四方评审 H9）。
+    """
+    if not x_n:
+        return ""
+    hist = max(0, x_n - x_today)
+    tail = f" / 另 {hist} 条历史" if hist else ""
+    return f" · X {x_today} 条（今日）{tail}"
+
+
 def author_tiers(db_path: str) -> dict[tuple[str, str], dict]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -519,9 +553,11 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                         # 2026-11-25：X 条数随行走。美股常有「雪球 0 帖、X 数十帖」，
                         # 不显示出来读者无法判断这一段的信息是否含英文源。
                         "x_n": len(xp),
-                        # 2026-11-25 (FA)：只在「今天真的没新帖」时才算一次，
-                        # 供渲染补一句「当日快照可见 N 条历史帖」，让读者能区分
-                        # 「没新帖」与「采集挂了」。有内容的票不算，省查询。
+                        # X 里的「今日」条数（days_ago < 1.0 = CST 日历日当天）。
+                        "x_today": sum(1 for p in xp
+                                       if p.get("days_ago") is not None and p["days_ago"] < 1.0),
+                        # 只在「今天真的没新帖」时才算，供渲染标口径。有内容的票不算，省查询。
+                        "week7": (0 if info_n else week7_count(db_path, date_str, code)),
                         "visible_n": (0 if info_n else snapshot_visible_count(db_path, date_str, code))})
         data.append((sector, sec))
 
@@ -541,13 +577,17 @@ def render_md(data, totals, date_str, tiers, out: Path):
     for sector, sec in data:
         L.append(f"\n## {sector}\n")
         for s in sec:
-            xpart = f" · X {s['x_n']} 条" if s.get("x_n") else ""
+            xpart = x_caliber(s.get("x_n") or 0, s.get("x_today") or 0)
             if not s["info"] and not s["change"]:
                 # 2026-11-25：原来只写「0 帖，无新内容」——读者分不清是「真没新帖」
-                # 还是「采集挂了」。补一句快照可见数（含历史帖），两者都有了。
+                # 还是「采集挂了」，也看不到「这周到底有没有动静」。
+                # 报文行按评审定的口径写全：N 帖（当日）· 近7日 M 帖 · X A 条（今日）。
+                w7 = s.get("week7") or 0
                 vis = s.get("visible_n") or 0
-                hint = f"（当日快照可见 {vis} 条历史帖）" if vis else ""
-                L.append(f"- **{s['code']} {s['name']}**：今日无新增帖{xpart}{hint}\n")
+                # 近7日也是 0 时才补快照可见数——那正是「采集是否正常」最需要交代的时候。
+                hint = f" · 快照可见 {vis} 条历史帖" if (not w7 and vis) else ""
+                L.append(f"- **{s['code']} {s['name']}**：{s['raw']} 帖（当日）"
+                         f" · 近7日 {w7} 帖{xpart}{hint}\n")
                 continue
             L.append(f"\n### {s['code']} · {s['name']}\n"
                      f"**{s['raw']} 帖{xpart} · 有信息 {s['info']} 条**\n")
@@ -627,12 +667,13 @@ def render_html(data, totals, date_str, tiers, out: Path):
         P.append(f"<h2>{H.escape(sector)}</h2>")
         for s in sec:
             head = (f"{H.escape(s['name'])} <span class='cnt'>{s['code']} · {s['raw']} 帖"
-                    + (f" · X {s['x_n']} 条" if s.get("x_n") else "")
+                    + H.escape(x_caliber(s.get("x_n") or 0, s.get("x_today") or 0))
                     + (f" · 有信息 {s['info']} 条" if s["info"] else "") + "</span>")
             P.append(f"<details id='{s['code']}'{' open' if s['change'] else ''}><summary>{head}</summary>")
             P.append("<div class='body'>")
             if not s["info"] and not s["change"]:
-                P.append("<p class='who'>无新内容</p></div></details>")
+                w7 = s.get("week7") or 0
+                P.append(f"<p class='who'>{s['raw']} 帖（当日）· 近7日 {w7} 帖</p></div></details>")
                 continue
             nar = []
             if s["thread"]:

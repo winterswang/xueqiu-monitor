@@ -33,7 +33,7 @@ ad = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ad)
 
 
-def _sec(code="PDD", name="拼多多", raw=0, x_n=58, info=2):
+def _sec(code="PDD", name="拼多多", raw=0, x_n=58, x_today=17, info=2):
     """一只「雪球 0 帖 + X 有帖」的票，事实全部来自 X（虚拟 id）。"""
     xid = ad.X_ID_BASE + 0
     return {
@@ -46,7 +46,7 @@ def _sec(code="PDD", name="拼多多", raw=0, x_n=58, info=2):
         }]},
         "change": "", "trend": "", "thread": "",
         "anchors": [], "open_questions": [],
-        "info": info, "none": 0, "x_n": x_n,
+        "info": info, "none": 0, "x_n": x_n, "x_today": x_today,
     }
 
 
@@ -56,7 +56,8 @@ def test_render_md_shows_x_count(tmp_path):
     totals = {"posts": 0, "info": 2, "none": 0, "stocks": 1, "changed": 0}
     ad.render_md([("电商", [_sec()])], totals, "2026-11-24", {}, out)
     md = out.read_text(encoding="utf-8")
-    assert "X 58 条" in md, md[:400]
+    assert "X 17 条（今日）" in md, md[:400]
+    assert "另 41 条历史" in md, "只报总数会让读者以为今天新增了 58 条"
     assert "PDD 宣布新一轮回购" in md, "X 来源的事实必须进正文"
 
 
@@ -64,10 +65,24 @@ def test_render_md_omits_x_count_when_zero(tmp_path):
     """纯雪球的票不该多出一个「X 0 条」噪音。"""
     out = tmp_path / "b.md"
     totals = {"posts": 10, "info": 1, "none": 0, "stocks": 1, "changed": 0}
-    s = _sec(x_n=0, raw=10)
+    s = _sec(x_n=0, x_today=0, raw=10)
     ad.render_md([("电商", [s])], totals, "2026-11-24", {}, out)
     md = out.read_text(encoding="utf-8")
     assert "X 0 条" not in md
+    assert "X " not in md
+
+
+def test_x_caliber_uses_calendar_day_not_fresh_flag():
+    """口径钉死：days_ago < 1.0 才是「今日」，不能用 is_fresh(1.5 天)。
+
+    2026-11-25 实测 APP.US：<1.0 → 17 条，is_fresh(<=1.5) → 18 条。
+    差的那一条是昨天下午发的，算进「今日」就是谎报。
+    """
+    assert ad.x_caliber(49, 17) == " · X 17 条（今日） / 另 32 条历史"
+    assert ad.x_caliber(5, 5) == " · X 5 条（今日）"      # 全是今日，不写「另 0 条」
+    assert ad.x_caliber(0, 0) == ""                        # 没有 X 就完全不出现
+    # 防御：今日数不该超过总数
+    assert ad.x_caliber(3, 9) == " · X 9 条（今日）"
 
 
 def test_x_read_precedes_empty_return():
@@ -92,10 +107,11 @@ def test_render_index_includes_x_virtual_ids():
 
 
 def test_render_md_distinguishes_no_new_from_broken(tmp_path):
-    """2026-11-25 (FA)：`0 帖，无新内容` 让读者分不清「真没新帖」与「采集挂了」。
+    """`0 帖，无新内容` 让读者分不清「真没新帖」与「采集挂了」。
 
-    低换手标的当天没新帖是事实（APP/UBER/2076/6078 实测），不是故障。
-    渲染要补一句快照可见数，让两种状态可分。
+    2026-11-25 评审改成三层口径：当日 / 近7日 / X 今日。
+    2076.HK 实测：当日 0、近7日 1 —— 写「0 帖」是事实，但只写 0 会让人以为
+    这只票一周都没动静。
     """
     out = tmp_path / "c.md"
     totals = {"posts": 0, "info": 0, "none": 0, "stocks": 0, "changed": 0}
@@ -103,13 +119,34 @@ def test_render_md_distinguishes_no_new_from_broken(tmp_path):
         "code": "2076.HK", "name": "BOSS直聘", "raw": 0,
         "groups": {}, "change": "", "trend": "", "thread": "",
         "anchors": [], "open_questions": [],
-        "info": 0, "none": 0, "x_n": 0, "visible_n": 11,
+        "info": 0, "none": 0, "x_n": 0, "x_today": 0,
+        "week7": 1, "visible_n": 11,
     }
     ad.render_md([("消费", [s])], totals, "2026-11-24", {}, out)
     md = out.read_text(encoding="utf-8")
-    assert "今日无新增帖" in md
-    assert "当日快照可见 11 条历史帖" in md
+    assert "0 帖（当日）" in md
+    assert "近7日 1 帖" in md
     assert "无新内容" not in md, "旧文案会让读者误以为采集坏了"
+    assert "今日无新增帖" not in md, "已改为口径行，不再用这句话"
+
+
+def test_render_md_falls_back_to_snapshot_count_only_when_week7_is_zero(tmp_path):
+    """近7日有帖 = 采集正常，不必再补快照可见数；近7日也是 0 才需要交代。"""
+    out = tmp_path / "d.md"
+    totals = {"posts": 0, "info": 0, "none": 0, "stocks": 0, "changed": 0}
+    base = {
+        "code": "X.HK", "name": "测试", "raw": 0, "groups": {},
+        "change": "", "trend": "", "thread": "",
+        "anchors": [], "open_questions": [],
+        "info": 0, "none": 0, "x_n": 0, "x_today": 0, "visible_n": 11,
+    }
+    ad.render_md([("消费", [dict(base, week7=2)])], totals, "2026-11-24", {}, out)
+    assert "快照可见" not in out.read_text(encoding="utf-8")
+
+    ad.render_md([("消费", [dict(base, week7=0)])], totals, "2026-11-24", {}, out)
+    txt = out.read_text(encoding="utf-8")
+    assert "近7日 0 帖" in txt
+    assert "快照可见 11 条历史帖" in txt
 
 
 def test_snapshot_visible_count_does_not_change_post_count(tmp_path):

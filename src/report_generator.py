@@ -145,6 +145,15 @@ def fetch_stock_posts(
     from .crawler import _parse_post_time
 
     now = time.time()
+    # 权威时间：posts.post_ts 是入库时按**爬取时刻**解析的，不随时间漂移。
+    # 只对着相对时间串（"昨天 10:20"）按 now 重解析会漂：11-24 抓的帖子
+    # 在 11-25 跑日报时会算成 11-24 发布，凭空多出一条"当日帖"
+    # （2026-11-25 实测 UBER.US 当日 0 帖 → 被算成 1 帖）。
+    # 拿不到（新帖尚未双写/解析失败=0）才退回文本解析。
+    def _key(p: dict) -> str:
+        return (p.get("post_id") or "").strip() or (p.get("link") or "").strip()
+
+    ts_map = db.fetch_post_ts_map(db_path, stock_code, [_key(p) for p in posts])
 
     filtered = []
     for p in posts:
@@ -163,7 +172,7 @@ def fetch_stock_posts(
         # Fail-open: unparseable time (ts == 0) is kept, so missing
         # time data never blanks out a stock's entire feed.
         post_time_str = p.get("time", "")
-        post_ts = _parse_post_time(post_time_str, now)
+        post_ts = ts_map.get(_key(p)) or _parse_post_time(post_time_str, now)
         if post_ts > 0 and not (window_start <= post_ts < day_end):
             continue
         filtered.append(

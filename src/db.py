@@ -496,6 +496,43 @@ def fetch_day_posts_union(
     return result
 
 
+def fetch_post_ts_map(
+    db_path: str, stock_code: str, keys: list[str]
+) -> dict[str, int]:
+    """按 dedup_key（post_id→link 兜底）取**权威发布时间戳** ``posts.post_ts``。
+
+    为什么需要它
+    ------------
+    ``crawl_snapshots.posts_data`` 是原始抓取副本，只有相对时间串（"3小时前"
+    "昨天 10:20"）。按**读取时刻**重新解析会随时间漂移：11-24 18:00 抓到的
+    "昨天 10:20" 指 11-23，11-25 19:00 再解析就变成 11-24 —— 一条旧帖凭空
+    出现在"当日"里（2026-11-25 实测 UBER.US 因此多出 1 条当日帖，与
+    ``posts.post_ts`` 口径不符）。
+
+    ``posts`` 表在**入库时**用爬取时刻解析并落库，所以 post_ts 是不漂的权威值。
+    调用方应优先用它，缺失（或解析失败记为 0）时才退回文本解析。
+
+    返回 {dedup_key: post_ts}。分块查询，避开 SQLite 变量上限。
+    """
+    keys = [k for k in dict.fromkeys(keys) if k]
+    if not keys:
+        return {}
+    out: dict[str, int] = {}
+    chunk = 500
+    with _connect(db_path) as conn:
+        for i in range(0, len(keys), chunk):
+            part = keys[i:i + chunk]
+            rows = conn.execute(
+                "SELECT dedup_key, post_ts FROM posts WHERE stock_code=? "
+                "AND dedup_key IN (%s)" % ",".join("?" * len(part)),
+                (stock_code, *part),
+            ).fetchall()
+            for row in rows:
+                if row["dedup_key"]:
+                    out[row["dedup_key"]] = int(row["post_ts"] or 0)
+    return out
+
+
 # ════════════════════════════════════════════════════════
 # sentiment_stats
 # ════════════════════════════════════════════════════════
