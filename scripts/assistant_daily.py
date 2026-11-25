@@ -334,12 +334,20 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     def work(code):
         raw = day.get(code, [])
         kept = prefilter(raw)
-        if not kept:
-            return code, len(raw), kept, dict(EMPTY), "empty"
+        # 2026-11-25 (X 合并失效): 先把 X 读出来再判空 —— 原来「雪球空 → 直接 return
+        # empty」，而美股在雪球中文社区当天 0 帖很常见（11-24 有 22 只如此），
+        # 于是 X 那 54~58 条英文帖一条都没进过日报。X 与雪球是并列信息源，
+        # 任一有内容就该进分析。
         xp = []
         if x_cfg.get("enabled", True) and x_sources.is_us(code):
-            xp = x_sources.as_prompt_posts(
-                x_sources.load_x_posts(x_root, date_str, code))
+            try:
+                xp = x_sources.as_prompt_posts(
+                    x_sources.load_x_posts(x_root, date_str, code))
+            except Exception as e:  # 兜底：X 读取失败不拖垮雪球那条路
+                logger.warning(f"{code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:100]}")
+                xp = []
+        if not kept and not xp:
+            return code, len(raw), kept, dict(EMPTY), "empty", xp
         cp = cache_dir / f"{code}.json"
         if use_cache and cp.exists():
             try:
@@ -351,7 +359,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                     cached.setdefault(k, "")
                 cached.setdefault("anchors", [])
                 cached.setdefault("open_questions", [])
-                return code, len(raw), kept, cached, "cache"
+                return code, len(raw), kept, cached, "cache", xp
             except (ValueError, AttributeError):
                 pass
         res = analyze_stock(_get_llm_client(), model, stocks_cfg[code]["name"],
@@ -361,7 +369,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
             cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
             logger.warning(f"{code} 缓存写入失败: {e}")
-        return code, len(raw), kept, res, "llm"
+        return code, len(raw), kept, res, "llm", xp
 
     t_all = time.time()
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -371,7 +379,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     by_code = {d[0]: d for d in done}
 
     # 写回叙事档案（只更新本期有内容的票）
-    for code, _raw, _kept, res, _src in done:
+    for code, _raw, _kept, res, _src, _xp in done:
         if res.get("thread") or res.get("change"):
             try:
                 prev = prior_of(code) or {}
@@ -396,8 +404,14 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     for sector, codes in sectors.items():
         sec = []
         for code in codes:
-            _, n_raw, kept, res, _src = by_code[code]
+            _, n_raw, kept, res, _src, xp = by_code[code]
             by_id = {pp["id"]: pp for pp in kept}
+            # 2026-11-25 (X 合并失效第二层): X 帖在 analyze_stock 里用 X_ID_BASE+i
+            # 作为虚拟 id 参与抽取，facts[].rep/sources 引用的就是这些 id。
+            # 渲染时若不补进 by_id，`rep not in by_id → continue` 会把 X 来源的
+            # 事实**全部丢掉**——只修「雪球空提前 return」是不够的。
+            for _i, _x in enumerate(xp):
+                by_id.setdefault(X_ID_BASE + _i, _x)
             groups: dict[str, list] = {}
             for f in (res.get("facts") or []):
                 if f.get("kind") in (None, "", "无") or not f.get("fact"):
@@ -434,7 +448,10 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                         "trend": res.get("trend", ""),
                         "thread": res.get("thread", ""), "anchors": res.get("anchors", []),
                         "open_questions": res.get("open_questions", []),
-                        "info": info_n, "none": none_n})
+                        "info": info_n, "none": none_n,
+                        # 2026-11-25：X 条数随行走。美股常有「雪球 0 帖、X 数十帖」，
+                        # 不显示出来读者无法判断这一段的信息是否含英文源。
+                        "x_n": len(xp)})
         data.append((sector, sec))
 
     render_md(data, totals, date_str, tiers, out_md)
@@ -453,10 +470,12 @@ def render_md(data, totals, date_str, tiers, out: Path):
     for sector, sec in data:
         L.append(f"\n## {sector}\n")
         for s in sec:
+            xpart = f" · X {s['x_n']} 条" if s.get("x_n") else ""
             if not s["info"] and not s["change"]:
-                L.append(f"- **{s['code']} {s['name']}**：{s['raw']} 帖，无新内容\n")
+                L.append(f"- **{s['code']} {s['name']}**：{s['raw']} 帖{xpart}，无新内容\n")
                 continue
-            L.append(f"\n### {s['code']} · {s['name']}\n**{s['raw']} 帖 · 有信息 {s['info']} 条**\n")
+            L.append(f"\n### {s['code']} · {s['name']}\n"
+                     f"**{s['raw']} 帖{xpart} · 有信息 {s['info']} 条**\n")
             nar = []
             if s["thread"]:
                 nar.append(f"**主线**　{s['thread']}")
@@ -533,6 +552,7 @@ def render_html(data, totals, date_str, tiers, out: Path):
         P.append(f"<h2>{H.escape(sector)}</h2>")
         for s in sec:
             head = (f"{H.escape(s['name'])} <span class='cnt'>{s['code']} · {s['raw']} 帖"
+                    + (f" · X {s['x_n']} 条" if s.get("x_n") else "")
                     + (f" · 有信息 {s['info']} 条" if s["info"] else "") + "</span>")
             P.append(f"<details id='{s['code']}'{' open' if s['change'] else ''}><summary>{head}</summary>")
             P.append("<div class='body'>")
