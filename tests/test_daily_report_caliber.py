@@ -360,3 +360,18 @@ def test_age_label_is_timezone_independent_on_the_boundary():
         else:
             os.environ["TZ"] = old_tz
         _time.tzset()
+
+
+def test_collector_fallback_fails_loudly():
+    """名单派生失败退回内置名单时，必须让宿主看见。
+
+    这是「失败被压成正常」的同一类问题：SPCX 盲区的表现就是「X 0 条」，
+    看起来像今天没舆情，实际是永远没有。只往 stderr 写一行 warn 救不了它。
+    """
+    src = (PROJECT_ROOT / "scripts" / "x_collect_daily.sh").read_text(encoding="utf-8")
+    assert 'TICKER_SRC="fallback"' in src
+    assert 'if [ "$TICKER_SRC" = "fallback" ]' in src, "收尾必须按降级处理"
+    assert 'exit 14' in src, "降级要有独立退出码"
+    # 降级分支必须发 ok:false 帧（frame_err），不能只 echo
+    tail = src[src.index('if [ "$TICKER_SRC" = "fallback" ]'):]
+    assert "frame_err" in tail.split("fi")[0], "降级必须发失败帧，宿主才会告警"

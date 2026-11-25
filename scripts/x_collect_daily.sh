@@ -13,7 +13,8 @@
 #   契约校验 → 7 天清理；全绿静默（complete 帧无附加字段），任何降级
 #   complete 帧 ok:false 带原因（宿主判失败会告警）+ lark-cli 飞书补一条。
 #
-# 退出码：0 全绿 | 10 代理失败 | 11 登录失效 | 12 采集失败 | 13 校验 FAIL | 30 目录缺失
+# 退出码：0 全绿 | 10 代理失败 | 11 登录失效 | 12 采集失败 | 13 校验 FAIL |
+#         14 名单派生失败（退回内置名单，可能漏采）| 30 目录缺失
 set -u
 
 MONITOR_DIR="/Users/wangguangchao/code/claude_code/xueqiu-monitor"
@@ -33,10 +34,16 @@ except Exception:
 us = [c[:-3] for c in stocks if c.upper().endswith(".US")]
 print(",".join(us))
 ' "$MONITOR_DIR/etc/config.report.json" 2>/dev/null)
+TICKER_SRC="config"
 if [ -z "$TICKERS" ]; then
   TICKERS="PDD,NVDA,TSM,BABA,GOOGL,TSLA,UBER,SKHY,META,CRWV,CBRS,ASML,TCOM,APP,NVO,DIS,TEM,AMD,BRK.B,AAPL,AMZN,BEKE"
+  TICKER_SRC="fallback"
+  # 只写 stderr 不够：这是「失败被压成正常」的典型形态——上次 SPCX 就是这样
+  # 静默漏了一个月。退到内置名单必须让宿主看见，收尾时按降级处理。
   echo "[warn] 无法从 config.report.json 派生 TICKERS，退回内置名单（可能漏采）"
 fi
+N_TICKERS=$(printf '%s' "$TICKERS" | tr ',' '\n' | grep -c . )
+echo "[x_collect_daily] 采集名单来源=$TICKER_SRC，共 $N_TICKERS 只"
 
 # ── stdout 协议层：原 stdout 存 fd3，人读输出全部转 stderr ──
 exec 3>&1 1>&2
@@ -97,8 +104,8 @@ if [ "$rc" -eq 3 ]; then
 fi
 if [ "$rc" -ne 0 ]; then
   if [ "$rc" -eq 4 ]; then
-    frame_err "22 只全部 0 条（empty），未落盘。疑似风控/频控，按任务书不连续硬试。"
-    notify_red "X采集0630：22 只全部 0 条（empty），未落盘。X 段降级纯雪球。疑似风控/频控，按任务书不连续硬试。"
+    frame_err "$N_TICKERS 只全部 0 条（empty），未落盘。疑似风控/频控，按任务书不连续硬试。"
+    notify_red "X采集0630：$N_TICKERS 只全部 0 条（empty），未落盘。X 段降级纯雪球。疑似风控/频控，按任务书不连续硬试。"
   else
     frame_err "采集失败 rc=$rc，未落盘。X 段降级纯雪球。"
     notify_red "X采集0630：采集失败 rc=$rc，未落盘。X 段降级纯雪球。"
@@ -117,6 +124,14 @@ val_out=$("$PYBIN" scripts/validate_x_posts.py --date "$D" --tickers "$TICKERS" 
 # ── 第 3 步：保留期清理 ──
 "$PYBIN" scripts/x_ingest.py --prune --keep-days 7 >/dev/null 2>&1 || true
 
-echo "[x_collect_daily] $D 全绿（采集+校验+清理完成）"
+# 名单降级必须显式报失败：内置名单会漏掉配置里新增的票（SPCX.US 前科），
+# 而漏采的表现是「X 0 条」——看起来像今天没舆情，实际是永远没有。
+if [ "$TICKER_SRC" = "fallback" ]; then
+  frame_err "采集名单派生失败，退回内置 $N_TICKERS 只——配置里的票可能被漏采（上次 SPCX.US 因此整只没有 X 数据）。请检查 etc/config.report.json 是否可解析。"
+  notify_red "X采集0630：采集名单派生失败，退回内置 $N_TICKERS 只，配置里的票可能漏采。请检查 etc/config.report.json。"
+  exit 14
+fi
+
+echo "[x_collect_daily] $D 全绿（采集+校验+清理完成，$N_TICKERS 只）"
 frame_ok
 exit 0
