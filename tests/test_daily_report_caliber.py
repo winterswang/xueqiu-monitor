@@ -323,3 +323,40 @@ def test_every_configured_us_stock_reaches_the_collector():
     assert "SPCX" in us, "配置应包含 SPCX.US"
     # 派生逻辑与脚本内嵌的 python 片段保持一致
     assert len(us) == len({c for c in cfg["stocks"] if c.upper().endswith(".US")})
+
+
+def test_age_label_is_timezone_independent_on_the_boundary():
+    """展示时间必须显式用 CST —— 在 120 天边界上，隐式本地时区会给出两个答案。
+
+    样本（2026-11-25 由伙伴给出）：一条 CST 2026-07-28 00:30 发的帖，报表日 11-24。
+      TZ=Asia/Shanghai → 本地日期 07-28 → 119 天 → 「3 个月前」
+      TZ=UTC           → 本地日期 07-27 → 120 天 → 「4 个月前」
+    同一个 ts，两个标签。fixture 里常用的 137 天离边界还有 17 天，所以撞不到这块。
+    """
+    import os
+    import time as _time
+    from datetime import timezone as _tz, timedelta as _td
+
+    if not hasattr(_time, "tzset"):
+        import pytest
+        pytest.skip("本平台不支持 tzset，无法切换进程时区")
+
+    cst = _tz(_td(hours=8))
+    ts = int(datetime(2026, 7, 28, 0, 30, tzinfo=cst).timestamp())
+    old_tz = os.environ.get("TZ")
+
+    try:
+        labels = {}
+        for zone in ("Asia/Shanghai", "UTC"):
+            os.environ["TZ"] = zone
+            _time.tzset()
+            labels[zone] = ad.age_label(ts, "2026-11-24")
+        assert labels["Asia/Shanghai"] == "3 个月前", labels
+        assert labels["UTC"] == labels["Asia/Shanghai"], (
+            f"宿主时区改变了展示结果：{labels}；age_label 必须显式用 CST")
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        _time.tzset()
