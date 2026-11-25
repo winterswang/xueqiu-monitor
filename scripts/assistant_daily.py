@@ -21,7 +21,7 @@ import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -43,6 +43,13 @@ MAX_POSTS = 80
 MIN_COVERAGE = 0.95
 MAX_TOKENS = 120000
 X_ID_BASE = 900000
+
+# 全系统的「日」都是 CST（与 x_sources._day_end_ts、日报日期口径一致）。
+# 涉及**展示**的时间换算（帖子多远、当天是哪天）显式用它，不要依赖宿主时区：
+# 机器换到 UTC 时，`datetime.fromtimestamp()` 会让「最早 N 个月前」整体偏一天。
+# ⚠️ 已知遗留：DB 侧的 `date(crawl_time,'unixepoch','localtime')` 仍依赖本机时区，
+#    真正统一需要单独审计，不是这一行能解决的。
+CST = timezone(timedelta(hours=8))
 
 EXTRACT_PROMPT = """你是投研助理。下面是「{name}（{code}）」在 {date} 的全部帖子（已做基础去噪）。
 
@@ -203,7 +210,7 @@ def age_label(post_ts: int, date_str: str) -> str:
         return ""
     try:
         ref = datetime.strptime(date_str, "%Y-%m-%d").date()
-        days = (ref - datetime.fromtimestamp(post_ts).date()).days
+        days = (ref - datetime.fromtimestamp(post_ts, CST).date()).days
     except (ValueError, OSError, OverflowError):
         return ""
     if days <= 0:
@@ -222,7 +229,8 @@ def published_today_count(posts: list[dict], date_str: str) -> int:
     否则读者会把 21% 的前一天帖子当今天的新闻。
     """
     try:
-        d0 = datetime.strptime(date_str, "%Y-%m-%d")
+        # 显式 CST：与 age_label / x_sources._day_end_ts 同口径，不依赖宿主时区
+        d0 = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=CST)
     except ValueError:
         return 0
     lo = int(d0.timestamp())
