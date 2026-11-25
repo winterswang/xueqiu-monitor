@@ -457,3 +457,44 @@ def test_prompt_marks_history_with_date_and_hard_constraint():
     assert "post_date_str(xp, date_str)" in src
     assert "今日无新增 X 帖" in src, "全部是历史时必须说死，否则模型会编今日叙事"
     assert "不得当作今日事件" in src
+
+
+# ── 指纹不变量（主人 2026-11-25 定稿）──────────────────────────────
+
+
+class _FailingClient:
+    """模拟 LLM 不可用：analyze_stock 会走降级路径，但仍返回完整结构。"""
+
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**kwargs):
+                raise RuntimeError("LLM 不可用")
+
+
+def test_analyze_stock_records_fingerprint_of_what_it_actually_got():
+    """指纹必须由 analyze_stock 自己算，而不是调用方算好传进来。
+
+    这是**结构性**保证：facts 里的编号是 X_ID_BASE + 本函数收到的列表下标，
+    所以缓存里记的指纹必须对应"它实际看到的那份"。若由调用方算，
+    将来有人改了分层却忘了同步指纹，缓存就会拿 A 的指纹去对 B 的事实，
+    而且**完全不报错**。
+    """
+    from src import x_sources
+
+    xp = _xp(3, 4)
+    res = ad.analyze_stock(_FailingClient(), "m", "测试", "TEST.US",
+                           [], "2026-11-24", None, xp)
+    assert res["x_fingerprint"] == x_sources.fingerprint(xp)
+
+
+def test_analyze_stock_fingerprint_tracks_the_given_list_not_global_state():
+    """换一份列表进去，指纹必须跟着变——证明它记的是"这一份"。"""
+    from src import x_sources
+
+    a = _xp(2, 2)
+    b = _xp(1, 1)
+    ra = ad.analyze_stock(_FailingClient(), "m", "T", "TEST.US", [], "2026-11-24", None, a)
+    rb = ad.analyze_stock(_FailingClient(), "m", "T", "TEST.US", [], "2026-11-24", None, b)
+    assert ra["x_fingerprint"] != rb["x_fingerprint"]
+    assert ra["x_fingerprint"] == x_sources.fingerprint(a)

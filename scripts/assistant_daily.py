@@ -451,7 +451,14 @@ def analyze_stock(client, model, name, code, posts, date_str, prior: dict | None
         facts = [{"kind": it.get("kind", "其他"), "fact": it.get("fact", ""),
                   "nums": it.get("nums") or [], "sources": [i], "rep": i} for i, it in info]
 
-    return {"facts": facts, "noise_ids": noise, **narr}
+    # 指纹在这里算，而不是在调用方算好传进来 —— 这是**结构性**保证：
+    # facts 里的编号是 X_ID_BASE + 本函数收到的列表的下标，所以缓存里记的指纹
+    # 必须是「本函数实际看到的那个列表」的指纹。放在调用方算，将来有人改分层
+    # 或换一个列表传进来，缓存就会拿着 A 的指纹去对 B 的事实，静默错配。
+    return {
+        "facts": facts, "noise_ids": noise, **narr,
+        "x_fingerprint": x_sources.fingerprint(x_posts or []),
+    }
 
 
 def sort_key(entry, tiers, code):
@@ -572,11 +579,17 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         res = analyze_stock(_get_llm_client(), model, stocks_cfg[code]["name"],
                             code, kept, date_str, prior_of(code), xp)
         res["x_count"] = len(xp)
-        res["x_fingerprint"] = x_fp
-        try:
-            cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
-        except OSError as e:
-            logger.warning(f"{code} 缓存写入失败: {e}")
+        # x_fingerprint 由 analyze_stock 自己记录（它才是"实际送进模型的那份"）。
+        # 这里只做一次对账：对不上说明有人把别的列表传进去了，宁可重算也别写脏缓存。
+        if res.get("x_fingerprint") != x_fp:
+            logger.warning(
+                f"{code}: 指纹对账不一致（analyze 收到 {res.get('x_fingerprint')} "
+                f"/ 预期 {x_fp}），本条不写缓存")
+        else:
+            try:
+                cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+            except OSError as e:
+                logger.warning(f"{code} 缓存写入失败: {e}")
         return code, len(raw), kept, res, "llm", xp, x_stats
 
     t_all = time.time()
