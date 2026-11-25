@@ -535,7 +535,8 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         # 配额：etc/config.report.json 写着 max_posts_per_stock=30，
         # report_generator 一直遵守，**这条路径此前完全没执行**——49~58 条全部
         # 塞进 prompt（2026-11-25 发现）。不是策略选择，是配置没落实。
-        # 截断用 cap_for_prompt（近期优先），与 report_generator 共用同一实现。
+        # 截断用 layer_for_prompt（近期优先 + 历史限量），与 report_generator
+        # 的分层口径一致，但那边是独立实现——改规则时两边都要动。
         # 2026-11-25 H9：近期全留、历史限量（min(5,近期数)），历史在 prompt 里
         # 带日期前缀。此前是 49 条不分层全塞进去，最老的到 2021 年。
         xp = x_sources.layer_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
@@ -547,6 +548,13 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
             )
         # 报文要报「源里有多少」，不是「送了多少」——这是两个不同的问题。
         # 分析用 xp（截断后），展示用 xp_all 统计。
+        #
+        # ⚠️ 这里的 today 用 `days_ago < 1.0`，而上面对层的 is_fresh 是 `<= 1.5`
+        #    **两个阈值不同是故意的，不要"统一"成同一个**：
+        #    - < 1.0 = 展示语义，严格按 CST 日历日，不能把昨天说成今天
+        #    - <= 1.5 = 截断分层，留半天缓冲，避免把"昨晚发的"排到"三天前热搜"之后
+        #    所以 APP 可能显示「X 17 条（今日）」而 prompt 里近期层有 18 条，
+        #    差的 1 条是昨天下午发的。详见 README「两个阈值不要合并」。
         x_stats = {
             "total": len(xp_all),
             "today": sum(1 for p in xp_all
