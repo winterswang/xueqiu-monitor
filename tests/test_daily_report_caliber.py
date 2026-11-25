@@ -237,3 +237,62 @@ def test_age_of_oldest_visible_post_is_reported():
         n, oldest = ad.snapshot_visible_stats(db_path, D, "APP.US")
         assert n == 11
         assert ad.age_label(oldest, D) == "4 个月前", ad.age_label(oldest, D)
+
+
+# ── X 配额截断（配置写了 30，assistant_daily 此前没执行）────────────────
+
+
+def _xp(n_fresh, n_hist):
+    out = [{"content": f"f{i}", "link": f"https://x/f{i}", "is_fresh": True}
+           for i in range(n_fresh)]
+    out += [{"content": f"h{i}", "link": f"https://x/h{i}", "is_fresh": False}
+            for i in range(n_hist)]
+    return out
+
+
+def test_cap_prioritizes_fresh_then_history():
+    """截断必须近期优先：直接切片会把今天的时效信号全砍掉。"""
+    from src import x_sources
+    posts = _xp(17, 32)                      # 49 条，与 APP.US 同形
+    out = x_sources.cap_for_prompt(posts, 30)
+    assert len(out) == 30
+    assert sum(1 for p in out if p["is_fresh"]) == 17, "17 条近期必须全保留"
+    assert sum(1 for p in out if not p["is_fresh"]) == 13, "再用较早的补满"
+
+
+def test_cap_when_fresh_exceeds_cap():
+    from src import x_sources
+    out = x_sources.cap_for_prompt(_xp(50, 10), 30)
+    assert len(out) == 30
+    assert all(p["is_fresh"] for p in out), "近期超出配额时不该混入较早的"
+
+
+def test_cap_noop_cases():
+    from src import x_sources
+    posts = _xp(3, 2)
+    assert x_sources.cap_for_prompt(posts, 30) == posts      # 未超配额
+    assert x_sources.cap_for_prompt(posts, 0) == posts       # 配置 0 = 不限
+    assert x_sources.cap_for_prompt(posts, None) == posts    # 配置缺失
+    assert x_sources.cap_for_prompt([], 30) == []
+
+
+def test_fingerprint_reflects_capped_list_not_full_list():
+    """指纹必须跟着「送进模型的那个列表」变。
+
+    否则：全量不变、但 cap 或截断规则变了 → 指纹不变 → 命中旧缓存 →
+    facts 里的 X_ID_BASE+i 指向另一条帖（静默错配）。
+    """
+    from src import x_sources
+    posts = _xp(17, 32)
+    fp_full = x_sources.fingerprint(posts)
+    fp_30 = x_sources.fingerprint(x_sources.cap_for_prompt(posts, 30))
+    fp_20 = x_sources.fingerprint(x_sources.cap_for_prompt(posts, 20))
+    assert len({fp_full, fp_30, fp_20}) == 3, "不同配额必须给出不同指纹"
+
+
+def test_assistant_daily_actually_applies_the_cap():
+    """静态护栏：这条路径必须真的读配置里的配额（此前完全没读）。"""
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert 'cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))' in src
+    # 分析用截断后的 xp，展示用 xp_all 的统计——两者不能混
+    assert "x_stats" in src and '"x_n": xst["total"]' in src

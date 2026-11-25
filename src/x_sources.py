@@ -368,6 +368,33 @@ def as_prompt_posts(posts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [to_post_dict(p) for p in posts]
 
 
+def cap_for_prompt(
+    posts: list[dict[str, Any]], cap: Any
+) -> list[dict[str, Any]]:
+    """按「近期优先、较早补足」把 X 帖截断到 ``cap`` 条（供 prompt 用）。
+
+    为什么不能直接取前 N 条：``clean_posts`` 的排序是「强互动在前、live
+    低互动降到末尾」，直接切片会把今天刚发的时效信号全砍掉，只留下几天前的
+    热门帖 —— 日报就变成「今日无 X 舆情」的假象。所以先取近期的，不够再用
+    较早的补满。
+
+    ⚠️ 这里的分层阈值是 ``is_fresh``（``FRESH_DAYS = 1.5`` 天），**不是**
+       报文里「X 今日」的 ``days_ago < 1.0``。两者用途不同：
+       - 截断要留一点缓冲，避免把「昨晚发的」排在「三天前的热搜」之后；
+       - 报文要严格按日历日，否则会把昨天的帖子说成今天的。
+       改任何一个之前先想清楚改的是哪一个。
+
+    两个调用方（``report_generator`` 与 ``assistant_daily``）共用本函数，
+    避免只改一条路径造成口径分叉。
+    """
+    if not posts or not isinstance(cap, int) or cap <= 0 or len(posts) <= cap:
+        return posts
+    fresh = [p for p in posts if p.get("is_fresh", True)]
+    hist = [p for p in posts if not p.get("is_fresh", True)]
+    fresh_kept = fresh[:cap]
+    return fresh_kept + hist[: max(0, cap - len(fresh_kept))]
+
+
 def fingerprint(posts: Iterable[dict[str, Any]]) -> str:
     """这一批 X 帖的**内容和顺序**指纹（取前 16 位十六进制）。
 

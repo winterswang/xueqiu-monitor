@@ -494,18 +494,34 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         # empty」，而美股在雪球中文社区当天 0 新增并不罕见（低换手标的常见），
         # 于是 X 那 54~58 条英文帖一条都没进过日报。X 与雪球是并列信息源，
         # 任一有内容就该进分析。
-        xp = []
+        xp_all = []
         if x_cfg.get("enabled", True) and x_sources.is_us(code):
             try:
-                xp = x_sources.as_prompt_posts(
+                xp_all = x_sources.as_prompt_posts(
                     x_sources.load_x_posts(x_root, date_str, code))
             except Exception as e:  # 兜底：X 读取失败不拖垮雪球那条路
                 logger.warning(f"{code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:100]}")
-                xp = []
+                xp_all = []
+        # 配额：etc/config.report.json 写着 max_posts_per_stock=30，
+        # report_generator 一直遵守，**这条路径此前完全没执行**——49~58 条全部
+        # 塞进 prompt（2026-11-25 发现）。不是策略选择，是配置没落实。
+        # 截断用 cap_for_prompt（近期优先），与 report_generator 共用同一实现。
+        xp = x_sources.cap_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
+        # 报文要报「源里有多少」，不是「送了多少」——这是两个不同的问题。
+        # 分析用 xp（截断后），展示用 xp_all 统计。
+        x_stats = {
+            "total": len(xp_all),
+            "today": sum(1 for p in xp_all
+                         if p.get("days_ago") is not None and p["days_ago"] < 1.0),
+        }
         if not kept and not xp:
-            return code, len(raw), kept, dict(EMPTY), "empty", xp
+            return code, len(raw), kept, dict(EMPTY), "empty", xp, x_stats
         cp = cache_dir / f"{code}.json"
         # 缓存有效性按**内容**判定，见 cache_is_valid()。
+        # ⚠️ 不变量：指纹的入参必须与 analyze_stock(x_posts=...) 是**同一个列表**。
+        #    facts 里的编号是 X_ID_BASE + enumerate(x_posts) 的位置，所以指纹若算在
+        #    全量（或任何别的集合）上，「全量不变但截断规则/cap 变了」会命中旧缓存，
+        #    事实就错配到别的帖上。改动这里的分层逻辑时先回来确认这一点。
         x_fp = x_sources.fingerprint(xp)
         if use_cache and cp.exists():
             try:
@@ -519,7 +535,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                     cached.setdefault(k, "")
                 cached.setdefault("anchors", [])
                 cached.setdefault("open_questions", [])
-                return code, len(raw), kept, cached, "cache", xp
+                return code, len(raw), kept, cached, "cache", xp, x_stats
             except (ValueError, AttributeError):
                 pass
         res = analyze_stock(_get_llm_client(), model, stocks_cfg[code]["name"],
@@ -530,7 +546,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
             cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
             logger.warning(f"{code} 缓存写入失败: {e}")
-        return code, len(raw), kept, res, "llm", xp
+        return code, len(raw), kept, res, "llm", xp, x_stats
 
     t_all = time.time()
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -540,7 +556,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     by_code = {d[0]: d for d in done}
 
     # 写回叙事档案（只更新本期有内容的票）
-    for code, _raw, _kept, res, _src, _xp in done:
+    for code, _raw, _kept, res, _src, _xp, _xst in done:
         if res.get("thread") or res.get("change"):
             try:
                 prev = prior_of(code) or {}
@@ -565,7 +581,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     for sector, codes in sectors.items():
         sec = []
         for code in codes:
-            _, n_raw, kept, res, _src, xp = by_code[code]
+            _, n_raw, kept, res, _src, xp, xst = by_code[code]
             by_id = {pp["id"]: pp for pp in kept}
             # 2026-11-25 (X 合并失效第二层): X 帖在 analyze_stock 里用 X_ID_BASE+i
             # 作为虚拟 id 参与抽取，facts[].rep/sources 引用的就是这些 id。
@@ -616,10 +632,9 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                         "info": info_n, "none": none_n,
                         # 2026-11-25：X 条数随行走。美股常有「雪球 0 帖、X 数十帖」，
                         # 不显示出来读者无法判断这一段的信息是否含英文源。
-                        "x_n": len(xp),
-                        # X 里的「今日」条数（days_ago < 1.0 = CST 日历日当天）。
-                        "x_today": sum(1 for p in xp
-                                       if p.get("days_ago") is not None and p["days_ago"] < 1.0),
+                        # 用 xst（源里有多少），不是 len(xp)（送了多少）——
+                        # 配额截断是 prompt 预算细节，不该让读者误判源的数据量。
+                        "x_n": xst["total"], "x_today": xst["today"],
                         # 只在「今天真的没新帖」时才算，供渲染标口径。有内容的票不算，省查询。
                         "week7": (0 if info_n else week7_count(db_path, date_str, code)),
                         "visible_n": vis_n, "visible_oldest": vis_oldest})

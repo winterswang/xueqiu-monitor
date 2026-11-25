@@ -942,14 +942,14 @@ def analyze_stock(
     # 全砍掉，只留下几天前的热门帖，日报就变成"今日无 X 舆情"的假象。
     cap = x_cfg.get("max_posts_per_stock")
     if x_posts and isinstance(cap, int) and cap > 0 and len(x_posts) > cap:
-        fresh = [p for p in x_posts if p.get("is_fresh", True)]
-        hist = [p for p in x_posts if not p.get("is_fresh", True)]
-        fresh_kept = fresh[:cap]
-        hist_kept = hist[: max(0, cap - len(fresh_kept))]
-        x_posts = fresh_kept + hist_kept
+        # 截断逻辑收在 x_sources.cap_for_prompt()，与 assistant_daily 共用一份，
+        # 免得两条路径各写一遍、改了一边忘另一边。
+        before = len(x_posts)
+        x_posts = x_sources.cap_for_prompt(x_posts, cap)
+        kept_fresh = sum(1 for p in x_posts if p.get("is_fresh", True))
         logger.info(
-            f"  {stock_code}: X 源 {len(fresh) + len(hist)} 条按配额截断到 "
-            f"{len(x_posts)} 条（当日 {len(fresh_kept)} / 历史 {len(hist_kept)}）"
+            f"  {stock_code}: X 源 {before} 条按配额截断到 {len(x_posts)} 条"
+            f"（近期 {kept_fresh} / 较早 {len(x_posts) - kept_fresh}）"
         )
 
     scope = "今日"
