@@ -22,6 +22,11 @@ from pathlib import Path
 # 输出给人看的时间统一用 CST，不跟随宿主时区（2026-11-25 D2）。
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
+# 2026-11-25：模块级 logger。此前 logger 只在一个函数内定义（约 :192），
+# 而 `_prewarm_details` 的兜底分支用了 logger —— 一旦 enrich_details 抛异常，
+# 那句"预热失败不影响 pipeline"的降级就会变成 NameError，把可降级变成崩溃。
+logger = logging.getLogger(__name__)
+
 from .config import Config
 from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import db

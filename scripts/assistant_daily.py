@@ -561,7 +561,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                          if p.get("days_ago") is not None and p["days_ago"] < 1.0),
         }
         if not kept and not xp:
-            return code, len(raw), kept, dict(EMPTY), "empty", xp, x_stats
+            return code, raw, kept, dict(EMPTY), "empty", xp, x_stats
         cp = cache_dir / f"{code}.json"
         # 缓存有效性按**内容**判定，见 cache_is_valid()。
         # ⚠️ 不变量：指纹的入参必须与 analyze_stock(x_posts=...) 是**同一个列表**。
@@ -581,7 +581,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                     cached.setdefault(k, "")
                 cached.setdefault("anchors", [])
                 cached.setdefault("open_questions", [])
-                return code, len(raw), kept, cached, "cache", xp, x_stats
+                return code, raw, kept, cached, "cache", xp, x_stats
             except (ValueError, AttributeError):
                 pass
         res = analyze_stock(_get_llm_client(), model, stocks_cfg[code]["name"],
@@ -598,7 +598,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                 cp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
             except OSError as e:
                 logger.warning(f"{code} 缓存写入失败: {e}")
-        return code, len(raw), kept, res, "llm", xp, x_stats
+        return code, raw, kept, res, "llm", xp, x_stats
 
     t_all = time.time()
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -633,7 +633,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
     for sector, codes in sectors.items():
         sec = []
         for code in codes:
-            _, n_raw, kept, res, _src, xp, xst = by_code[code]
+            _, raw, kept, res, _src, xp, xst = by_code[code]
             by_id = {pp["id"]: pp for pp in kept}
             # 2026-11-25 (X 合并失效第二层): X 帖在 analyze_stock 里用 X_ID_BASE+i
             # 作为虚拟 id 参与抽取，facts[].rep/sources 引用的就是这些 id。
@@ -665,7 +665,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
                                               -len(f.get("fact") or "")))
             none_n = len([x for x in (res.get("noise_ids") or []) if x in by_id])
             info_n = sum(len(v) for v in groups.values())
-            totals["posts"] += n_raw
+            totals["posts"] += len(raw)
             totals["info"] += info_n
             totals["none"] += none_n
             if info_n:
@@ -675,7 +675,7 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
             # 「新采到」与「当日发布」是两个口径：前者含前一天晚上发的帖
             # （实测 11-24 首见 2104 条里 447 条是 11-23 发布的）。报文里都要给。
             vis_n, vis_oldest = (0, 0) if info_n else snapshot_visible_stats(db_path, date_str, code)
-            sec.append({"code": code, "name": stocks_cfg[code]["name"], "raw": n_raw,
+            sec.append({"code": code, "name": stocks_cfg[code]["name"], "raw": len(raw),
                         "pub_today": published_today_count(raw, date_str),
                         "groups": groups, "change": res.get("change", ""),
                         "trend": res.get("trend", ""),
