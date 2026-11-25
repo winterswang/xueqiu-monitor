@@ -236,6 +236,9 @@ def git_integrity_bad(fsck_output: str) -> list[str]:
     对象（被 amend / rebase 丢下的）是正常现象，拦它会天天误报，把人训成
     「告警可以直接忽略」，那比没有告警更糟。
 
+    注意 `error: ` 不只在对象损坏时出现，ref 层异常（ref 指向意外对象等）也会
+    命中。那不是误报，同样该有人看——只是别把这条告警描述成「只查对象缺失」。
+
     抽成独立函数是为了可测：真造一次缺失对象代价高，直接喂输出更稳。
     """
     return [ln for ln in (fsck_output or "").splitlines()
@@ -268,7 +271,7 @@ def check(require_daily_report: bool = False) -> None:
             results.append({
                 "check": "git_integrity",
                 "status": FAIL,
-                "detail": f"{len(bad)} 处对象缺失/损坏（索引可能指向未写出的对象）：{bad[0][:120]}",
+                "detail": f"{len(bad)} 处仓库完整性问题（对象缺失/损坏，或 ref 指向异常）：{bad[0][:120]}",
             })
             errors.append("git_object_missing")
         else:
