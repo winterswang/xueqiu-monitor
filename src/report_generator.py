@@ -953,6 +953,18 @@ def analyze_stock(
     # 仍可能超 prompt 预算。截断顺序**当日优先**——clean_posts 的排序是
     # 「强互动在前、live 低互动降到末尾」，直接取前 N 条会把今天的时效信号
     # 全砍掉，只留下几天前的热门帖，日报就变成"今日无 X 舆情"的假象。
+    # 2026-11-26（主人口径）：时间线必须最近 N 天，旧闻一律不喂。
+    # top/min_faves 切片会带回历史高互动帖，实测 30% 在 7 天外、最老 3000+ 天。
+    win_days = x_cfg.get("keep_days", 7)
+    if x_posts:
+        _before_win = len(x_posts)
+        x_posts = x_sources.window_posts(x_posts, win_days)
+        if len(x_posts) < _before_win:
+            logger.info(
+                f"  {stock_code}: X 源丢弃 {_before_win - len(x_posts)} 条"
+                f"超出 {win_days} 天的旧帖"
+            )
+
     cap = x_cfg.get("max_posts_per_stock")
     if x_posts and isinstance(cap, int) and cap > 0 and len(x_posts) > cap:
         # 截断逻辑收在 x_sources.cap_for_prompt()，与 assistant_daily 共用一份，

@@ -390,6 +390,35 @@ def post_date_str(p: dict[str, Any], date_str: str) -> str:
 HIST_KEEP_MAX = 5
 
 
+def window_posts(
+    posts: list[dict[str, Any]], max_days: Any = None
+) -> list[dict[str, Any]]:
+    """按「最近 N 天」硬窗口过滤，超出的一律丢弃。
+
+    为什么必须有（2026-11-26 主人指出）：X 采集的 top / min_faves 切片会带回
+    **历史高互动帖**。实测 2026-11-26 当天 1112 条里有 337 条（30%）在 7 天之外，
+    最老一条 **3103 天**（8 年半）。其中一条 2022-07-16 的帖子
+    （「截至 2022 年 4 月的 12 个月内 携程 DAU 从 2600 万降至 595 万」）
+    被当成近期舆情读进了日报——**内容是真的，但它是四年前的旧闻，对今天的判断毫无意义**。
+
+    之前的「历史帖分层 + 日期前缀」只解决了「别当今日事件」，没解决
+    「旧闻本来就无关」。主人的口径更严：**时间线必须是最近 N 天**。
+
+    `days_ago is None`（时间解析失败）仍保留——宁可多留也不误删，且这类在
+    当日窗口实测为 0 条。真出问题时会在日志里表现为「无时间帖」计数。
+
+    max_days 取配置 `x_source.keep_days`（默认 7），与目录保留期同源。
+    """
+    if not posts or not isinstance(max_days, (int, float)) or max_days <= 0:
+        return posts
+    out = []
+    for p in posts:
+        d = p.get("days_ago")
+        if d is None or d <= max_days:
+            out.append(p)
+    return out
+
+
 def layer_for_prompt(
     posts: list[dict[str, Any]],
     cap: Any = None,

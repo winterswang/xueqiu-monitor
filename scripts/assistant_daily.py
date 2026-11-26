@@ -539,8 +539,17 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         # 的分层口径一致，但那边是独立实现——改规则时两边都要动。
         # 2026-11-25 H9：近期全留、历史限量（min(5,近期数)），历史在 prompt 里
         # 带日期前缀。此前是 49 条不分层全塞进去，最老的到 2021 年。
-        xp = x_sources.layer_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))
-        if len(xp) < len(xp_all):
+        # 2026-11-26（主人口径）：**时间线必须是最近 N 天**，旧闻一律不喂。
+        # top/min_faves 切片会带回历史高互动帖，实测当天 30% 在 7 天外、
+        # 最老 3103 天；其中一条 2022-07-16 的帖被当成近期舆情写进了日报。
+        # 分层+日期前缀只解决了「别当今日」，没解决「旧闻本来就无关」。
+        win_days = x_cfg.get("keep_days", 7)
+        xp_win = x_sources.window_posts(xp_all, win_days)
+        dropped = len(xp_all) - len(xp_win)
+        if dropped:
+            logger.info(f"  {code}: X 源丢弃 {dropped} 条超出 {win_days} 天的旧帖")
+        xp = x_sources.layer_for_prompt(xp_win, x_cfg.get("max_posts_per_stock"))
+        if len(xp) < len(xp_win):
             _fresh = sum(1 for p in xp if p.get("is_fresh", True))
             logger.info(
                 f"  {code}: X 源 {len(xp_all)} 条分层限量到 {len(xp)} 条"
@@ -555,9 +564,11 @@ def build(db_path, date_str, out_md: Path, out_html: Path, workers: int, use_cac
         #    - <= 1.5 = 截断分层，留半天缓冲，避免把"昨晚发的"排到"三天前热搜"之后
         #    所以 APP 可能显示「X 17 条（今日）」而 prompt 里近期层有 18 条，
         #    差的 1 条是昨天下午发的。详见 README「两个阈值不要合并」。
+        # 2026-11-26：统计口径跟着窗口走。原来报 len(xp_all) 会把已被丢弃的
+        # 旧帖算进「另 N 条历史」，读者会以为它们进了分析——那是谎报。
         x_stats = {
-            "total": len(xp_all),
-            "today": sum(1 for p in xp_all
+            "total": len(xp_win),
+            "today": sum(1 for p in xp_win
                          if p.get("days_ago") is not None and p["days_ago"] < 1.0),
         }
         if not kept and not xp:

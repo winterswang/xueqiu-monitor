@@ -293,7 +293,9 @@ def test_fingerprint_reflects_capped_list_not_full_list():
 def test_assistant_daily_actually_applies_the_cap():
     """静态护栏：这条路径必须真的读配置里的配额（此前完全没读）。"""
     src = _SCRIPT.read_text(encoding="utf-8")
-    assert 'layer_for_prompt(xp_all, x_cfg.get("max_posts_per_stock"))' in src
+    # 2026-11-26：先按「最近 N 天」硬窗口过滤，再分层限量
+    assert "window_posts(xp_all, win_days)" in src, "必须先丢弃超窗旧帖"
+    assert 'layer_for_prompt(xp_win, x_cfg.get("max_posts_per_stock"))' in src
     # 分析用截断后的 xp，展示用 xp_all 的统计——两者不能混
     assert "x_stats" in src and '"x_n": xst["total"]' in src
 
@@ -498,3 +500,45 @@ def test_analyze_stock_fingerprint_tracks_the_given_list_not_global_state():
     rb = ad.analyze_stock(_FailingClient(), "m", "T", "TEST.US", [], "2026-11-24", None, b)
     assert ra["x_fingerprint"] != rb["x_fingerprint"]
     assert ra["x_fingerprint"] == x_sources.fingerprint(a)
+
+
+# ── 时间窗：最近 N 天之外一律不喂（2026-11-26 主人口径）──────────────
+
+
+def _post(days_ago, text="内容"):
+    return {"content": text, "link": f"https://x/{days_ago}", "days_ago": days_ago,
+            "is_fresh": days_ago is not None and days_ago <= 1.5}
+
+
+def test_window_drops_old_news():
+    """8 年前的旧帖必须丢掉——内容再"像新闻"，对今天也毫无意义。
+
+    实测来源：2026-11-26 一条 2022-07-16 的帖（携程 DAU 2600万→595万）
+    被 top 切片带回，当成近期舆情读进了日报。
+    """
+    from src import x_sources
+    posts = [_post(0.2), _post(3), _post(8), _post(3103)]
+    out = x_sources.window_posts(posts, 7)
+    assert [round(p["days_ago"], 1) for p in out] == [0.2, 3.0]
+
+
+def test_window_boundary_is_inclusive():
+    from src import x_sources
+    assert len(x_sources.window_posts([_post(7.0)], 7)) == 1
+    assert len(x_sources.window_posts([_post(7.1)], 7)) == 0
+
+
+def test_window_keeps_unknown_time_fail_open():
+    """时间解析失败（days_ago=None）保留，宁可多留也不误删。
+
+    这类在当日实测为 0 条；真出问题会表现为「无时间帖」，不该让整条内容消失。
+    """
+    from src import x_sources
+    assert len(x_sources.window_posts([_post(None)], 7)) == 1
+
+
+def test_window_noop_when_unset():
+    from src import x_sources
+    posts = [_post(3000)]
+    assert x_sources.window_posts(posts, None) == posts
+    assert x_sources.window_posts(posts, 0) == posts
