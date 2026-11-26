@@ -50,7 +50,6 @@ DEFAULT_CONFIG = {
     },
     "detector": {
         "z_score_window_days": 14,
-        "z_score_threshold": 2.0,
         "tfidf_min_df": 2,
         "tfidf_max_df": 0.8,
         "tfidf_ngram_range": [1, 2],

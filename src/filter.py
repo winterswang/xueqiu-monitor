@@ -125,12 +125,6 @@ def assign_priority(alert: ChangeAlert, config: dict | None = None) -> str:
     P1: 2.0 < Z <= 3.0
     P2: Z <= 2.0
     """
-    # 两期直阈触发(20261009 P1): detector Trigger 1 的 z_score 是占位 0,
-    # 走 Z 阈值会恒 P2 → 永不推送。按 shift 自身量纲分级: |Δ|>=0.4 → P0, 否则 P1。
-    trig = (alert.detail or {}).get("trigger")
-    if trig == "two_period":
-        shift = abs((alert.detail or {}).get("shift", 0))
-        return "P0" if shift >= 0.4 else "P1"
     p0 = config.get("p0_z_threshold", P0_Z_THRESHOLD) if config else P0_Z_THRESHOLD
     p1 = config.get("p1_z_threshold", P1_Z_THRESHOLD) if config else P1_Z_THRESHOLD
     if abs(alert.z_score) > p0:
@@ -205,13 +199,6 @@ def filter_alerts(
             "short_ratio": round(short_ratio, 3),
             "total_posts": len(posts_data),
         })
-
-        # sentiment_shift: if >50% posts are noise, the sentiment calculation
-        # is unreliable → suppress
-        if alert.alert_type == "sentiment_shift" and ad_ratio > 0.5:
-            alert.filtered = 1
-            alert.filter_reason = f"情感计算不可靠：广告帖占比 {ad_ratio:.0%}"
-            continue
 
         # post_spike: if >70% posts are noise, the spike is from noise, not real content
         if alert.alert_type == "post_spike" and (ad_ratio + dup_ratio) > 0.7:

@@ -566,11 +566,14 @@ class TestFailureSignalsActuallyFire:
 
     def test_skip_lines_raise_crawl_failures(self, fake_project, monkeypatch):
         conn, tmp_path = fake_project
-        body = "[SUMMARY] stocks=6/8 success=6 failed=2\n"
+        # 2026-11-14: 扫描按日期前缀过滤(tee -a 配套), fixture 要带当天时间戳
+        body = "2026-01-15 12:00:00 [INFO] __main__: [SUMMARY] stocks=6/8 success=6 failed=2\n"
         body += "".join(
-            f"[SKIP] stock=S{i}.US status=timeout error=boom\n" for i in range(6)
+            f"2026-01-15 12:0{i} [INFO] src.crawler: [SKIP] stock=S{i}.US status=timeout error=boom\n"
+            for i in range(6)
         )
-        _write_pipeline_log(tmp_path, "pipeline.log", body + "[SUMMARY] ok\n")
+        _write_pipeline_log(tmp_path, "pipeline.log",
+                            body + "2026-01-15 12:10:00 [INFO] __main__: [SUMMARY] ok\n")
         monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
 
         report = _run_check(tmp_path)
@@ -580,8 +583,10 @@ class TestFailureSignalsActuallyFire:
 
     def test_error_lines_raise_detect_errors(self, fake_project, monkeypatch):
         conn, tmp_path = fake_project
-        body = "[ERROR] stock=X.US processing failed: database is locked\n"
-        _write_pipeline_log(tmp_path, "pipeline.log", body + "[SUMMARY] ok\n")
+        body = ("2026-01-15 12:05:00 [ERROR] src.crawler: "
+                "[ERROR] stock=X.US processing failed: database is locked\n")
+        _write_pipeline_log(tmp_path, "pipeline.log",
+                            body + "2026-01-15 12:10:00 [INFO] __main__: [SUMMARY] ok\n")
         monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
 
         report = _run_check(tmp_path)
@@ -851,3 +856,121 @@ def test_post_freshness_still_warns_on_stale_discussions(fake_project):
     checks = {c["check"]: c["status"] for c in report["checks"]}
     assert checks["post_freshness"] == "warn"
     assert report["status"] == "ok"  # 既有语义: post_freshness 只上卡片, 不计错误
+
+
+# =============================================================================
+# 2026-11-14 修复#1 配套: 批次命令 tee → tee -a 后日志跨天累积,
+# 「当日累计」扫描必须按日期前缀过滤。
+# =============================================================================
+
+
+@freeze_time(_FROZEN_NOON)
+class TestScansAreTodayScoped:
+    """tee -a 之后 pipeline*.log 不再每天截断重写。
+
+    不过滤日期的话: 昨天的事故行会被每天重数一遍(detect_errors/crawl_failures
+    永远挂在历史峰值上), 旧天的 [SUMMARY] 会掩护今天没跑完的批次。
+    """
+
+    def test_yesterdays_errors_are_not_recounted(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        body = (
+            "2026-01-14 14:01:25 [CRITICAL] __main__: xueqiu 处于插件层熔断冷却\n"
+            "2026-01-14 14:02:00 [ERROR] src.crawler: [ERROR] stock=OLD.US boom\n"
+            "2026-01-15 12:10:00 [INFO] __main__: [SUMMARY] stocks=5/5 success=5\n"
+        )
+        _write_pipeline_log(tmp_path, "pipeline-g1.log", body)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        names = {c["check"] for c in report["checks"]}
+        assert "detect_errors" not in names
+        assert "crawl_failures" not in names
+        assert report["status"] == "ok"
+
+    def test_todays_errors_still_counted(self, fake_project, monkeypatch):
+        """过滤不得矫枉过正: 今天的真故障照样要报。"""
+        conn, tmp_path = fake_project
+        body = (
+            "2026-01-14 14:02:00 [ERROR] src.crawler: [ERROR] stock=OLD.US boom\n"
+            "2026-01-15 12:05:00 [ERROR] src.crawler: [ERROR] stock=NEW.US boom\n"
+            "2026-01-15 12:10:00 [INFO] __main__: [SUMMARY] stocks=5/6 success=5\n"
+        )
+        _write_pipeline_log(tmp_path, "pipeline-g1.log", body)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["detect_errors"]["detail"].startswith("1 errors")
+        assert "detect_errors" in report["errors"]
+
+    def test_yesterdays_summary_does_not_mask_incomplete_batch(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        body = (
+            "2026-01-14 14:10:00 [INFO] __main__: [SUMMARY] stocks=5/5 success=5\n"
+            "2026-01-15 12:00:00 [INFO] src.crawler: 从 morning-brief 加载 5 只自选股\n"
+            "2026-01-15 12:01:00 [INFO] src.crawler: 爬取中\n"
+        )
+        _write_pipeline_log(tmp_path, "pipeline-g1.log", body, age_seconds=7200)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: False)
+
+        report = _run_check(tmp_path)
+        assert "no_summary" in report["errors"]
+
+
+# =============================================================================
+# 2026-11-14 修复#3: 冷却预检的 [CRITICAL] 是「战略性放弃」的已知态,
+# 不得与 pipeline_completed 对同一事件双报。
+# =============================================================================
+
+
+@freeze_time(_FROZEN_NOON)
+class TestCooldownPreflightIsKnownState:
+    """cli 冷却预检空跑会打 [CRITICAL] 且不写 [SUMMARY] —— 2026-11-14 14:25
+    的告警卡就是 detect_errors|no_summary 两项 warn 同一根因的形态。
+    降噪只摘掉 detect_errors 这一面; pipeline_completed 仍要如实反映。"""
+
+    COOLDOWN_LINE = (
+        "2026-01-15 14:01:25 [CRITICAL] __main__: "
+        "xueqiu 处于插件层熔断冷却，剩余 4865 秒"
+        " —— 本轮不发起任何请求。 不写 [SUMMARY]，交给自动补跑接手。"
+    )
+
+    def test_cooldown_critical_is_ok_item_not_detect_errors(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g1.log", self.COOLDOWN_LINE + "\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: False)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["cooldown_skip"]["status"] == "ok"
+        assert "detect_errors" not in checks
+        assert "detect_errors" not in report["errors"]
+
+    def test_pipeline_completed_still_carries_no_summary(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        _write_pipeline_log(tmp_path, "pipeline-g1.log", self.COOLDOWN_LINE + "\n")
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: False)
+
+        report = _run_check(tmp_path)
+        assert "no_summary" in report["errors"]
+        assert report["status"] == "warn"
+
+    def test_real_errors_alongside_cooldown_still_counted(self, fake_project, monkeypatch):
+        conn, tmp_path = fake_project
+        body = (self.COOLDOWN_LINE + "\n"
+                "2026-01-15 12:05:00 [ERROR] src.crawler: "
+                "[ERROR] stock=X.US boom\n")
+        _write_pipeline_log(tmp_path, "pipeline.log", body)
+        monkeypatch.setattr(health_check, "_is_pipeline_running", lambda: True)
+
+        report = _run_check(tmp_path)
+        checks = {c["check"]: c for c in report["checks"]}
+        assert checks["detect_errors"]["detail"].startswith("1 errors")
+        assert checks["cooldown_skip"]["status"] == "ok"
+
+    def test_contract_cooldown_marker_matches_cli_emission(self):
+        """防「正则与发射端漂移」: COOLDOWN_SKIP_RE 认的词必须是 cli 真的打的。"""
+        src = (SCRIPTS_DIR.parent / "src" / "cli.py").read_text(encoding="utf-8")
+        assert "熔断冷却" in src, "cli.py 冷却预检文案变了, COOLDOWN_SKIP_RE 要同步"
+        assert health_check.COOLDOWN_SKIP_RE.search(self.COOLDOWN_LINE)

@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS change_alert (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     stock_code TEXT    NOT NULL,
     alert_time INTEGER NOT NULL,
-    alert_type TEXT    NOT NULL,                       -- sentiment_shift/hot_word_surge/post_spike/new_announcement
+    alert_type TEXT    NOT NULL,                       -- post_spike/hot_word_surge/new_announcement（sentiment_shift 已 2026-11-20 下线）
     z_score    REAL    NOT NULL DEFAULT 0.0,
     magnitude  REAL    NOT NULL DEFAULT 0.0,
     detail     TEXT    NOT NULL DEFAULT '{}',          -- JSON

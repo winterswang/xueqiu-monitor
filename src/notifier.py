@@ -23,16 +23,19 @@ import os
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import ChangeAlert, PushHistory
 
 logger = logging.getLogger(__name__)
 
+# 卡片里给人看的时间统一用 CST，不跟随宿主时区（2026-11-25 D2）。
+CST = timezone(timedelta(hours=8))
+
 # ── Shared constants ──────────────────────────────────────────
 _PRIORITY_EMOJI = {"P0": "🔴", "P1": "🟡", "P2": "⚪"}
 _TYPE_LABELS = {
-    "sentiment_shift": "情感偏移",
     "post_spike": "帖子激增",
     "hot_word_surge": "热词涌现",
     "new_announcement": "新公告",
@@ -62,7 +65,6 @@ def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
     content = [
         f"Z-score: {alert.z_score:.2f}",
         f"情感均值: {key_data.get('sentiment_avg', 0):.2f}",
-        f"情感偏移: {key_data.get('sentiment_shift', 0):.2f}",
         f"幅度: {alert.magnitude:.2f}",
         f"新帖数: {key_data.get('posts_count', 0)} (变化: {key_data.get('posts_count_delta', 0):+d})",
     ]
@@ -90,7 +92,7 @@ def _format_alert_card(alert: ChangeAlert, key_data: dict) -> dict:
                 {
                     "tag": "note",
                     "elements": [
-                        {"tag": "plain_text", "content": f"触发时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(alert.alert_time))}"}
+                        {"tag": "plain_text", "content": f"触发时间: {datetime.fromtimestamp(alert.alert_time, CST).strftime('%Y-%m-%d %H:%M:%S')}"}
                     ],
                 },
             ],
@@ -177,7 +179,7 @@ def format_immediate_alert_message(alert: ChangeAlert, key_data: dict) -> str:
 
     Args:
         alert: ChangeAlert to format.
-        key_data: dict with stock_name, sentiment_avg, sentiment_shift,
+        key_data: dict with stock_name, sentiment_avg,
                   posts_count, posts_count_delta, hot_words, post_titles,
                   magnitude, priority, trigger_time.
 
@@ -196,7 +198,6 @@ def format_immediate_alert_message(alert: ChangeAlert, key_data: dict) -> str:
         "",
         f"Z-score: {alert.z_score:.2f}",
         f"情感均值: {key_data.get('sentiment_avg', 0):.2f}",
-        f"情感偏移: {key_data.get('sentiment_shift', 0):.2f}",
         f"幅度: {alert.magnitude:.2f}",
         f"新帖数: {key_data.get('posts_count', 0)} (变化: {key_data.get('posts_count_delta', 0):+d})",
     ]
@@ -506,7 +507,6 @@ def generate_daily_report(
     lines.append("|------|------|---------|------|")
 
     type_labels = {
-        "sentiment_shift": "情感偏移",
         "post_spike": "帖子激增",
         "hot_word_surge": "热词涌现",
         "new_announcement": "新公告",

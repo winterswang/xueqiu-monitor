@@ -19,6 +19,14 @@ import sys
 import time
 from pathlib import Path
 
+# 输出给人看的时间统一用 CST，不跟随宿主时区（2026-11-25 D2）。
+CST = datetime.timezone(datetime.timedelta(hours=8))
+
+# 2026-11-25：模块级 logger。此前 logger 只在一个函数内定义（约 :192），
+# 而 `_prewarm_details` 的兜底分支用了 logger —— 一旦 enrich_details 抛异常，
+# 那句"预热失败不影响 pipeline"的降级就会变成 NameError，把可降级变成崩溃。
+logger = logging.getLogger(__name__)
+
 from .config import Config
 from .opencli_budget import DEFAULT_OPENCLI_BUDGET_SECONDS, OpencliBudget
 from . import db
@@ -210,6 +218,28 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
         if not stocks:
             logger.error("白名单过滤后为空，终止")
             return {"error": "empty_whitelist", "crawled": 0, "alerts": 0}
+
+    # ── 熔断冷却预检（2026-11-13）──
+    # 插件熔断后，冷却期内**每一条**请求都会以 BROWSER_CONNECT/exitCode 69 硬失败，
+    # 而每次要白等约 45 秒（daemon 去连一个不存在的哨兵 profile）。
+    # 11-13 的 g4 就是这么废掉的：15:00:36 起跑，整批落在 14:30–15:30 的冷却窗内，
+    # 9 只标的 18 条请求全部空转，白白烧掉 27 分钟，还往失败台账塞了 18 条噪音。
+    # 这里提前判断（读状态文件，实测 0.4 ms）：冷却中就直接收工，**不写 [SUMMARY]**，
+    # 让 40 14-18 的「批次失败自动补跑」按它自己的判据（无 SUMMARY + 无进程）接手。
+    try:
+        from xueqiu_analyzer.opencli_cooldown import cooldown_remaining_seconds
+
+        _remain = cooldown_remaining_seconds()
+    except Exception:  # noqa: BLE001 —— 装不上就按原行为跑，不因为它改变抓取
+        _remain = 0
+    if _remain and _remain > 0:
+        logger.critical(
+            "xueqiu 处于插件层熔断冷却，剩余 %d 秒 —— 本轮不发起任何请求"
+            "（冷却期内的调用只会以 rc=69 空转，单条约 45 秒）。"
+            " 不写 [SUMMARY]，交给自动补跑接手。", int(_remain),
+        )
+        return {"error": "cooldown_active", "cooldown_remaining_seconds": int(_remain),
+                "crawled": 0, "failed": 0, "alerts": 0}
 
     # Crawl all stocks (parallel if concurrency > 1)
     concurrency = cfg.crawler.get("concurrency", 1)
@@ -444,36 +474,26 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             # ── 0 帖守卫 (2026-10-16): 「没抓到」≠「今天没帖、情绪转中性」 ──
             # 风控页 / 登录失效 / 超时 / 水位过滤 都产出**空结果**而非异常, 而
             # crawler 把空结果无条件写成 status="success"、sentiment_avg=0.0。
-            # 0.0 一旦进检测器, 就是拿「抓不到」去比历史(约 +0.3) → 直接推出假的
-            # 情感突变。库里有 74 条「0 帖却记 success」的快照, 其中 9 例确实触发了
-            # sentiment_shift (实测全是 P2 —— 噪声过滤器压住了等级, 但假告警本身仍错)。
-            # 两者都不产出: 0 帖也没有「讨论量激增」可言。
+            # 0.0 一旦进检测器, 就是拿「抓不到」去比历史(约 +0.3) → 凭空推出假的
+            # 情感突变(库里有 74 条「0 帖却记 success」的快照, 其中 9 例触发了
+            # 已下线的 sentiment_shift, 该检测 2026-11-20 移除)。0 帖同样没有
+            # 「讨论量激增」可言, 不产出 post_spike。
             if not detector.has_activity_signal(cr["posts_count"]):
                 logger.info(
-                    f"  {stock_code}: 0 帖 — 跳过 post_spike / sentiment_shift "
+                    f"  {stock_code}: 0 帖 — 跳过 post_spike "
                     f"(抓空不应被当成情绪信号)"
                 )
-                spike_alert = sent_alert = None
+                spike_alert = None
             else:
                 # Detect post spikes
                 spike_alert = detector.detect_post_spike(
                     cr["posts_count"], hist_stats, cfg.detector["z_score_window_days"]
                 )
-                # Detect sentiment shift (with two-period direct threshold)
-                prev_snap = db.get_previous_snapshot(db_path, stock_code, cr["crawl_time"])
-                prev_snap_sentiment = prev_snap.sentiment_avg if prev_snap else None
-                sent_alert = detector.detect_sentiment_shift(
-                    cr["sentiment_avg"], hist_stats, cfg.detector["z_score_window_days"],
-                    prev_snapshot_sentiment=prev_snap_sentiment,
-                )
             if spike_alert:
                 spike_alert.stock_code = stock_code
                 spike_alert.alert_time = now
-            if sent_alert:
-                sent_alert.stock_code = stock_code
-                sent_alert.alert_time = now
-    
-            alerts = [a for a in [spike_alert, sent_alert] if a is not None] + ann_alerts
+
+            alerts = ([spike_alert] if spike_alert else []) + ann_alerts
     
             # Compute sample std from historical sentiment means
             sentiment_values = [s.sentiment_mean for s in hist_stats if s.sentiment_mean != 0.0]
@@ -569,7 +589,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                     db.upsert_hot_word(db_path, word, now)
     
             # ── Collect supplemental data for push key_data (§2.5)
-            prev_sent_mean = hist_stats[0].sentiment_mean if hist_stats else 0.0
             prev_posts = hist_stats[0].posts_count if hist_stats else 0
             hot_words_top = sorted(curr_tfidf.items(), key=lambda x: x[1], reverse=True)[:3] if curr_tfidf else []
             post_titles_top = [p.get("title", "") for p in cr["posts_data"] if p.get("title")][:3]
@@ -577,12 +596,11 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
             stock_extra[stock_code] = {
                 "stock_name": _get_stock_name(stocks, stock_code),
                 "sentiment_avg": cr["sentiment_avg"],
-                "sentiment_shift": cr["sentiment_avg"] - prev_sent_mean,
                 "posts_count": cr["posts_count"],
                 "posts_count_delta": cr["posts_count"] - prev_posts,
                 "hot_words": [w for w, _ in hot_words_top],
                 "post_titles": post_titles_top,
-                "trigger_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+                "trigger_time": datetime.datetime.fromtimestamp(now, CST).strftime("%Y-%m-%dT%H:%M:%S"),
             }
     
             # ── Filter ──
@@ -611,6 +629,12 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
     p1_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P1"]
     p2_alerts = [a for a in all_alerts if not a.filtered and a.priority == "P2"]
 
+    # 舆情告警推送开关（notification.push_alerts，默认 True）。
+    # 关掉后 P0/P1 只落 push_history，不推飞书；P2 台账照旧。
+    # 爬取健康告警（成功率<98% / degraded）不受此开关影响——那是执行异常通道。
+    if not cfg.notification.get("push_alerts", True):
+        p0_alerts, p1_alerts = [], []
+
     pending_messages: list[str] = []
     pending_cards: list[dict] = []
 
@@ -623,7 +647,6 @@ def run_pipeline(config_path: str, dry_run: bool = False) -> dict:
                 "alert_type": alert.alert_type,
                 "z_score": alert.z_score,
                 "sentiment_avg": extra.get("sentiment_avg", 0.0),
-                "sentiment_shift": extra.get("sentiment_shift", 0.0),
                 "posts_count": extra.get("posts_count", 0),
                 "posts_count_delta": extra.get("posts_count_delta", 0),
                 "hot_words": extra.get("hot_words", []),

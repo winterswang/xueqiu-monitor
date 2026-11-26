@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -37,6 +38,10 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
+
+# 仓库根（本文件在 <root>/src/ 下）。用于把配置里的相对 root 固定到仓库上，
+# 而不是跟随调用方的 cwd —— 见 resolve_root()。
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # 诈骗/引流特征（大小写不敏感）。命中任一即丢弃整条。
 SCAM_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -85,8 +90,26 @@ def is_us(stock_code: str) -> bool:
     return (stock_code or "").upper().endswith(".US")
 
 
+def resolve_root(root: Optional[str | Path]) -> Optional[Path]:
+    """把配置里的 X 数据根目录解析成绝对路径。
+
+    配置写的是相对路径 ``data/x_posts``。历史上有两个调用方各自解析：
+    ``assistant_daily`` 用 ``PROJECT_DIR / root``（仓库内），``report_generator``
+    直接把相对路径交给 ``Path()``（= **相对进程 cwd**）。同一份配置因此能指向
+    两个不同目录：从仓库根跑测试时，"测试用的 root" 会被悄悄解析到生产
+    ``data/x_posts``，测试读到真实数据（2026-11-25 P5）。
+
+    统一到「相对路径一律相对仓库根」，调用方不再各自拼基准。
+    绝对路径原样返回，便于测试用 tmp_path 完全隔离。
+    """
+    if not root:
+        return None
+    p = Path(root)
+    return p if p.is_absolute() else _PROJECT_ROOT / p
+
+
 def posts_path(root: str | Path, date_str: str, stock_code: str) -> Path:
-    return Path(root) / date_str / f"{ticker_of(stock_code)}.json"
+    return resolve_root(root) / date_str / f"{ticker_of(stock_code)}.json"
 
 
 def load_x_posts(
@@ -343,3 +366,134 @@ def to_post_dict(p: dict[str, Any]) -> dict[str, Any]:
 def as_prompt_posts(posts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """批量转换，供 report_generator 使用。"""
     return [to_post_dict(p) for p in posts]
+
+
+def post_date_str(p: dict[str, Any], date_str: str) -> str:
+    """这条帖按 CST 日历日算出的发布日（`YYYY-MM-DD`）；时间未知返回空串。
+
+    供 prompt 里给历史帖打日期前缀——模型看到 `[2025-03-02]` 就不会把它
+    当成今天发生的事。没有这个前缀时，一条 2021 年的帖和今天的帖在文本里
+    长得一模一样（2026-11-25 H9）。
+    """
+    days_ago = p.get("days_ago")
+    end_ts = _day_end_ts(date_str)
+    if days_ago is None or not end_ts:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(end_ts, CST) - timedelta(days=float(days_ago))
+        return dt.strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+# prompt 里历史帖最多留几条（相对于 fresh 条数）。
+HIST_KEEP_MAX = 5
+
+
+def window_posts(
+    posts: list[dict[str, Any]], max_days: Any = None
+) -> list[dict[str, Any]]:
+    """按「最近 N 天」硬窗口过滤，超出的一律丢弃。
+
+    为什么必须有（2026-11-26 主人指出）：X 采集的 top / min_faves 切片会带回
+    **历史高互动帖**。实测 2026-11-26 当天 1112 条里有 337 条（30%）在 7 天之外，
+    最老一条 **3103 天**（8 年半）。其中一条 2022-07-16 的帖子
+    （「截至 2022 年 4 月的 12 个月内 携程 DAU 从 2600 万降至 595 万」）
+    被当成近期舆情读进了日报——**内容是真的，但它是四年前的旧闻，对今天的判断毫无意义**。
+
+    之前的「历史帖分层 + 日期前缀」只解决了「别当今日事件」，没解决
+    「旧闻本来就无关」。主人的口径更严：**时间线必须是最近 N 天**。
+
+    `days_ago is None`（时间解析失败）仍保留——宁可多留也不误删，且这类在
+    当日窗口实测为 0 条。真出问题时会在日志里表现为「无时间帖」计数。
+
+    max_days 取配置 `x_source.keep_days`（默认 7），与目录保留期同源。
+    """
+    if not posts or not isinstance(max_days, (int, float)) or max_days <= 0:
+        return posts
+    out = []
+    for p in posts:
+        d = p.get("days_ago")
+        if d is None or d <= max_days:
+            out.append(p)
+    return out
+
+
+def layer_for_prompt(
+    posts: list[dict[str, Any]],
+    cap: Any = None,
+    hist_max: int = HIST_KEEP_MAX,
+) -> list[dict[str, Any]]:
+    """把 X 帖分成「近期」与「历史」，历史限量后拼成最终喂给模型的那个列表。
+
+    规则（2026-11-25 评审定）：
+    - 近期（``is_fresh``）**全留**，最多到 ``cap``；
+    - 历史最多留 ``min(hist_max, len(近期))``——近期越少，历史越少；
+      近期为 0 时留 ``≤ hist_max`` 条，让它至少有背景可讲；
+    - 历史必须配日期前缀（渲染侧用 ``post_date_str``），否则模型会把
+      几年前的帖当成今日事件；
+    - 近期为 0 时渲染侧还要给一句硬约束（见 assistant_daily）。
+
+    为什么不是"删掉历史"：一条老文今天被重新传播，**传播行为本身是今日信号**，
+    删掉会丢真信号；但它内容老，必须标日期。所以是「降权 + 落日期」，不是删除。
+
+    ⚠️ 返回的列表就是喂给模型的列表，缓存指纹必须用它（位置编号 X_ID_BASE+i
+       绑定的是这个列表的下标）。
+    """
+    if not posts:
+        return posts
+    fresh = [p for p in posts if p.get("is_fresh", True)]
+    hist = [p for p in posts if not p.get("is_fresh", True)]
+    limited_cap = cap if isinstance(cap, int) and cap > 0 else None
+    if limited_cap:
+        fresh = fresh[:limited_cap]
+    keep_hist = min(hist_max, len(fresh)) if fresh else hist_max
+    if limited_cap:
+        keep_hist = min(keep_hist, max(0, limited_cap - len(fresh)))
+    return fresh + hist[:max(0, keep_hist)]
+
+
+def cap_for_prompt(
+    posts: list[dict[str, Any]], cap: Any
+) -> list[dict[str, Any]]:
+    """按「近期优先、较早补足」把 X 帖截断到 ``cap`` 条（供 prompt 用）。
+
+    为什么不能直接取前 N 条：``clean_posts`` 的排序是「强互动在前、live
+    低互动降到末尾」，直接切片会把今天刚发的时效信号全砍掉，只留下几天前的
+    热门帖 —— 日报就变成「今日无 X 舆情」的假象。所以先取近期的，不够再用
+    较早的补满。
+
+    ⚠️ 这里的分层阈值是 ``is_fresh``（``FRESH_DAYS = 1.5`` 天），**不是**
+       报文里「X 今日」的 ``days_ago < 1.0``。两者用途不同：
+       - 截断要留一点缓冲，避免把「昨晚发的」排在「三天前的热搜」之后；
+       - 报文要严格按日历日，否则会把昨天的帖子说成今天的。
+       改任何一个之前先想清楚改的是哪一个。
+
+    两个调用方（``report_generator`` 与 ``assistant_daily``）共用本函数，
+    避免只改一条路径造成口径分叉。
+    """
+    if not posts or not isinstance(cap, int) or cap <= 0 or len(posts) <= cap:
+        return posts
+    fresh = [p for p in posts if p.get("is_fresh", True)]
+    hist = [p for p in posts if not p.get("is_fresh", True)]
+    fresh_kept = fresh[:cap]
+    return fresh_kept + hist[: max(0, cap - len(fresh_kept))]
+
+
+def fingerprint(posts: Iterable[dict[str, Any]]) -> str:
+    """这一批 X 帖的**内容和顺序**指纹（取前 16 位十六进制）。
+
+    为什么不能只比条数：``assistant_daily`` 把 X 帖按位置编号
+    （``X_ID_BASE + i``）注入 prompt，LLM 回来的事实也按编号引用。
+    缓存命中时若只有条数相同、内容或顺序变了，同一编号会指向另一条帖，
+    **事实会静默错配到无关的帖上**——读者看不出来，比"帖数不对"严重得多。
+
+    所以缓存有效性必须按内容判定，不能按条数判定。
+    """
+    h = hashlib.sha256()
+    for p in posts:
+        h.update(str(p.get("link") or p.get("url") or "").encode("utf-8"))
+        h.update(b"\x00")
+        h.update(str(p.get("content") or p.get("text") or "").encode("utf-8"))
+        h.update(b"\x00\x01")
+    return h.hexdigest()[:16]

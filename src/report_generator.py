@@ -145,8 +145,17 @@ def fetch_stock_posts(
     from .crawler import _parse_post_time
 
     now = time.time()
+    # 权威时间：posts.post_ts 是入库时按**爬取时刻**解析的，不随时间漂移。
+    # 只对着相对时间串（"昨天 10:20"）按 now 重解析会漂：11-24 抓的帖子
+    # 在 11-25 跑日报时会算成 11-24 发布，凭空多出一条"当日帖"
+    # （2026-11-25 实测 UBER.US 当日 0 帖 → 被算成 1 帖）。
+    def _key(p: dict) -> str:
+        return (p.get("post_id") or "").strip() or (p.get("link") or "").strip()
+
+    ts_map = db.fetch_post_ts_map(db_path, stock_code, [_key(p) for p in posts])
 
     filtered = []
+    ts_missing = 0
     for p in posts:
         title = (p.get("title") or "")[:200]
         content = p.get("content") or ""
@@ -163,7 +172,14 @@ def fetch_stock_posts(
         # Fail-open: unparseable time (ts == 0) is kept, so missing
         # time data never blanks out a stock's entire feed.
         post_time_str = p.get("time", "")
-        post_ts = _parse_post_time(post_time_str, now)
+        auth_ts = ts_map.get(_key(p))
+        if auth_ts:
+            post_ts = auth_ts
+        else:
+            # 拿不到权威时间才退回文本解析 —— 这条路仍可能随解析时刻漂移。
+            # 别让它静默发生：全库 post_ts=0 有 501 行（0.24%）。
+            post_ts = _parse_post_time(post_time_str, now)
+            ts_missing += 1
         if post_ts > 0 and not (window_start <= post_ts < day_end):
             continue
         filtered.append(
@@ -185,6 +201,12 @@ def fetch_stock_posts(
     # instead of burying them behind a wall of zero-engagement posts
     # (v0.7.5, note lever 2 - the "dan bin" miss was caused by reading
     # posts in pure time order). Unknown-time posts (ts=0) sink to the end.
+    if ts_missing:
+        # 可观测性：兜底走了多少条 —— 这些帖的时间是按**当前时刻**重解析的
+        logger.info(
+            f"  {stock_code}: {ts_missing}/{len(posts)} 条帖无权威 post_ts，"
+            f"退回文本解析（时间可能受解析时刻影响）"
+        )
     filtered.sort(key=lambda p: p["_ts"], reverse=True)
     filtered.sort(
         key=lambda p: p["like_count"]
@@ -257,7 +279,7 @@ def fetch_stock_alerts(
         rows = conn.execute(
             """SELECT alert_type, priority, z_score, detail
                 FROM change_alert
-                WHERE stock_code=? AND date(alert_time,'unixepoch','localtime')=?
+                WHERE stock_code=? AND date(alert_time,'unixepoch', '+8 hours')=?
                 AND alert_type != 'new_announcement'
                  AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
@@ -280,7 +302,6 @@ def fetch_stock_alerts(
 _ALERT_LABELS = {
     "post_spike": "讨论量激增",
     "hot_word_surge": "热词飙升",
-    "sentiment_shift": "情感突变",
     "new_announcement": "新公告",
 }
 
@@ -309,11 +330,6 @@ def _alert_summary(alert: dict) -> str:
             f"讨论量激增 ({d.get('curr_count')} 帖 vs 历史均值 "
             f"{num(d.get('historical_mean'), '{:.1f}')})"
         )
-    if t == "sentiment_shift":
-        return (
-            f"情感突变 (今日 {num(d.get('curr_sentiment'), '{:+.2f}')} vs "
-            f"上期 {num(d.get('prev_snapshot_sentiment'), '{:+.2f}')})"
-        )
     # signal 是检测器写进 detail 的人读文案; 有就用它, 比标签更具体
     return d.get("title") or d.get("signal") or _ALERT_LABELS.get(t, t)
 
@@ -334,7 +350,7 @@ def fetch_stock_announcements(
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
                WHERE a.stock_code=?
-                 AND date(s.crawl_time,'unixepoch','localtime')=?
+                 AND date(s.crawl_time,'unixepoch', '+8 hours')=?
                ORDER BY s.crawl_time DESC LIMIT ?""",
             (stock_code, date_str, limit),
         ).fetchall()
@@ -362,7 +378,7 @@ def fetch_hot_words(
         rows = conn.execute(
             """SELECT word, printf('%.2f', tfidf_score) score
                FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 10""",
             (stock_code, date_str),
         ).fetchall()
@@ -393,7 +409,7 @@ def fetch_hot_word_streaks(
         # Today's hot words
         today_rows = conn.execute(
             """SELECT word, tfidf_score FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 15""",
             (stock_code, date_str),
         ).fetchall()
@@ -402,7 +418,7 @@ def fetch_hot_word_streaks(
 
         # History: which words appeared on which days
         hist_rows = conn.execute(
-            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') as day
+            """SELECT DISTINCT word, date(event_time,'unixepoch', '+8 hours') as day
                FROM hot_word_event
                WHERE stock_code=? AND event_time >= ? AND event_time < ?""",
             (stock_code, start_ts, end_ts),
@@ -453,7 +469,7 @@ def fetch_yesterday_summary(
         # Yesterday hot words (top 5)
         yest_hw = conn.execute(
             """SELECT word FROM hot_word_event
-               WHERE stock_code=? AND date(event_time,'unixepoch','localtime')=?
+               WHERE stock_code=? AND date(event_time,'unixepoch', '+8 hours')=?
                ORDER BY tfidf_score DESC LIMIT 5""",
             (stock_code, yesterday_str),
         ).fetchall()
@@ -933,6 +949,35 @@ def analyze_stock(
         except Exception as e:  # 兜底：清洗/解析问题绝不拖垮日报
             logger.warning(f"  {stock_code}: X 源读取异常(忽略): {type(e).__name__}: {str(e)[:120]}")
             x_posts = []
+    # 配额上限（2026-11-10）：采集侧频控只保证每切片 ≤25 条，三切片叠加后
+    # 仍可能超 prompt 预算。截断顺序**当日优先**——clean_posts 的排序是
+    # 「强互动在前、live 低互动降到末尾」，直接取前 N 条会把今天的时效信号
+    # 全砍掉，只留下几天前的热门帖，日报就变成"今日无 X 舆情"的假象。
+    # 2026-11-26（主人口径）：时间线必须最近 N 天，旧闻一律不喂。
+    # top/min_faves 切片会带回历史高互动帖，实测 30% 在 7 天外、最老 3000+ 天。
+    win_days = x_cfg.get("keep_days", 7)
+    if x_posts:
+        _before_win = len(x_posts)
+        x_posts = x_sources.window_posts(x_posts, win_days)
+        if len(x_posts) < _before_win:
+            logger.info(
+                f"  {stock_code}: X 源丢弃 {_before_win - len(x_posts)} 条"
+                f"超出 {win_days} 天的旧帖"
+            )
+
+    cap = x_cfg.get("max_posts_per_stock")
+    if x_posts and isinstance(cap, int) and cap > 0 and len(x_posts) > cap:
+        # 截断逻辑收在 x_sources.cap_for_prompt()，与 assistant_daily 共用一份，
+        # 免得两条路径各写一遍、改了一边忘另一边。
+        before = len(x_posts)
+        x_posts = x_sources.cap_for_prompt(x_posts, cap)
+        kept_fresh = sum(1 for p in x_posts if p.get("is_fresh", True))
+        # 日志用 fresh≤1.5d 的说法，不要写成「今日」——报文里的「今日」是 <1.0，
+        # 两个阈值职责不同（见 README「两个阈值不要合并」）。
+        logger.info(
+            f"  {stock_code}: X 源 {before} 条按配额截断到 {len(x_posts)} 条"
+            f"（fresh≤1.5d: {kept_fresh} / 其余: {len(x_posts) - kept_fresh}）"
+        )
 
     scope = "今日"
     if not posts:
@@ -1295,7 +1340,7 @@ def fetch_day_alerts(db_path: str, date_str: str) -> list[dict]:
         rows = conn.execute(
             """SELECT stock_code, alert_type, priority, z_score, detail
                 FROM change_alert
-                WHERE date(alert_time,'unixepoch','localtime')=? AND priority IN ('P0','P1')
+                WHERE date(alert_time,'unixepoch', '+8 hours')=? AND priority IN ('P0','P1')
                  AND alert_type NOT LIKE 'options_%'
                  AND COALESCE(filtered,0)=0
                 ORDER BY z_score DESC LIMIT 20""",
@@ -1341,7 +1386,7 @@ def _build_highlights_section(
         ann_rows = conn.execute(
             """SELECT a.stock_code, a.ann_title FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
-               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+               WHERE date(s.crawl_time,'unixepoch', '+8 hours')=?""",
             (date_str,),
         ).fetchall()
     finally:
@@ -1406,12 +1451,12 @@ def _build_mainlines_section(
         today_rows = conn.execute(
             """SELECT word, stock_code, MAX(tfidf_score) tf
                FROM hot_word_event
-               WHERE date(event_time,'unixepoch','localtime')=?
+               WHERE date(event_time,'unixepoch', '+8 hours')=?
                GROUP BY word, stock_code ORDER BY tf DESC LIMIT 400""",
             (date_str,),
         ).fetchall()
         hist_rows = conn.execute(
-            """SELECT DISTINCT word, date(event_time,'unixepoch','localtime') day
+            """SELECT DISTINCT word, date(event_time,'unixepoch', '+8 hours') day
                FROM hot_word_event WHERE event_time >= ? AND event_time < ?""",
             (start_ts, end_ts),
         ).fetchall()
@@ -1553,7 +1598,7 @@ def enrich_details(
             """SELECT a.id, a.ann_title, a.ann_link, a.ann_detail, a.stock_code
                FROM announcements a
                JOIN crawl_snapshots s ON a.snapshot_id = s.id
-               WHERE date(s.crawl_time,'unixepoch','localtime')=?""",
+               WHERE date(s.crawl_time,'unixepoch', '+8 hours')=?""",
             (date_str,),
         ).fetchall()
     finally:

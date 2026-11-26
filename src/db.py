@@ -10,7 +10,7 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import (
@@ -21,12 +21,15 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# 日桶的时区基准。整系统的「日」都是 CST（见 README 口径定义）。
+CST = timezone(timedelta(hours=8))
+
 
 def local_day_start(now: float | None = None) -> int:
     """本地自然日的起点（本地午夜的 Unix 秒）。
 
     统计口径统一用**本地日**：日报的昨日区间（`report_generator`）与
-    `date(x,'unixepoch','localtime')` 这类查询都是本地日。而原先有三处用
+    `date(x,'unixepoch', '+8 hours')` 这类查询都是本地日。而原先有三处用
     UTC 桶（`int(time.time()) // 86400 * 86400`）—— 本模块的 `get_today_alerts`
     与 `get_historical_new_announcement_counts`，以及 `cli.py` 给
     `SentimentStat.stat_date` 算日键那一处 —— 在本地 00:00–08:00（北京时区）
@@ -34,7 +37,9 @@ def local_day_start(now: float | None = None) -> int:
 
     三处统一调用本函数，不要再各自写 `// 86400 * 86400`。
     """
-    dt = datetime.fromtimestamp(time.time() if now is None else now)
+    # 显式 CST：SQL 侧的日桶已经统一成 date(...,'+8 hours')，这里若继续跟随
+    # 宿主时区，换机器后 Python 日桶与 SQL 日桶会错开一格。
+    dt = datetime.fromtimestamp(time.time() if now is None else now, CST)
     return int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
 
@@ -464,7 +469,7 @@ def fetch_day_posts_union(
     """
     q = (
         "SELECT stock_code, posts_data FROM crawl_snapshots "
-        "WHERE date(crawl_time,'unixepoch','localtime')=? "
+        "WHERE date(crawl_time,'unixepoch', '+8 hours')=? "
     )
     params: list = [date_str]
     if stock_code:
@@ -494,6 +499,43 @@ def fetch_day_posts_union(
                     keys.add(key)
                 bucket.append(p)
     return result
+
+
+def fetch_post_ts_map(
+    db_path: str, stock_code: str, keys: list[str]
+) -> dict[str, int]:
+    """按 dedup_key（post_id→link 兜底）取**权威发布时间戳** ``posts.post_ts``。
+
+    为什么需要它
+    ------------
+    ``crawl_snapshots.posts_data`` 是原始抓取副本，只有相对时间串（"3小时前"
+    "昨天 10:20"）。按**读取时刻**重新解析会随时间漂移：11-24 18:00 抓到的
+    "昨天 10:20" 指 11-23，11-25 19:00 再解析就变成 11-24 —— 一条旧帖凭空
+    出现在"当日"里（2026-11-25 实测 UBER.US 因此多出 1 条当日帖，与
+    ``posts.post_ts`` 口径不符）。
+
+    ``posts`` 表在**入库时**用爬取时刻解析并落库，所以 post_ts 是不漂的权威值。
+    调用方应优先用它，缺失（或解析失败记为 0）时才退回文本解析。
+
+    返回 {dedup_key: post_ts}。分块查询，避开 SQLite 变量上限。
+    """
+    keys = [k for k in dict.fromkeys(keys) if k]
+    if not keys:
+        return {}
+    out: dict[str, int] = {}
+    chunk = 500
+    with _connect(db_path) as conn:
+        for i in range(0, len(keys), chunk):
+            part = keys[i:i + chunk]
+            rows = conn.execute(
+                "SELECT dedup_key, post_ts FROM posts WHERE stock_code=? "
+                "AND dedup_key IN (%s)" % ",".join("?" * len(part)),
+                (stock_code, *part),
+            ).fetchall()
+            for row in rows:
+                if row["dedup_key"]:
+                    out[row["dedup_key"]] = int(row["post_ts"] or 0)
+    return out
 
 
 # ════════════════════════════════════════════════════════
@@ -906,7 +948,7 @@ def get_historical_new_announcement_counts(
     Returns list of daily counts (one value per day with alerts) for
     computing Z-score on new announcement volume.
 
-    **按本地自然日分桶**（`date(...,'unixepoch','localtime')`，与本模块 :450 的
+    **按本地自然日分桶**（`date(...,'unixepoch', '+8 hours')`，与本模块 :450 的
     惯例一致）。原先按 UTC 桶 `alert_time / 86400` 分组，日界与本地日错开 8 小时，
     每天一个的计数会被劈成两天。见 issue #77。
     """
@@ -916,7 +958,7 @@ def get_historical_new_announcement_counts(
             """SELECT COUNT(*) as cnt FROM change_alert
                WHERE stock_code=? AND alert_type='new_announcement'
                AND alert_time >= ?
-               GROUP BY date(alert_time,'unixepoch','localtime')""",
+               GROUP BY date(alert_time,'unixepoch', '+8 hours')""",
             (stock_code, cutoff)
         ).fetchall()
         return [float(r["cnt"]) for r in rows]

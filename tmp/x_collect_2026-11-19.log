@@ -1,0 +1,273 @@
+10:13:55 opencli 登录态: True (paradox0504)
+10:13:55   PDD/top: opencli twitter search '$PDD' --product top
+10:14:01   → 20 条（无正文跳过 0）
+10:14:08   PDD/min_faves: opencli twitter search '$PDD min_faves:100' --product top
+10:14:11   → 20 条（无正文跳过 0）
+10:14:17   PDD/live: opencli twitter search '$PDD' --product live
+10:14:21   → 20 条（无正文跳过 0）
+10:14:21 PDD: 三切片共 60 条
+10:14:30   NVDA/top: opencli twitter search '$NVDA' --product top
+10:14:36   → 20 条（无正文跳过 0）
+10:14:41   NVDA/min_faves: opencli twitter search '$NVDA min_faves:100' --product top
+10:14:46   → 20 条（无正文跳过 0）
+10:14:53   NVDA/live: opencli twitter search '$NVDA' --product live
+10:14:57   → 20 条（无正文跳过 0）
+10:14:57 NVDA: 三切片共 60 条
+10:15:02   TSM/top: opencli twitter search '$TSM' --product top
+10:15:06   → 20 条（无正文跳过 0）
+10:15:12   TSM/min_faves: opencli twitter search '$TSM min_faves:100' --product top
+10:15:17   → 20 条（无正文跳过 0）
+10:15:22   TSM/live: opencli twitter search '$TSM' --product live
+10:15:26   → 20 条（无正文跳过 0）
+10:15:26 TSM: 三切片共 60 条
+10:15:32   BABA/top: opencli twitter search '$BABA' --product top
+10:15:35   → 20 条（无正文跳过 0）
+10:15:42   BABA/min_faves: opencli twitter search '$BABA min_faves:100' --product top
+10:15:46   → 20 条（无正文跳过 0）
+10:15:52   BABA/live: opencli twitter search '$BABA' --product live
+10:15:56   → 20 条（无正文跳过 0）
+10:15:56 BABA: 三切片共 60 条
+10:16:04   GOOGL/top: opencli twitter search '$GOOGL' --product top
+10:16:14   → 20 条（无正文跳过 0）
+10:16:20   GOOGL/min_faves: opencli twitter search '$GOOGL min_faves:100' --product top
+10:16:24   → 20 条（无正文跳过 0）
+10:16:31   GOOGL/live: opencli twitter search '$GOOGL' --product live
+10:16:34   → 20 条（无正文跳过 0）
+10:16:34 GOOGL: 三切片共 60 条
+10:16:43   TSLA/top: opencli twitter search '$TSLA' --product top
+10:16:47   → 20 条（无正文跳过 0）
+10:16:54   TSLA/min_faves: opencli twitter search '$TSLA min_faves:100' --product top
+10:16:58   → 20 条（无正文跳过 0）
+10:17:04   TSLA/live: opencli twitter search '$TSLA' --product live
+10:17:08   → 20 条（无正文跳过 0）
+10:17:08 TSLA: 三切片共 60 条
+10:17:15   UBER/top: opencli twitter search '$UBER' --product top
+10:17:19   → 20 条（无正文跳过 0）
+10:17:26   UBER/min_faves: opencli twitter search '$UBER min_faves:100' --product top
+10:17:31   → 20 条（无正文跳过 0）
+10:17:37   UBER/live: opencli twitter search '$UBER' --product live
+10:17:41   → 20 条（无正文跳过 0）
+10:17:41 UBER: 三切片共 60 条
+10:17:49   SKHY/top: opencli twitter search '$SKHY' --product top
+10:17:54   → 20 条（无正文跳过 0）
+10:18:00   SKHY/min_faves: opencli twitter search '$SKHY min_faves:100' --product top
+10:18:05   → 20 条（无正文跳过 0）
+10:18:10   SKHY/live: opencli twitter search '$SKHY' --product live
+10:18:14   → 20 条（无正文跳过 0）
+10:18:14 SKHY: 三切片共 60 条
+10:18:22   META/top: opencli twitter search '$META' --product top
+10:18:27   → 20 条（无正文跳过 0）
+10:18:32   META/min_faves: opencli twitter search '$META min_faves:100' --product top
+10:18:37   → 20 条（无正文跳过 0）
+10:18:41   META/live: opencli twitter search '$META' --product live
+10:18:46   → 20 条（无正文跳过 0）
+10:18:46 META: 三切片共 60 条
+10:18:52   CRWV/top: opencli twitter search '$CRWV' --product top
+10:18:57   → 20 条（无正文跳过 0）
+10:19:02   CRWV/min_faves: opencli twitter search '$CRWV min_faves:100' --product top
+10:19:07   → 20 条（无正文跳过 0）
+10:19:12   CRWV/live: opencli twitter search '$CRWV' --product live
+10:19:16   → 20 条（无正文跳过 0）
+10:19:16 CRWV: 三切片共 60 条
+10:19:24   CBRS/top: opencli twitter search '$CBRS' --product top
+10:19:29   → 20 条（无正文跳过 0）
+10:19:35   CBRS/min_faves: opencli twitter search '$CBRS min_faves:100' --product top
+10:19:41   → 20 条（无正文跳过 0）
+10:19:47   CBRS/live: opencli twitter search '$CBRS' --product live
+10:19:50   → 20 条（无正文跳过 0）
+10:19:50 CBRS: 三切片共 60 条
+10:19:58   ASML/top: opencli twitter search '$ASML' --product top
+10:20:02   → 20 条（无正文跳过 0）
+10:20:09   ASML/min_faves: opencli twitter search '$ASML min_faves:100' --product top
+10:20:13   → 20 条（无正文跳过 0）
+10:20:18   ASML/live: opencli twitter search '$ASML' --product live
+10:20:22   → 20 条（无正文跳过 0）
+10:20:22 ASML: 三切片共 60 条
+10:20:27   TCOM/top: opencli twitter search '$TCOM' --product top
+10:20:31   → 20 条（无正文跳过 0）
+10:20:36   TCOM/min_faves: opencli twitter search '$TCOM min_faves:100' --product top
+10:20:49   → 20 条（无正文跳过 0）
+10:20:53   TCOM/live: opencli twitter search '$TCOM' --product live
+10:20:58   → 20 条（无正文跳过 0）
+10:20:58 TCOM: 三切片共 60 条
+10:21:06   APP/top: opencli twitter search '$APP' --product top
+10:21:12   → 20 条（无正文跳过 0）
+10:21:17   APP/min_faves: opencli twitter search '$APP min_faves:100' --product top
+10:21:21   → 20 条（无正文跳过 0）
+10:21:26   APP/live: opencli twitter search '$APP' --product live
+10:21:34   → 20 条（无正文跳过 0）
+10:21:34 APP: 三切片共 60 条
+10:21:41   NVO/top: opencli twitter search '$NVO' --product top
+10:21:46   → 20 条（无正文跳过 0）
+10:21:51   NVO/min_faves: opencli twitter search '$NVO min_faves:100' --product top
+10:21:55   → 20 条（无正文跳过 0）
+10:22:00   NVO/live: opencli twitter search '$NVO' --product live
+10:22:05   → 20 条（无正文跳过 0）
+10:22:05 NVO: 三切片共 60 条
+10:22:13   DIS/top: opencli twitter search '$DIS' --product top
+10:22:21   → 20 条（无正文跳过 0）
+10:22:26   DIS/min_faves: opencli twitter search '$DIS min_faves:100' --product top
+10:22:31   → 20 条（无正文跳过 0）
+10:22:37   DIS/live: opencli twitter search '$DIS' --product live
+10:22:41   → 20 条（无正文跳过 0）
+10:22:41 DIS: 三切片共 60 条
+10:22:46   TEM/top: opencli twitter search '$TEM' --product top
+10:22:50   → 20 条（无正文跳过 0）
+10:22:55   TEM/min_faves: opencli twitter search '$TEM min_faves:100' --product top
+10:23:00   → 20 条（无正文跳过 0）
+10:23:07   TEM/live: opencli twitter search '$TEM' --product live
+10:23:13   → 20 条（无正文跳过 0）
+10:23:13 TEM: 三切片共 60 条
+10:23:19   AMD/top: opencli twitter search '$AMD' --product top
+10:23:24   → 20 条（无正文跳过 0）
+10:23:30   AMD/min_faves: opencli twitter search '$AMD min_faves:100' --product top
+10:23:34   → 20 条（无正文跳过 0）
+10:23:40   AMD/live: opencli twitter search '$AMD' --product live
+10:23:43   → 20 条（无正文跳过 0）
+10:23:43 AMD: 三切片共 60 条
+10:23:48   BRK.B/top: opencli twitter search '$BRK.B' --product top
+10:23:51   → 20 条（无正文跳过 0）
+10:23:58   BRK.B/min_faves: opencli twitter search '$BRK.B min_faves:100' --product top
+10:24:02   → 20 条（无正文跳过 0）
+10:24:08   BRK.B/live: opencli twitter search '$BRK.B' --product live
+10:24:19   → 20 条（无正文跳过 0）
+10:24:19 BRK.B: 三切片共 60 条
+10:24:26   AAPL/top: opencli twitter search '$AAPL' --product top
+10:24:29   → 20 条（无正文跳过 0）
+10:24:36   AAPL/min_faves: opencli twitter search '$AAPL min_faves:100' --product top
+10:24:39   → 20 条（无正文跳过 0）
+10:24:44   AAPL/live: opencli twitter search '$AAPL' --product live
+10:24:47   → 20 条（无正文跳过 0）
+10:24:47 AAPL: 三切片共 60 条
+10:24:54   AMZN/top: opencli twitter search '$AMZN' --product top
+10:24:58   → 20 条（无正文跳过 0）
+10:25:04   AMZN/min_faves: opencli twitter search '$AMZN min_faves:100' --product top
+10:25:08   → 20 条（无正文跳过 0）
+10:25:13   AMZN/live: opencli twitter search '$AMZN' --product live
+10:25:16   → 20 条（无正文跳过 0）
+10:25:16 AMZN: 三切片共 60 条
+10:25:22   BEKE/top: opencli twitter search '$BEKE' --product top
+10:25:26   → 20 条（无正文跳过 0）
+10:25:31   BEKE/min_faves: opencli twitter search '$BEKE min_faves:100' --product top
+10:25:34   → 20 条（无正文跳过 0）
+10:25:41   BEKE/live: opencli twitter search '$BEKE' --product live
+10:25:44   → 20 条（无正文跳过 0）
+10:25:44 BEKE: 三切片共 60 条
+10:25:52 PDD 2026-11-19: 58 条（跨切片去重 2） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 NVDA 2026-11-19: 50 条（跨切片去重 10） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 TSM 2026-11-19: 56 条（跨切片去重 4） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 BABA 2026-11-19: 57 条（跨切片去重 3） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 GOOGL 2026-11-19: 53 条（跨切片去重 7） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 TSLA 2026-11-19: 52 条（跨切片去重 8） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 UBER 2026-11-19: 52 条（跨切片去重 8） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 SKHY 2026-11-19: 57 条（跨切片去重 3） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 META 2026-11-19: 56 条（跨切片去重 4） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 CRWV 2026-11-19: 53 条（跨切片去重 7） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 CBRS 2026-11-19: 55 条（跨切片去重 5） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 ASML 2026-11-19: 57 条（跨切片去重 3） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 TCOM 2026-11-19: 55 条（跨切片去重 5） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 APP 2026-11-19: 57 条（跨切片去重 3） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 NVO 2026-11-19: 59 条（跨切片去重 1） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 DIS 2026-11-19: 56 条（跨切片去重 4） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 TEM 2026-11-19: 60 条（跨切片去重 0） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 AMD 2026-11-19: 54 条（跨切片去重 6） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 BRK.B 2026-11-19: 56 条（跨切片去重 4） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 AAPL 2026-11-19: 54 条（跨切片去重 6） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 AMZN 2026-11-19: 56 条（跨切片去重 4） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+10:25:52 BEKE 2026-11-19: 57 条（跨切片去重 3） 切片={'top': 20, 'min_faves': 20, 'live': 20} status=ok
+{
+  "date": "2026-11-19",
+  "raw_dir": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v",
+  "login_ok": true,
+  "results": {
+    "PDD": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/PDD.raw.json",
+      "posts": 60
+    },
+    "NVDA": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/NVDA.raw.json",
+      "posts": 60
+    },
+    "TSM": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/TSM.raw.json",
+      "posts": 60
+    },
+    "BABA": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/BABA.raw.json",
+      "posts": 60
+    },
+    "GOOGL": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/GOOGL.raw.json",
+      "posts": 60
+    },
+    "TSLA": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/TSLA.raw.json",
+      "posts": 60
+    },
+    "UBER": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/UBER.raw.json",
+      "posts": 60
+    },
+    "SKHY": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/SKHY.raw.json",
+      "posts": 60
+    },
+    "META": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/META.raw.json",
+      "posts": 60
+    },
+    "CRWV": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/CRWV.raw.json",
+      "posts": 60
+    },
+    "CBRS": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/CBRS.raw.json",
+      "posts": 60
+    },
+    "ASML": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/ASML.raw.json",
+      "posts": 60
+    },
+    "TCOM": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/TCOM.raw.json",
+      "posts": 60
+    },
+    "APP": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/APP.raw.json",
+      "posts": 60
+    },
+    "NVO": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/NVO.raw.json",
+      "posts": 60
+    },
+    "DIS": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/DIS.raw.json",
+      "posts": 60
+    },
+    "TEM": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/TEM.raw.json",
+      "posts": 60
+    },
+    "AMD": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/AMD.raw.json",
+      "posts": 60
+    },
+    "BRK.B": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/BRK.B.raw.json",
+      "posts": 60
+    },
+    "AAPL": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/AAPL.raw.json",
+      "posts": 60
+    },
+    "AMZN": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/AMZN.raw.json",
+      "posts": 60
+    },
+    "BEKE": {
+      "raw": "/var/folders/8c/5rqg2n490dx2cw_j7xbfbd6w0000gn/T/xraw-82qjs3_v/BEKE.raw.json",
+      "posts": 60
+    }
+  }
+}
+EXIT_CODE=0

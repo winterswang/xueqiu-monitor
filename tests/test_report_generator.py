@@ -764,13 +764,6 @@ class TestAlertSummary:
         })
         assert "31" in out and "4.9" in out
 
-    def test_sentiment_shift_carries_both_sides(self):
-        out = rg._alert_summary({
-            "type": "sentiment_shift",
-            "detail": {"curr_sentiment": -0.35, "prev_snapshot_sentiment": 0.4},
-        })
-        assert "-0.35" in out and "+0.40" in out
-
     def test_announcement_uses_title(self):
         out = rg._alert_summary({
             "type": "new_announcement", "detail": {"title": "完成配售新H股"},
@@ -786,9 +779,13 @@ class TestNoDataStock:
     """0 帖股票必须进"平稳股"紧凑行, 不能占一个"有增量"小节."""
 
     def test_zero_post_stock_is_compact_flat(self, tmp_db):
+        # 显式关掉 X 源：这个用例测的是「雪球 0 帖 → 紧凑行」。
+        # 不关的话 config 里没有 x_source 块，会退到默认 root=data/x_posts，
+        # 读到仓库里真实的 TSLA X 数据（11-25 实测）→ 被判 DEEP 调用 LLM，
+        # 用例就变成了在测「生产 X 数据是否存在」（2026-11-25 P5）。
         res = rg.analyze_stock(
             "TSLA.US", "特斯拉", str(tmp_db.path), tmp_db.date_str,
-            {"llm": {"min_post_length": 30}},
+            {"llm": {"min_post_length": 30}, "x_source": {"enabled": False}},
         )
         assert res["tier"] == rg.TIER_FLAT
         assert res["analyzed"] is False
@@ -798,9 +795,10 @@ class TestNoDataStock:
         assert body.strip().startswith("（无新增量）")
 
     def test_compact_row_uses_the_marker(self, tmp_db):
+        # 同上：关掉 X 源，避免读到生产 data/x_posts（2026-11-25 P5）。
         res = rg.analyze_stock(
             "TSLA.US", "特斯拉", str(tmp_db.path), tmp_db.date_str,
-            {"llm": {"min_post_length": 30}},
+            {"llm": {"min_post_length": 30}, "x_source": {"enabled": False}},
         )
         body = res["section"].split("\n\n", 2)[2]
         first_line = body.strip().splitlines()[0].strip()
