@@ -49,7 +49,7 @@ def _x_root(tmp_path: Path, ticker: str, today: int, hist: int) -> Path:
             "author": "@trader",
             "text": f"{ticker} 历史第 {i:02d} 条，内容同样足够长以通过最短长度过滤。",
             "lang": "en", "slice": "top",
-            "created_at_utc": "2026-07-10T02:00:00Z",
+            "created_at_utc": "2026-11-21T02:00:00Z",  # 3 天前：窗口内、非近期
             "metrics": {"like": 5, "reply": 1, "repost": 1},
         })
     (d / f"{ticker}.json").write_text(
@@ -101,3 +101,28 @@ def test_missing_x_file_does_not_break_export(tmp_path):
     rows = ec.fetch_x_posts({"NOPE.US": {"name": "x"}}, D,
                             {"enabled": True, "root": str(tmp_path / "nonexistent")})
     assert rows == []
+
+
+def test_export_applies_time_window(tmp_path):
+    """导出必须和分析一致：超窗旧帖不入 CSV。
+
+    2026-11-26 主人指出日报里出现 2022 年的帖；导出侧若不同步过滤，
+    知识库里会继续留着重闻，两条口径就对不上了。
+    """
+    root = _x_root(tmp_path, "PDD", 2, 0)
+    # 追加一条 8 年前的旧帖
+    f = root / D / "PDD.json"
+    data = json.loads(f.read_text(encoding="utf-8"))
+    data["posts"].append({
+        "tweet_id": "PDD-ancient", "url": "https://x.com/t/status/ancient",
+        "author": "@trader", "text": "2018 年的旧闻内容，足够长以避免最短长度过滤。",
+        "lang": "en", "slice": "top", "created_at_utc": "2018-07-16T02:00:00Z",
+        "metrics": {"like": 999, "reply": 99, "repost": 99},
+    })
+    f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    rows = ec.fetch_x_posts({"PDD.US": {"name": "拼多多"}}, D,
+                            {"enabled": True, "root": str(root), "keep_days": 7})
+    links = [r["link"] for r in rows]
+    assert not any("ancient" in l for l in links), "8 年前的帖不该进 CSV"
+    assert len(rows) == 2

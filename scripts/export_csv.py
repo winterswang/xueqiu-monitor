@@ -254,6 +254,9 @@ def fetch_x_posts(stocks_cfg: dict, date_str: str, x_cfg: dict) -> list[dict]:
         except Exception as e:  # noqa: BLE001 — 单只票读失败不该中断整轮导出
             logger.warning(f"  {code}: X 源读取失败，跳过: {type(e).__name__}: {e}")
             continue
+        # 时间窗必须在分层之前：导出与分析的口径必须一致，否则知识库里
+        # 会出现日报里已经被剔除的旧闻（2026-11-26 主人指出的 2022 年帖）。
+        posts = x_sources.window_posts(posts, x_cfg.get("keep_days", 7))
         for p in x_sources.layer_for_prompt(posts, cap):
             out.append({
                 "date": date_str,
