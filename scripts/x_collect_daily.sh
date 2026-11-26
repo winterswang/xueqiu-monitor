@@ -40,11 +40,14 @@ if [ -z "$TICKERS" ]; then
   TICKER_SRC="fallback"
   # 只写 stderr 不够：这是「失败被压成正常」的典型形态——上次 SPCX 就是这样
   # 静默漏了一个月。退到内置名单必须让宿主看见，收尾时按降级处理。
-  echo "[warn] 无法从 config.report.json 派生 TICKERS，退回内置名单（可能漏采）"
+  echo "[warn] 无法从 config.report.json 派生 TICKERS，退回内置名单（可能漏采）" >&2
 fi
 N_TICKERS=$(printf '%s' "$TICKERS" | tr ',' '\n' | grep -c . )
-echo "[x_collect_daily] 采集名单来源=$TICKER_SRC，共 $N_TICKERS 只"
+echo "[x_collect_daily] 采集名单来源=$TICKER_SRC，共 $N_TICKERS 只" >&2
 
+# ⚠️ 本行之前出现的任何 echo 都必须自己加 >&2。
+# 2026-11-26 事故：名单派生那两行日志写在 exec 之前，没加 >&2 → 混进真 stdout
+# → 宿主判 'script stdout must contain JSONL protocol frames only'，当天采集 64ms 即失败。
 # ── stdout 协议层：原 stdout 存 fd3，人读输出全部转 stderr ──
 exec 3>&1 1>&2
 
